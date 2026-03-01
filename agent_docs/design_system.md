@@ -1,23 +1,31 @@
-# Design System — Developer Precision
+# Design System — Deploy Purple
 
 ## Philosophy
 
-Monochrome + purple accent. Borders-only depth (no shadows). Mica/Acrylic backdrop. Every pixel intentional.
+Deploy Blue system adapted with acrylic blur and purple accent. Hard edges, structural borders, monospace display type, hard-offset shadows. Single accent (#4B0082). Micro-motion only.
 
 ## Color Tokens
 
 ```css
 :root {
-  --bg: transparent;
-  --bg-card: rgba(255,255,255,0.6);
+  --bg: transparent;                      /* Acrylic blur shows through */
+  --bg-surface: rgba(255, 255, 255, 0.72); /* Cards, panels, inputs */
+  --bg-hover: rgba(241, 243, 249, 0.80);   /* Interactive hover */
+  --bg-active: rgba(232, 235, 244, 0.85);  /* Pressed/active */
+  --bg-recessed: rgba(241, 243, 249, 0.50);/* Sunken areas */
+
+  --border: rgba(75, 0, 130, 0.12);        /* 2px solid everywhere */
+  --border-strong: rgba(75, 0, 130, 0.25); /* Focus rings, emphasis */
+
+  --fg: #0f152a;          /* Primary text */
+  --fg-secondary: #64708b; /* Body, descriptions */
+  --fg-muted: #94a0b8;    /* Labels, metadata */
+  --fg-faint: #b8c0d4;    /* Placeholders, disabled */
+
   --accent: #4B0082;
   --accent-hover: #5C1A9E;
-  --fg: #000000;
-  --fg-secondary: rgba(0,0,0,0.7);
-  --fg-muted: rgba(0,0,0,0.5);
-  --fg-faint: rgba(0,0,0,0.3);
-  --border: rgba(0,0,0,0.08);
-  --border-active: rgba(75,0,130,0.3);
+  --accent-subtle: rgba(75, 0, 130, 0.08);
+
   --danger: #DC2626;
   --success: #16A34A;
 }
@@ -26,78 +34,87 @@ Monochrome + purple accent. Borders-only depth (no shadows). Mica/Acrylic backdr
 ## Typography
 
 Three layers:
-1. **Display/Headers:** `Geist` — clean, technical feel
-2. **UI Chrome:** `Segoe UI Variable` — Windows native, invisible
-3. **Data/Debug:** `Cascadia Code` / `JetBrains Mono` — monospace
+1. **Display/Headers:** `DM Mono` — monospace character, 17px weight 500 for section headings
+2. **UI Chrome:** `Recursive` — variable sans, 13-14px for body/buttons/labels
+3. **Data/Debug:** `Cascadia Code` / `JetBrains Mono` — monospace, tabular-nums
 
 ## Spacing
 
 4px base grid:
 - 8px — within components
 - 12px — standard gap
-- 16px — section padding
-- 24px — between cards
+- 16px — card padding
+- 20px — between cards in content
+- 24-28px — content area padding
+
+## Borders
+
+All borders: `2px solid var(--border)`. No thin borders. Visible and structural.
+
+## Shadows
+
+Hard offset, zero blur:
+- Cards on hover: `2px 4px 0 0 rgba(75,0,130,0.12)`
+- Primary buttons: `2px 4px 0 0 #4a4a4a, 0 0 0 1px #4B0082`
+- Modals: `4px 8px 0 0 rgba(75,0,130,0.15), 0 0 0 2px var(--border)`
 
 ## Border Radius
 
-Sharp system: 4px cards, 4px inputs, 6px buttons.
+Sharp system: 4px base (--radius), 6px cards (--radius-md), 8px max (--radius-lg). Never rounder.
 
-## Depth
+## Motion
 
-Borders only. No box shadows. Cards: `border: 0.5px solid var(--border)`.
-Active/focused: `border-color: var(--border-active)`.
+- 150ms for hover states (--duration-fast)
+- 200ms for layout transitions (--duration)
+- Easing: cubic-bezier(0.25, 1, 0.5, 1)
+
+## Acrylic Backdrop
+
+Window-level acrylic blur via DWM API. Requires:
+- `WindowBuilder::with_transparent(true)`
+- `Config::with_background_color((0,0,0,0))`
+- `DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, 3)` (Acrylic)
+- CSS body background: transparent
 
 ## Components
 
 ### Card
-- Semi-transparent background over Mica: `var(--bg-card)`
-- 0.5px border, 4px radius
+- Semi-transparent background over acrylic: `var(--bg-surface)`
+- 2px border, 6px radius
 - 16px padding
-- Section title in header
+- Title in DM Mono 17px weight 500
+- Hover: hard offset shadow
 
-### Select (custom dropdown)
-- Not native `<select>` — custom styled
-- Border-only, 4px radius
-- Dropdown appears below with same card styling
-- Selected item shown with accent color
+### Buttons
+- 2px border, 4px radius, 8px 16px padding
+- Primary: accent fill, white text, hard shadow
+- Primary active: shadow removed, translate(1px, 2px) pressed effect
+
+### Select / Input
+- 2px border, 4px radius, 6px 12px padding
+- Focus: border-color: var(--accent)
+- Hover: border-color: var(--border-strong)
 
 ### Toggle
-- Pill shape, 20px height
-- Off: border-only, transparent
-- On: filled with `var(--accent)`
+- 2px border, pill shape
+- Active: accent fill
 
-### MaskedInput
-- For API keys — shows `••••••••` by default
-- [Show] button toggles visibility
-- Monospace font when visible
-
-### TagChip
-- For vocabulary terms
-- Pill shape, border-only
-- `✕` button to remove
-- Monospace font for term text
+### Tag Chips
+- 2px border, 4px radius
+- Monospace font, tabular-nums
 
 ## Custom Title Bar
 
-- 32px height
-- Left: "Beamer" in Geist font
-- Right: minimize (─) and close (✕) buttons
-- Close hover: `var(--danger)` background
-- Bottom border: `var(--border)`
-- Entire bar is drag region (except buttons)
+- 32px height, DM Mono title
+- 2px border-bottom
+- Close hover: danger red
 
 ## Overlay Window
 
-- 300x80px, bottom-center of screen
-- Semi-transparent dark background: `rgba(0,0,0,0.75)`
-- White monospace text
-- 8px border radius
-- No border
+- Dark glass (unchanged from previous design)
+- Monospace text, 8px radius
 
 ## Screen Edge Glow
 
-- Fullscreen transparent window
-- CSS: `box-shadow: inset 0 0 8px 3px var(--glow-color)`
-- Default glow color: `#4B0082` (purple)
-- Configurable via appearance settings
-- Click-through (doesn't intercept mouse events)
+- Purple glow: #4B0082 (unchanged)
+- Configurable via settings
