@@ -13,7 +13,7 @@ use crate::tray;
 use crate::ui::history::TranscriptionHistory;
 use crate::ui::history_page::HistoryPage;
 use crate::ui::home::HomePage;
-use crate::ui::icons::{IconClockCounterClockwise, IconGear, IconHouse};
+use crate::ui::icons::{IconClockCounterClockwise, IconGear, IconHouse, IconMinus, IconX};
 use crate::ui::settings::SettingsPage;
 use crate::ui::status_log::StatusLog;
 
@@ -158,7 +158,13 @@ pub fn App() -> Element {
         }
         div { class: "app-container",
             div { class: "titlebar",
-                span { class: "titlebar-title", "Beamer" }
+                img {
+                    class: "titlebar-icon",
+                    src: asset!("assets/icon.png"),
+                    alt: "Beamer",
+                    width: "20",
+                    height: "20",
+                }
                 div { class: "titlebar-controls",
                     button {
                         class: "titlebar-btn minimize",
@@ -166,7 +172,7 @@ pub fn App() -> Element {
                             let window = window.clone();
                             move |_| window.set_minimized(true)
                         },
-                        "\u{2500}"
+                        IconMinus { size: 14 }
                     }
                     button {
                         class: "titlebar-btn close",
@@ -174,7 +180,7 @@ pub fn App() -> Element {
                             let window = window.clone();
                             move |_| window.set_visible(false)
                         },
-                        "\u{2715}"
+                        IconX { size: 14 }
                     }
                 }
             }
