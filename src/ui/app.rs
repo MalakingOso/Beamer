@@ -1,7 +1,7 @@
 use dioxus::desktop::trayicon::{init_tray_icon, MouseButton, MouseButtonState, TrayIconEvent};
 use dioxus::desktop::{
-    use_global_shortcut, use_tray_icon_event_handler, use_tray_menu_event_handler, use_window,
-    HotKeyState,
+    use_tray_icon_event_handler, use_tray_menu_event_handler, use_window, HotKeyState,
+    ShortcutHandle,
 };
 use dioxus::prelude::*;
 use std::ffi::c_void;
@@ -82,33 +82,55 @@ pub fn App() -> Element {
         )
     });
 
-    // Register global hotkey via Dioxus's shortcut system
-    let cfg = config.read();
-    let hotkey_str = cfg.recording.hotkey.clone();
-    let is_toggle = cfg.recording.mode == "toggle";
-    drop(cfg);
+    // Register global hotkey — store handle so we can swap it on save
+    let window_for_shortcut = window.clone();
+    let mut shortcut_handle: Signal<Option<ShortcutHandle>> = use_signal(|| None);
 
-    let mut toggled = use_signal(|| false);
-    if let Err(e) = use_global_shortcut(hotkey_str.as_str(), move |state| {
-        if is_toggle {
-            if state == HotKeyState::Pressed {
-                let new_val = !*toggled.read();
-                toggled.set(new_val);
-                if new_val {
-                    coroutine.send(HotkeyEvent::RecordStart);
-                } else {
-                    coroutine.send(HotkeyEvent::RecordStop);
+    use_effect(move || {
+        let cfg = config.read();
+        let hotkey_str = cfg.recording.hotkey.clone();
+        let is_toggle = cfg.recording.mode == "toggle";
+        drop(cfg);
+
+        // Remove old shortcut if any
+        if let Some(old) = shortcut_handle.write().take() {
+            window_for_shortcut.remove_shortcut(old);
+        }
+
+        let hotkey = match hotkey_str.parse::<global_hotkey::hotkey::HotKey>() {
+            Ok(hk) => hk,
+            Err(e) => {
+                tracing::error!("Failed to parse hotkey '{}': {:?}", hotkey_str, e);
+                return;
+            }
+        };
+
+        let mut toggled = false;
+        match window_for_shortcut.create_shortcut(hotkey, move |state| {
+            if is_toggle {
+                if state == HotKeyState::Pressed {
+                    toggled = !toggled;
+                    if toggled {
+                        coroutine.send(HotkeyEvent::RecordStart);
+                    } else {
+                        coroutine.send(HotkeyEvent::RecordStop);
+                    }
+                }
+            } else {
+                match state {
+                    HotKeyState::Pressed => coroutine.send(HotkeyEvent::RecordStart),
+                    HotKeyState::Released => coroutine.send(HotkeyEvent::RecordStop),
                 }
             }
-        } else {
-            match state {
-                HotKeyState::Pressed => coroutine.send(HotkeyEvent::RecordStart),
-                HotKeyState::Released => coroutine.send(HotkeyEvent::RecordStop),
+        }) {
+            Ok(handle) => {
+                shortcut_handle.set(Some(handle));
+            }
+            Err(e) => {
+                tracing::error!("Failed to register hotkey '{}': {:?}", hotkey_str, e);
             }
         }
-    }) {
-        tracing::error!("Failed to register hotkey '{}': {:?}", hotkey_str, e);
-    }
+    });
 
     // Tray menu events (Settings / Quit)
     use_tray_menu_event_handler({
