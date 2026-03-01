@@ -54,24 +54,16 @@ pub struct AppearanceConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdvancedConfig {
-    #[serde(default = "default_vad_aggressiveness")]
-    pub vad_aggressiveness: u8,
-    #[serde(default = "default_silence_timeout")]
-    pub silence_timeout_ms: u32,
-    #[serde(default = "default_pre_buffer")]
-    pub pre_buffer_ms: u32,
 }
 
 fn default_hotkey() -> String { "Ctrl+Space".into() }
 fn default_mode() -> String { "hold".into() }
-fn default_backend() -> String { "elevenlabs_batch".into() }
+fn default_backend() -> String { "elevenlabs".into() }
 fn default_language() -> String { "en".into() }
 fn default_preferred_method() -> String { "auto".into() }
 fn default_glow_color() -> String { "#4B0082".into() }
 fn default_true() -> bool { true }
-fn default_vad_aggressiveness() -> u8 { 2 }
-fn default_silence_timeout() -> u32 { 600 }
-fn default_pre_buffer() -> u32 { 300 }
+
 
 impl Default for Config {
     fn default() -> Self {
@@ -124,11 +116,7 @@ impl Default for AppearanceConfig {
 
 impl Default for AdvancedConfig {
     fn default() -> Self {
-        Self {
-            vad_aggressiveness: default_vad_aggressiveness(),
-            silence_timeout_ms: default_silence_timeout(),
-            pre_buffer_ms: default_pre_buffer(),
-        }
+        Self {}
     }
 }
 

@@ -2,11 +2,11 @@ use anyhow::Result;
 use dioxus::prelude::*;
 use futures_util::StreamExt;
 
-use crate::audio::{AudioEvent, AudioPipeline};
+use crate::audio::AudioPipeline;
 use crate::config::Config;
 use crate::hotkey::HotkeyEvent;
 use crate::injection;
-use crate::transcription::{self, RealtimeSession, TranscriptEvent, TranscriptKind};
+use crate::transcription::{self, TranscriptKind};
 use crate::ui::history::TranscriptionHistory;
 use crate::ui::status_log::{log_status, LogLevel, StatusLog};
 
@@ -23,7 +23,6 @@ pub async fn run(
     tracing::info!("Orchestrator started, waiting for hotkey events");
     log_status(&mut status_log, LogLevel::Info, "Orchestrator ready");
 
-    // Main loop: wait for RecordStart events
     while let Some(event) = hotkey_rx.next().await {
         match event {
             HotkeyEvent::RecordStart => {
@@ -42,18 +41,16 @@ pub async fn run(
                     log_status(&mut status_log, LogLevel::Error, format!("Recording error: {}", e));
                     show_notification("Beamer", &format!("Recording error: {}", e));
                 }
-                // Ensure clean state after any recording session
                 is_recording.set(false);
                 overlay_text.set(String::new());
             }
-            HotkeyEvent::RecordStop => {
-                // Ignore stop events when not recording
-            }
+            HotkeyEvent::RecordStop => {}
         }
     }
 }
 
-/// Handle a single recording session from start to stop.
+/// Handle a single recording session, mirroring ws_test.rs flow:
+/// connect WS → start mic → stream all audio → on stop: commit + drain finals
 async fn handle_recording(
     config: &Signal<Config>,
     is_recording: &mut Signal<bool>,
@@ -64,22 +61,41 @@ async fn handle_recording(
     status_log: &mut Signal<StatusLog>,
 ) -> Result<()> {
     let cfg = config.read().clone();
-    let backend_name = &cfg.transcription.backend;
+    let backend = &cfg.transcription.backend;
     let language = &cfg.transcription.language;
+    let preferred_method = cfg.injection.preferred_method.clone();
 
-    // Load API key from keyring
-    let api_key = load_api_key("elevenlabs_api_key");
-
+    // Load API key for selected backend
+    let (key_name, display_name) = match backend.as_str() {
+        "voxtral" => ("mistral_api_key", "Voxtral"),
+        _ => ("elevenlabs_api_key", "ElevenLabs"),
+    };
+    let api_key = load_api_key(key_name);
     if api_key.is_empty() {
-        log_status(status_log, LogLevel::Error, "No API key configured — open Settings");
-        show_notification(
-            "Beamer",
-            "No API key configured. Open Settings to add one.",
-        );
+        log_status(status_log, LogLevel::Error, format!("No {} API key configured — open Settings", display_name));
+        show_notification("Beamer", &format!("No {} API key configured. Open Settings to add one.", display_name));
         return Ok(());
     }
 
-    // Create audio pipeline
+    // Connect WebSocket first
+    log_status(status_log, LogLevel::Info, format!("Connecting to {} realtime...", display_name));
+    let session_result = match backend.as_str() {
+        "voxtral" => transcription::start_voxtral_session(&api_key).await,
+        _ => transcription::start_elevenlabs_session(&api_key, language).await,
+    };
+    let mut session = match session_result {
+        Ok(s) => {
+            log_status(status_log, LogLevel::Info, "WebSocket connected");
+            s
+        }
+        Err(e) => {
+            log_status(status_log, LogLevel::Error, format!("Connection failed: {}", e));
+            show_notification("Beamer", &format!("Connection failed: {}", e));
+            return Err(e);
+        }
+    };
+
+    // Start mic capture (raw PCM, no VAD — like ws_test.rs)
     let pipeline = match AudioPipeline::new() {
         Ok(p) => p,
         Err(e) => {
@@ -88,175 +104,93 @@ async fn handle_recording(
             return Err(e);
         }
     };
+    let (_stream, mut audio_rx) = pipeline.start()?;
 
-    let (_stream, mut audio_rx) = pipeline.start(
-        cfg.advanced.vad_aggressiveness,
-        cfg.advanced.pre_buffer_ms,
-        cfg.advanced.silence_timeout_ms,
-    )?;
-    // _stream must stay alive — dropping it stops audio capture
-
-    // Create transcription backend
-    let backend = transcription::create_backend(backend_name, api_key);
-
-    // Check if backend supports realtime
-    let is_realtime = backend_name.contains("realtime");
-    let mut realtime_session: Option<RealtimeSession> = None;
-
-    if is_realtime {
-        log_status(status_log, LogLevel::Info, "Connecting to ElevenLabs realtime...");
-        match backend.start_realtime_session(language).await {
-            Ok(Some(session)) => {
-                log_status(status_log, LogLevel::Info, "WebSocket connected");
-                realtime_session = Some(session);
-            }
-            Ok(None) => {
-                log_status(status_log, LogLevel::Warn, "Backend doesn't support realtime, using batch");
-            }
-            Err(e) => {
-                log_status(
-                    status_log,
-                    LogLevel::Error,
-                    format!("Realtime connection failed: {}", e),
-                );
-                show_notification("Beamer", &format!("Realtime connection failed: {}", e));
-                return Err(e);
-            }
-        }
-    }
-
-    // We're recording
     is_recording.set(true);
     overlay_text.set("Listening...".to_string());
-    log_status(
-        status_log,
-        LogLevel::Info,
-        format!("Recording started ({})", backend_name),
-    );
+    log_status(status_log, LogLevel::Info, "Recording started");
 
-    // Load vocabulary for batch transcription
-    let vocab = crate::config::vocabulary::Vocabulary::load()
-        .map(|v| v.list().to_vec())
-        .unwrap_or_default();
-
-    let preferred_method = cfg.injection.preferred_method.clone();
-    let lang = language.to_string();
-
-    // Inner recording loop
+    // Main loop: forward audio + receive transcripts (mirrors ws_test.rs select! loop)
     loop {
         tokio::select! {
-            // Hotkey stop event
+            // Stop event
             hotkey_event = hotkey_rx.next() => {
                 match hotkey_event {
                     Some(HotkeyEvent::RecordStop) | None => {
-                        // Signal EOS to realtime session
-                        if let Some(ref session) = realtime_session {
-                            let _ = session.audio_tx.send(Vec::new());
-                            log_status(status_log, LogLevel::Info, "Sent commit, waiting for final transcript...");
+                        // Send commit (like ws_test.rs Ctrl+C handler)
+                        let _ = session.audio_tx.send(Vec::new());
+                        log_status(status_log, LogLevel::Info, "Sent commit, waiting for final transcript...");
+
+                        // Wait for final transcripts (ws_test.rs uses 1000ms)
+                        let deadline = tokio::time::Instant::now()
+                            + tokio::time::Duration::from_millis(2000);
+                        loop {
+                            tokio::select! {
+                                event = session.transcript_rx.recv() => {
+                                    match event {
+                                        Some(ev) => {
+                                            if let TranscriptKind::Final = ev.kind {
+                                                if !ev.text.trim().is_empty() {
+                                                    tracing::info!("[final] {}", ev.text);
+                                                    log_status(status_log, LogLevel::Info, format!("[final] {}", ev.text));
+                                                    do_injection(&ev.text, &preferred_method, last_injection, history, overlay_text, status_log).await;
+                                                }
+                                            }
+                                        }
+                                        None => break,
+                                    }
+                                }
+                                _ = tokio::time::sleep_until(deadline) => break,
+                            }
                         }
-                        // Drain any remaining transcript events
-                        if let Some(ref mut session) = realtime_session {
-                            drain_final_transcripts(
-                                session,
-                                &preferred_method,
-                                last_injection,
-                                history,
-                                overlay_text,
-                                status_log,
-                            ).await;
-                        }
+
                         log_status(status_log, LogLevel::Info, "Recording stopped");
                         break;
                     }
-                    Some(HotkeyEvent::RecordStart) => {
-                        // Ignore spurious start while already recording
-                    }
+                    Some(HotkeyEvent::RecordStart) => {}
                 }
             }
 
-            // Audio events from VAD pipeline
-            audio_event = audio_rx.recv() => {
-                match audio_event {
-                    Some(AudioEvent::SpeechStart) => {
-                        overlay_text.set("Listening...".to_string());
+            // Forward mic audio to WebSocket
+            chunk = audio_rx.recv() => {
+                match chunk {
+                    Some(bytes) if !bytes.is_empty() => {
+                        let _ = session.audio_tx.send(bytes);
                     }
-                    Some(AudioEvent::AudioChunk(chunk)) => {
-                        // Forward chunks to realtime session
-                        if let Some(ref session) = realtime_session {
-                            let _ = session.audio_tx.send(chunk);
-                        }
-                    }
-                    Some(AudioEvent::AudioReady(wav)) => {
-                        // Batch mode: transcribe complete utterance
-                        if realtime_session.is_none() {
-                            overlay_text.set("Processing...".to_string());
-                            log_status(status_log, LogLevel::Info, "Transcribing audio (batch)...");
-                            match backend.transcribe_batch(wav, &lang, &vocab).await {
-                                Ok(text) if !text.trim().is_empty() => {
-                                    log_status(status_log, LogLevel::Info, format!("[final] {}", text));
-                                    do_injection(
-                                        &text,
-                                        &preferred_method,
-                                        last_injection,
-                                        history,
-                                        overlay_text,
-                                        status_log,
-                                    ).await;
-                                }
-                                Ok(_) => {
-                                    overlay_text.set("(no speech detected)".to_string());
-                                    log_status(status_log, LogLevel::Info, "No speech detected");
-                                }
-                                Err(e) => {
-                                    tracing::error!("Transcription failed: {}", e);
-                                    log_status(status_log, LogLevel::Error, format!("Transcription failed: {}", e));
-                                    show_notification("Beamer", &format!("Transcription failed: {}", e));
-                                    overlay_text.set("Error".to_string());
-                                }
-                            }
-                        }
-                    }
-                    Some(AudioEvent::SpeechEnd) => {
-                        // Batch: already handled in AudioReady
-                        // Realtime: transcript events arrive via transcript_rx
-                    }
-                    None => {
-                        // Audio channel closed
+                    _ => {
                         log_status(status_log, LogLevel::Warn, "Audio channel closed");
                         break;
                     }
                 }
             }
 
-            // Realtime transcript events
-            transcript_event = recv_transcript(&mut realtime_session) => {
-                if let Some(event) = transcript_event {
-                    match event.kind {
+            // Receive transcript events
+            event = session.transcript_rx.recv() => {
+                if let Some(ev) = event {
+                    match ev.kind {
                         TranscriptKind::Final => {
-                            if !event.text.trim().is_empty() {
-                                log_status(status_log, LogLevel::Info, format!("[final] {}", event.text));
-                                do_injection(
-                                    &event.text,
-                                    &preferred_method,
-                                    last_injection,
-                                    history,
-                                    overlay_text,
-                                    status_log,
-                                ).await;
+                            if !ev.text.trim().is_empty() {
+                                tracing::info!("[final] {}", ev.text);
+                                log_status(status_log, LogLevel::Info, format!("[final] {}", ev.text));
+                                do_injection(&ev.text, &preferred_method, last_injection, history, overlay_text, status_log).await;
                             }
                         }
                         TranscriptKind::Partial => {
-                            if !event.text.is_empty() {
-                                overlay_text.set(event.text);
+                            if !ev.text.is_empty() {
+                                tracing::debug!("[partial] {}", ev.text);
+                                overlay_text.set(ev.text);
                             }
                         }
                         TranscriptKind::SessionStarted(ref sid) => {
+                            tracing::info!("[session] started: {}", sid);
                             log_status(status_log, LogLevel::Info, format!("Session started: {}", sid));
                         }
                         TranscriptKind::Error(ref msg) => {
-                            log_status(status_log, LogLevel::Error, format!("ElevenLabs: {}", msg));
+                            tracing::error!("[error] {}", msg);
+                            log_status(status_log, LogLevel::Error, format!("Transcription error: {}", msg));
                         }
                         TranscriptKind::Info(ref msg) => {
+                            tracing::info!("[info] {}", msg);
                             log_status(status_log, LogLevel::Info, msg.clone());
                         }
                     }
@@ -268,7 +202,7 @@ async fn handle_recording(
     Ok(())
 }
 
-/// Inject transcribed text into the focused window and update state.
+/// Inject transcribed text into the focused window.
 async fn do_injection(
     text: &str,
     preferred_method: &str,
@@ -294,48 +228,6 @@ async fn do_injection(
     }
 
     history.write().append(text.to_string());
-}
-
-/// Drain any remaining final transcript events after signaling EOS.
-async fn drain_final_transcripts(
-    session: &mut RealtimeSession,
-    preferred_method: &str,
-    last_injection: &mut Signal<String>,
-    history: &mut Signal<TranscriptionHistory>,
-    overlay_text: &mut Signal<String>,
-    status_log: &mut Signal<StatusLog>,
-) {
-    // Give the server a moment to send final transcripts
-    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(500);
-    loop {
-        tokio::select! {
-            event = session.transcript_rx.recv() => {
-                match event {
-                    Some(ev) => {
-                        match ev.kind {
-                            TranscriptKind::Final if !ev.text.trim().is_empty() => {
-                                log_status(status_log, LogLevel::Info, format!("[final] {}", ev.text));
-                                do_injection(&ev.text, preferred_method, last_injection, history, overlay_text, status_log).await;
-                            }
-                            _ => {}
-                        }
-                    }
-                    None => break,
-                }
-            }
-            _ = tokio::time::sleep_until(deadline) => {
-                break;
-            }
-        }
-    }
-}
-
-/// Async helper for select!: receives from realtime session or pends forever if none.
-async fn recv_transcript(session: &mut Option<RealtimeSession>) -> Option<TranscriptEvent> {
-    match session {
-        Some(ref mut s) => s.transcript_rx.recv().await,
-        None => std::future::pending().await,
-    }
 }
 
 /// Load an API key from Windows Credential Manager.

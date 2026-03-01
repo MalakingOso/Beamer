@@ -33,6 +33,7 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
             .unwrap_or_default()
     });
     let mut elevenlabs_key = use_signal(|| load_api_key("elevenlabs_api_key"));
+    let mut mistral_key = use_signal(|| load_api_key("mistral_api_key"));
 
     rsx! {
         div { class: "content",
@@ -46,10 +47,10 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
 
             TranscriptionCard {
                 backend: config.read().transcription.backend.clone(),
-                language: config.read().transcription.language.clone(),
-                on_backend_change: move |backend: String| {
-                    config.write().transcription.backend = backend;
+                on_backend_change: move |b: String| {
+                    config.write().transcription.backend = b;
                 },
+                language: config.read().transcription.language.clone(),
                 on_language_change: move |lang: String| {
                     config.write().transcription.language = lang;
                 },
@@ -59,6 +60,10 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                 elevenlabs_key: elevenlabs_key.read().clone(),
                 on_elevenlabs_change: move |key: String| {
                     elevenlabs_key.set(key);
+                },
+                mistral_key: mistral_key.read().clone(),
+                on_mistral_change: move |key: String| {
+                    mistral_key.set(key);
                 },
             }
 
@@ -104,6 +109,7 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                         }
                         // Save API keys
                         save_api_key("elevenlabs_api_key", &elevenlabs_key.read());
+                        save_api_key("mistral_api_key", &mistral_key.read());
                         // Save vocabulary
                         if let Ok(mut vocab) = crate::config::vocabulary::Vocabulary::load() {
                             // Clear and re-add all terms

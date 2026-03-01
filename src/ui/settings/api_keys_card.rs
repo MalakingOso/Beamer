@@ -6,6 +6,8 @@ use crate::ui::components::{Card, MaskedInput};
 pub struct ApiKeysCardProps {
     elevenlabs_key: String,
     on_elevenlabs_change: EventHandler<String>,
+    mistral_key: String,
+    on_mistral_change: EventHandler<String>,
 }
 
 #[component]
@@ -17,6 +19,13 @@ pub fn ApiKeysCard(props: ApiKeysCardProps) -> Element {
                 MaskedInput {
                     value: props.elevenlabs_key.clone(),
                     onchange: move |v: String| props.on_elevenlabs_change.call(v),
+                }
+            }
+            div { class: "card-row",
+                span { class: "card-label", "Mistral" }
+                MaskedInput {
+                    value: props.mistral_key.clone(),
+                    onchange: move |v: String| props.on_mistral_change.call(v),
                 }
             }
         }
