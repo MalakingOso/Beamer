@@ -228,6 +228,27 @@ body {
   gap: 20px;
 }
 
+/* ===== Home Header ===== */
+.home-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.home-header-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-md);
+}
+
+.home-header-title {
+  font-family: "DM Mono", "Cascadia Code", monospace;
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--fg);
+  letter-spacing: -0.01em;
+}
+
 /* ===== Scrollbar ===== */
 .content::-webkit-scrollbar {
   width: 6px;

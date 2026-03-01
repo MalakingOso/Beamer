@@ -25,6 +25,15 @@ pub fn HomePage(props: HomePageProps) -> Element {
 
     rsx! {
         div { class: "content",
+            div { class: "home-header",
+                img {
+                    class: "home-header-icon",
+                    src: asset!("assets/icon.png"),
+                    alt: "Beamer",
+                }
+                h1 { class: "home-header-title", "Beamer" }
+            }
+
             Card { title: "Status".to_string(),
                 div { class: "card-row",
                     div { style: "display: flex; align-items: center; gap: 8px;",
@@ -46,23 +55,6 @@ pub fn HomePage(props: HomePageProps) -> Element {
             }
 
             Card { title: "Quick Settings".to_string(),
-                div { class: "quick-settings-row",
-                    span { class: "card-label", "Backend" }
-                    Select {
-                        value: props.config.read().transcription.backend.clone(),
-                        options: vec![
-                            ("elevenlabs_realtime".to_string(), "ElevenLabs Realtime".to_string()),
-                            ("elevenlabs_batch".to_string(), "ElevenLabs Batch".to_string()),
-                        ],
-                        onchange: {
-                            let mut config = props.config;
-                            move |backend: String| {
-                                config.write().transcription.backend = backend;
-                                let _ = config.read().save();
-                            }
-                        },
-                    }
-                }
                 div { class: "quick-settings-row",
                     span { class: "card-label", "Language" }
                     Select {
