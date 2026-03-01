@@ -40,6 +40,9 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
             RecordingCard {
                 hotkey: config.read().recording.hotkey.clone(),
                 mode: config.read().recording.mode.clone(),
+                on_hotkey_change: move |hotkey: String| {
+                    config.write().recording.hotkey = hotkey;
+                },
                 on_mode_change: move |mode: String| {
                     config.write().recording.mode = mode;
                 },
