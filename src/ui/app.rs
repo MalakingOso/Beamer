@@ -4,6 +4,7 @@ use dioxus::desktop::{
     HotKeyState,
 };
 use dioxus::prelude::*;
+use std::ffi::c_void;
 
 use crate::config::Config;
 use crate::hotkey::HotkeyEvent;
@@ -33,6 +34,26 @@ pub fn App() -> Element {
     });
 
     let window = use_window();
+
+    // Enable acrylic system backdrop via DWM
+    use_hook({
+        let window = window.clone();
+        move || {
+            use dioxus::desktop::tao::platform::windows::WindowExtWindows;
+            use windows::Win32::Foundation::HWND;
+            use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_SYSTEMBACKDROP_TYPE};
+            let hwnd_raw = window.hwnd() as isize;
+            unsafe {
+                let backdrop_type: i32 = 3; // DWMSBT_TRANSIENTWINDOW = Acrylic
+                let _ = DwmSetWindowAttribute(
+                    HWND(hwnd_raw as *mut c_void),
+                    DWMWA_SYSTEMBACKDROP_TYPE,
+                    &backdrop_type as *const i32 as *const c_void,
+                    std::mem::size_of::<i32>() as u32,
+                );
+            }
+        }
+    });
 
     let mut current_page = use_signal(|| Page::Home);
     let is_recording = use_signal(|| false);

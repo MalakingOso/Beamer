@@ -21,8 +21,10 @@ pub fn launch_app() {
                         .with_title("Beamer")
                         .with_visible(false)
                         .with_decorations(false)
+                        .with_transparent(true)
                         .with_inner_size(dioxus::desktop::LogicalSize::new(500.0_f64, 600.0_f64)),
                 )
+                .with_background_color((0, 0, 0, 0))
                 .with_close_behaviour(WindowCloseBehaviour::WindowHides)
                 .with_exits_when_last_window_closes(false),
         )
