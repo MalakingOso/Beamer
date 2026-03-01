@@ -5,6 +5,7 @@ mod config;
 mod hotkey;
 mod injection;
 mod orchestrator;
+mod sounds;
 mod tray;
 mod transcription;
 mod ui;

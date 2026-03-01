@@ -109,6 +109,7 @@ async fn handle_recording(
     is_recording.set(true);
     overlay_text.set("Listening...".to_string());
     log_status(status_log, LogLevel::Info, "Recording started");
+    crate::sounds::play_start_sound();
 
     // Main loop: forward audio + receive transcripts (mirrors ws_test.rs select! loop)
     loop {
@@ -117,6 +118,7 @@ async fn handle_recording(
             hotkey_event = hotkey_rx.next() => {
                 match hotkey_event {
                     Some(HotkeyEvent::RecordStop) | None => {
+                        crate::sounds::play_stop_sound();
                         // Send commit (like ws_test.rs Ctrl+C handler)
                         let _ = session.audio_tx.send(Vec::new());
                         log_status(status_log, LogLevel::Info, "Sent commit, waiting for final transcript...");
