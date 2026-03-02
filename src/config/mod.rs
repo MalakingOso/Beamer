@@ -4,6 +4,8 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Top-level application configuration. Serialized as TOML to `%APPDATA%/Beamer/config.toml`.
+/// Missing fields fall back to serde defaults — the file is created on first launch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
@@ -36,6 +38,7 @@ pub struct TranscriptionConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InjectionConfig {
+    /// "auto" | "uia" | "sendinput" | "clipboard" — selects the text injection strategy
     #[serde(default = "default_preferred_method")]
     pub preferred_method: String,
     #[serde(default)]

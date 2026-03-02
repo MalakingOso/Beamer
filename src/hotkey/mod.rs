@@ -3,12 +3,16 @@ use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use tokio::sync::mpsc;
 
+/// Sent from the hotkey listener thread to the orchestrator coroutine.
 #[derive(Debug, Clone)]
 pub enum HotkeyEvent {
     RecordStart,
     RecordStop,
 }
 
+/// Registers a system-wide hotkey and translates press/release events into
+/// `HotkeyEvent`s. The underlying `global-hotkey` crate uses a dedicated
+/// message pump thread, so the listener runs independently of the Dioxus runtime.
 pub struct HotkeyHandler {
     manager: GlobalHotKeyManager,
     hotkey_id: u32,
@@ -35,8 +39,8 @@ impl HotkeyHandler {
         })
     }
 
-    /// Start listening for hotkey events. Returns a receiver.
-    /// `mode` should be "hold" or "toggle".
+    /// Spawn the hotkey listener. In "hold" mode, Pressed → RecordStart and
+    /// Released → RecordStop. In "toggle" mode, each press alternates state.
     pub fn start_listening(&self, mode: &str) -> mpsc::UnboundedReceiver<HotkeyEvent> {
         let (tx, rx) = mpsc::unbounded_channel();
         let hotkey_id = self.hotkey_id;
@@ -63,7 +67,6 @@ impl HotkeyHandler {
                             let _ = tx.send(ev);
                         }
                     } else {
-                        // Hold mode
                         match event.state() {
                             HotKeyState::Pressed => {
                                 let _ = tx.send(HotkeyEvent::RecordStart);
@@ -80,8 +83,8 @@ impl HotkeyHandler {
         rx
     }
 
+    /// Swap the registered hotkey at runtime (called when settings are saved).
     pub fn update_hotkey(&mut self, hotkey_str: &str) -> Result<()> {
-        // Unregister old, register new
         if let Ok(old) = parse_hotkey(&self.current_hotkey_str) {
             let _ = self.manager.unregister(old);
         }
@@ -95,6 +98,8 @@ impl HotkeyHandler {
     }
 }
 
+/// Parse a hotkey string like "Ctrl+Shift+Space" into a `HotKey`.
+/// Format: modifier(s) + key, joined by "+". Modifiers: Ctrl, Alt, Shift, Win/Super/Meta.
 fn parse_hotkey(s: &str) -> Result<HotKey> {
     let parts: Vec<&str> = s.split('+').map(|p| p.trim()).collect();
     let mut modifiers = Modifiers::empty();

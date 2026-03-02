@@ -13,7 +13,12 @@ pub struct UiaResult {
     pub target_info: String,
 }
 
-/// Try to inject text using UI Automation SetValue pattern
+/// Attempt text injection via the UI Automation `IValueProvider::SetValue` pattern.
+/// This is the preferred method because it integrates with the accessibility tree,
+/// supports undo, and works with most native Win32 and WPF text controls.
+///
+/// COM is initialized and torn down per call because this runs on a
+/// `spawn_blocking` thread that may be recycled by the tokio thread pool.
 pub fn try_inject_set_value(text: &str) -> Result<UiaResult> {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED).ok();
@@ -44,7 +49,6 @@ unsafe fn try_set_value_inner(text: &str) -> Result<UiaResult> {
         .unwrap_or_default();
     let target_info = format!("name={}, class={}", name, class);
 
-    // Try IValueProvider::SetValue
     let pattern_result = focused.GetCurrentPattern(UIA_ValuePatternId);
     if let Ok(pattern) = pattern_result {
         let value_pattern: std::result::Result<IUIAutomationValuePattern, _> = pattern.cast();

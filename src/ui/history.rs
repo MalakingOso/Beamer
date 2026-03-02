@@ -12,6 +12,8 @@ pub struct HistoryEntry {
     pub text: String,
 }
 
+/// Append-only transcription log persisted as JSON in `%APPDATA%/Beamer/history.json`.
+/// Loaded on startup, appended after each successful injection.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TranscriptionHistory {
     pub entries: Vec<HistoryEntry>,

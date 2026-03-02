@@ -13,7 +13,6 @@ mod ui;
 use anyhow::Result;
 
 fn main() {
-    // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -23,27 +22,26 @@ fn main() {
 
     tracing::info!("Beamer starting...");
 
-    // Single-instance check
     if !ensure_single_instance() {
         tracing::warn!("Another instance of Beamer is already running");
         return;
     }
 
-    // Load config
     let config = config::Config::load().unwrap_or_default();
     tracing::info!("Config loaded from {:?}", config::Config::config_path());
 
-    // Handle auto-start registry
     if config.appearance.auto_start {
         if let Err(e) = set_auto_start(true) {
             tracing::warn!("Failed to set auto-start: {}", e);
         }
     }
 
-    // Launch Dioxus desktop app (blocks main thread)
+    // Dioxus owns the main thread and tokio runtime — nothing runs after this
     ui::launch_app();
 }
 
+/// Prevent multiple Beamer instances via a named kernel mutex.
+/// Returns false if another instance already holds the mutex.
 fn ensure_single_instance() -> bool {
     use windows::Win32::System::Threading::CreateMutexW;
     use windows::core::w;
@@ -52,7 +50,6 @@ fn ensure_single_instance() -> bool {
         let result = CreateMutexW(None, true, w!("Beamer_SingleInstance"));
         match result {
             Ok(_) => {
-                // Check if mutex already existed
                 let last_error = windows::Win32::Foundation::GetLastError();
                 last_error != windows::Win32::Foundation::ERROR_ALREADY_EXISTS
             }
@@ -61,6 +58,7 @@ fn ensure_single_instance() -> bool {
     }
 }
 
+/// Add or remove Beamer from the Windows Run registry key (HKCU\...\Run).
 fn set_auto_start(enable: bool) -> Result<()> {
     use std::process::Command;
 

@@ -4,27 +4,25 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_TYPE, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
 };
 
-/// Inject text via clipboard paste (Ctrl+V)
-/// Saves and restores the previous clipboard contents
+/// Last-resort injection: sets clipboard text, sends Ctrl+V, then restores
+/// the previous clipboard contents. Works universally but briefly clobbers
+/// the user's clipboard and relies on timing heuristics.
 pub fn inject_via_clipboard(text: &str) -> Result<bool> {
     let mut clipboard = Clipboard::new()?;
 
-    // Save current clipboard
     let saved = clipboard.get_text().ok();
-
-    // Set our text
     clipboard.set_text(text)?;
 
-    // Small delay to ensure clipboard is ready
+    // Win32 clipboard updates are async — without a delay, SendInput can
+    // paste stale content on slower machines
     std::thread::sleep(std::time::Duration::from_millis(50));
 
-    // Simulate Ctrl+V
     send_ctrl_v();
 
-    // Wait for paste to complete
+    // Give the target app time to process the Ctrl+V before we overwrite
+    // the clipboard with the restored content
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    // Restore clipboard
     if let Some(saved_text) = saved {
         let _ = clipboard.set_text(saved_text);
     }

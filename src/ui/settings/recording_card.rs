@@ -29,13 +29,12 @@ pub fn RecordingCard(props: RecordingCardProps) -> Element {
 
                         let key = e.key();
 
-                        // Escape cancels
                         if key == Key::Escape {
                             listening.set(false);
                             return;
                         }
 
-                        // Ignore bare modifier presses
+                        // Wait for a non-modifier key to complete the combo
                         if matches!(key, Key::Control | Key::Shift | Key::Alt | Key::Meta) {
                             return;
                         }

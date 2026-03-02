@@ -1,6 +1,9 @@
 use anyhow::Result;
 use std::path::PathBuf;
 
+/// Custom vocabulary terms sent to STT backends to improve recognition of
+/// domain-specific words (product names, jargon, etc.). Stored as one term
+/// per line in `%APPDATA%/Beamer/vocabulary.txt`.
 pub struct Vocabulary {
     terms: Vec<String>,
     path: PathBuf,

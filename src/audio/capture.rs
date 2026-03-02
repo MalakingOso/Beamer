@@ -4,6 +4,8 @@ use cpal::{Device, SampleRate, Stream, StreamConfig};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+/// Wraps cpal device setup and provides a mono 16 kHz f32 sample stream.
+/// Resamples from the device's native rate when it differs from 16 kHz.
 pub struct AudioCapture {
     device: Device,
     config: StreamConfig,
@@ -24,6 +26,7 @@ impl AudioCapture {
             supported.channels()
         );
 
+        // 16 kHz mono — the format both ElevenLabs and Voxtral expect
         let config = StreamConfig {
             channels: 1,
             sample_rate: SampleRate(16000),
@@ -38,7 +41,8 @@ impl AudioCapture {
         supported.sample_rate().0
     }
 
-    /// Start capturing audio. Returns a stream handle (must be kept alive) and a receiver of f32 samples.
+    /// Start capturing audio. The returned `Stream` must be kept alive for the
+    /// duration of capture — dropping it stops the audio device.
     pub fn start(&self) -> Result<(Stream, mpsc::UnboundedReceiver<Vec<f32>>)> {
         let (tx, rx) = mpsc::unbounded_channel::<Vec<f32>>();
         let err_tx = tx.clone();
@@ -52,7 +56,8 @@ impl AudioCapture {
         let config = if native_rate == 16000 && native_channels == 1 {
             self.config.clone()
         } else {
-            // Use native config and resample in callback
+            // Device can't capture at 16 kHz directly — capture at native
+            // rate/channels and resample + downmix in the callback
             StreamConfig {
                 channels: native_channels as u16,
                 sample_rate: SampleRate(native_rate),
@@ -77,7 +82,6 @@ impl AudioCapture {
             &config,
             move |data: &[f32], _info: &cpal::InputCallbackInfo| {
                 let mut samples: Vec<f32> = if needs_downmix {
-                    // Downmix to mono by averaging channels
                     data.chunks(native_channels)
                         .map(|frame| frame.iter().sum::<f32>() / native_channels as f32)
                         .collect()
@@ -108,7 +112,9 @@ struct ResampleState {
     last_sample: f32,
 }
 
-/// Simple linear interpolation resampler
+/// Linear interpolation resampler. Lower quality than polyphase/sinc but
+/// sufficient for speech audio and adds negligible latency per buffer.
+/// State is persisted across callbacks to avoid discontinuities at buffer edges.
 fn resample_linear(
     input: &[f32],
     ratio: f64,

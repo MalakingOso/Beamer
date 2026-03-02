@@ -1,6 +1,7 @@
 use dioxus::desktop::trayicon::menu::{Menu, MenuItem, PredefinedMenuItem};
 use dioxus::desktop::trayicon::Icon;
 
+/// Menu item IDs used to match events in the tray menu handler.
 #[derive(Clone)]
 pub struct TrayMenuItems {
     pub settings: MenuItem,

@@ -4,14 +4,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VIRTUAL_KEY,
 };
 
-/// Inject text via Win32 SendInput with Unicode key events
+/// Inject text by synthesizing Unicode keyboard events via `SendInput`.
+/// Each UTF-16 code unit gets a key-down + key-up pair with `KEYEVENTF_UNICODE`,
+/// which bypasses keyboard layout mapping and works for any Unicode character.
 pub fn inject_via_sendinput(text: &str) -> Result<bool> {
     let mut inputs: Vec<INPUT> = Vec::new();
 
     for ch in text.encode_utf16() {
-        // Key down
         inputs.push(make_unicode_input(ch, false));
-        // Key up
         inputs.push(make_unicode_input(ch, true));
     }
 

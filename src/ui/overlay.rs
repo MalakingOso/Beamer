@@ -14,7 +14,8 @@ pub fn Overlay(props: OverlayProps) -> Element {
     }
 }
 
-/// Standalone app component for the overlay window. Reads text from context.
+/// Root component for the standalone overlay window. Receives live transcription
+/// text via a shared `Signal<String>` context provided by the main app.
 #[component]
 pub fn OverlayApp() -> Element {
     let overlay_text: Signal<String> = use_context();

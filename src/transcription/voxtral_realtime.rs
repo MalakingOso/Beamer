@@ -7,7 +7,9 @@ use tungstenite::Message;
 
 use super::{RealtimeSession, TranscriptEvent, TranscriptKind};
 
-/// Connect to Voxtral realtime STT and return a session handle.
+/// Open a WebSocket to the Mistral Voxtral Mini realtime transcription endpoint.
+/// Requires an initial `session.update` message to configure audio format (pcm_s16le @ 16 kHz).
+/// Language is auto-detected by the model.
 pub async fn start_realtime_session(api_key: &str) -> Result<RealtimeSession> {
     let url = "wss://api.mistral.ai/v1/audio/transcriptions/realtime\
                ?model=voxtral-mini-transcribe-realtime-2602";
@@ -32,7 +34,7 @@ pub async fn start_realtime_session(api_key: &str) -> Result<RealtimeSession> {
 
     let (mut write, mut read) = ws_stream.split();
 
-    // Configure audio format
+    // Voxtral requires explicit audio format declaration before streaming
     let session_config = serde_json::json!({
         "type": "session.update",
         "session": {
@@ -50,12 +52,12 @@ pub async fn start_realtime_session(api_key: &str) -> Result<RealtimeSession> {
     let (audio_tx, mut audio_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let (transcript_tx, transcript_rx) = mpsc::unbounded_channel::<TranscriptEvent>();
 
-    // Send task: forward audio chunks as base64 JSON
+    // Audio sender: encodes PCM → base64 JSON and streams to the WebSocket
     tokio::spawn(async move {
         let engine = base64::engine::general_purpose::STANDARD;
         while let Some(chunk) = audio_rx.recv().await {
             if chunk.is_empty() {
-                // Empty chunk = end signal
+                // Convention: empty Vec signals end-of-audio
                 let msg = serde_json::json!({"type": "input_audio.end"});
                 let _ = write.send(Message::Text(msg.to_string().into())).await;
                 continue;
@@ -75,7 +77,7 @@ pub async fn start_realtime_session(api_key: &str) -> Result<RealtimeSession> {
         let _ = write.close().await;
     });
 
-    // Receive task: parse transcript messages from server
+    // Transcript receiver: parses JSON messages into TranscriptEvents
     tokio::spawn(async move {
         while let Some(Ok(msg)) = read.next().await {
             if let Message::Text(text) = msg {

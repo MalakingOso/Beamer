@@ -10,12 +10,14 @@ pub struct InjectionResult {
     pub target_info: String,
 }
 
-/// Apps where SendInput with KEYEVENTF_UNICODE silently fails because they
-/// use custom input pipelines that don't consume synthetic Unicode events.
+/// Apps whose custom input pipelines silently drop synthetic Unicode events,
+/// making SendInput ineffective. These skip straight to clipboard injection.
 const SKIP_SENDINPUT_PROCESSES: &[&str] = &["warp.exe"];
 
-/// Inject text using the fallback chain: UIA SetValue → SendInput → Clipboard
-/// All Win32/COM calls run on a blocking thread.
+/// Inject text into the focused window. Runs the entire Win32/COM fallback chain
+/// on a blocking thread (required because UIA and SendInput are synchronous COM calls).
+///
+/// Fallback order: UIA SetValue → SendInput → Clipboard paste.
 pub async fn inject_text(text: &str, preferred: &str) -> Result<InjectionResult> {
     let text = text.to_string();
     let preferred = preferred.to_string();
@@ -25,12 +27,11 @@ pub async fn inject_text(text: &str, preferred: &str) -> Result<InjectionResult>
 }
 
 fn inject_text_blocking(text: &str, preferred: &str) -> Result<InjectionResult> {
-    // If a specific method is preferred, try it first
     match preferred {
         "uia" => return try_uia(text),
         "sendinput" => return try_sendinput(text),
         "clipboard" => return try_clipboard(text),
-        _ => {} // "auto" — use fallback chain
+        _ => {} // "auto" — run the full fallback chain below
     }
 
     let process_name = get_foreground_process_name().unwrap_or_default();
@@ -45,8 +46,7 @@ fn inject_text_blocking(text: &str, preferred: &str) -> Result<InjectionResult> 
         );
     }
 
-    // Fallback chain
-    // 1. Try UIA SetValue
+    // 1. UIA SetValue — highest fidelity: preserves undo, respects accessibility tree
     match try_uia(text) {
         Ok(result) => {
             tracing::info!("Injection succeeded via {}: {}", result.method, result.target_info);
@@ -55,7 +55,7 @@ fn inject_text_blocking(text: &str, preferred: &str) -> Result<InjectionResult> 
         Err(e) => tracing::debug!("UIA failed: {}", e),
     }
 
-    // 2. Try SendInput (skip for apps with custom input pipelines)
+    // 2. SendInput Unicode events — works with most standard text fields
     if !skip_sendinput {
         match try_sendinput(text) {
             Ok(result) => {
@@ -66,13 +66,14 @@ fn inject_text_blocking(text: &str, preferred: &str) -> Result<InjectionResult> 
         }
     }
 
-    // 3. Clipboard fallback
+    // 3. Clipboard Ctrl+V — universal fallback, but clobbers user clipboard briefly
     let result = try_clipboard(text)?;
     tracing::info!("Injection succeeded via {}: {}", result.method, result.target_info);
     Ok(result)
 }
 
 /// Get the executable name (e.g. "warp.exe") of the foreground window's process.
+/// Used to apply per-app injection workarounds via `SKIP_SENDINPUT_PROCESSES`.
 fn get_foreground_process_name() -> Option<String> {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{

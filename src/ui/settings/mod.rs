@@ -110,12 +110,10 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                         if let Err(e) = cfg.save() {
                             tracing::error!("Failed to save config: {}", e);
                         }
-                        // Save API keys
                         save_api_key("elevenlabs_api_key", &elevenlabs_key.read());
                         save_api_key("mistral_api_key", &mistral_key.read());
-                        // Save vocabulary
+                        // Vocabulary uses a separate file — reload, diff, and persist
                         if let Ok(mut vocab) = crate::config::vocabulary::Vocabulary::load() {
-                            // Clear and re-add all terms
                             let current = vocab.list().to_vec();
                             for term in &current {
                                 let _ = vocab.remove(term);
@@ -133,12 +131,14 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
     }
 }
 
+/// Read an API key from Windows Credential Manager (keyring crate, service "beamer").
 fn load_api_key(name: &str) -> String {
     keyring::Entry::new("beamer", name)
         .and_then(|e| e.get_password())
         .unwrap_or_default()
 }
 
+/// Write or delete an API key in Windows Credential Manager.
 fn save_api_key(name: &str, value: &str) {
     if value.is_empty() {
         if let Ok(entry) = keyring::Entry::new("beamer", name) {

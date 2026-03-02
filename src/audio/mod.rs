@@ -17,11 +17,14 @@ impl AudioPipeline {
         })
     }
 
-    /// Start capturing audio. Returns i16 LE PCM byte chunks continuously.
+    /// Start capturing audio. Returns 16-bit LE PCM byte chunks suitable for
+    /// streaming directly to transcription WebSocket backends.
     pub fn start(&self) -> Result<(Stream, mpsc::UnboundedReceiver<Vec<u8>>)> {
         let (stream, mut sample_rx) = self.capture.start()?;
         let (tx, rx) = mpsc::unbounded_channel();
 
+        // Conversion runs on a dedicated thread because cpal callbacks are
+        // real-time sensitive and must not block on async channel operations
         let rt = tokio::runtime::Handle::current();
         std::thread::spawn(move || {
             loop {
@@ -34,7 +37,7 @@ impl AudioPipeline {
                     continue;
                 }
 
-                // f32 → i16 little-endian PCM bytes (same as ws_test.rs)
+                // f32 [-1.0, 1.0] → i16 little-endian PCM bytes
                 let bytes: Vec<u8> = samples
                     .iter()
                     .flat_map(|&s| {

@@ -16,7 +16,8 @@ pub struct StatusEntry {
 
 const MAX_ENTRIES: usize = 50;
 
-/// A capped log of status entries for display in the UI.
+/// Ring-buffer-style log shown in the Debug card. Oldest entries are evicted
+/// when the buffer exceeds `MAX_ENTRIES`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StatusLog {
     pub entries: Vec<StatusEntry>,

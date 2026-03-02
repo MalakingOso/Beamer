@@ -10,7 +10,8 @@ use crate::transcription::{self, TranscriptKind};
 use crate::ui::history::TranscriptionHistory;
 use crate::ui::status_log::{log_status, LogLevel, StatusLog};
 
-/// Central orchestration loop. Spawned as a Dioxus coroutine from App.
+/// Central orchestration loop: hotkey events → audio capture → transcription → text injection.
+/// Runs as a Dioxus coroutine, receiving `HotkeyEvent`s and driving recording sessions.
 pub async fn run(
     mut hotkey_rx: UnboundedReceiver<HotkeyEvent>,
     config: Signal<Config>,
@@ -49,8 +50,8 @@ pub async fn run(
     }
 }
 
-/// Handle a single recording session, mirroring ws_test.rs flow:
-/// connect WS → start mic → stream all audio → on stop: commit + drain finals
+/// Drive one recording session: connect WebSocket → capture mic → stream audio → inject text.
+/// On stop, sends a commit signal and drains final transcripts before returning.
 async fn handle_recording(
     config: &Signal<Config>,
     is_recording: &mut Signal<bool>,
@@ -65,7 +66,6 @@ async fn handle_recording(
     let language = &cfg.transcription.language;
     let preferred_method = cfg.injection.preferred_method.clone();
 
-    // Load API key for selected backend
     let (key_name, display_name) = match backend.as_str() {
         "voxtral" => ("mistral_api_key", "Voxtral"),
         _ => ("elevenlabs_api_key", "ElevenLabs"),
@@ -77,7 +77,6 @@ async fn handle_recording(
         return Ok(());
     }
 
-    // Connect WebSocket first
     log_status(status_log, LogLevel::Info, format!("Connecting to {} realtime...", display_name));
     let session_result = match backend.as_str() {
         "voxtral" => transcription::start_voxtral_session(&api_key).await,
@@ -95,7 +94,7 @@ async fn handle_recording(
         }
     };
 
-    // Start mic capture (raw PCM, no VAD — like ws_test.rs)
+    // Raw PCM stream — VAD is handled server-side by the transcription backend
     let pipeline = match AudioPipeline::new() {
         Ok(p) => p,
         Err(e) => {
@@ -111,19 +110,17 @@ async fn handle_recording(
     log_status(status_log, LogLevel::Info, "Recording started");
     crate::sounds::play_start_sound();
 
-    // Main loop: forward audio + receive transcripts (mirrors ws_test.rs select! loop)
     loop {
         tokio::select! {
-            // Stop event
             hotkey_event = hotkey_rx.next() => {
                 match hotkey_event {
                     Some(HotkeyEvent::RecordStop) | None => {
                         crate::sounds::play_stop_sound();
-                        // Send commit (like ws_test.rs Ctrl+C handler)
+                        // Empty Vec signals the backend to commit/finalize
                         let _ = session.audio_tx.send(Vec::new());
                         log_status(status_log, LogLevel::Info, "Sent commit, waiting for final transcript...");
 
-                        // Wait for final transcripts (ws_test.rs uses 1000ms)
+                        // Drain any remaining final transcripts before closing
                         let deadline = tokio::time::Instant::now()
                             + tokio::time::Duration::from_millis(2000);
                         loop {
@@ -153,7 +150,6 @@ async fn handle_recording(
                 }
             }
 
-            // Forward mic audio to WebSocket
             chunk = audio_rx.recv() => {
                 match chunk {
                     Some(bytes) if !bytes.is_empty() => {
@@ -166,7 +162,6 @@ async fn handle_recording(
                 }
             }
 
-            // Receive transcript events
             event = session.transcript_rx.recv() => {
                 if let Some(ev) = event {
                     match ev.kind {
@@ -204,7 +199,7 @@ async fn handle_recording(
     Ok(())
 }
 
-/// Inject transcribed text into the focused window.
+/// Inject transcribed text into the focused window using the configured fallback chain.
 async fn do_injection(
     text: &str,
     preferred_method: &str,
@@ -232,14 +227,14 @@ async fn do_injection(
     history.write().append(text.to_string());
 }
 
-/// Load an API key from Windows Credential Manager.
+/// Load an API key from Windows Credential Manager (keyring crate, service "beamer").
 fn load_api_key(name: &str) -> String {
     keyring::Entry::new("beamer", name)
         .and_then(|e| e.get_password())
         .unwrap_or_default()
 }
 
-/// Show a Windows tray balloon notification.
+/// Show a Windows toast notification via WinRT (powershell app ID).
 fn show_notification(title: &str, message: &str) {
     tracing::info!("Notification: {} - {}", title, message);
     if let Err(e) = winrt_notification::Toast::new(winrt_notification::Toast::POWERSHELL_APP_ID)

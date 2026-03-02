@@ -17,7 +17,8 @@ pub fn Glow(props: GlowProps) -> Element {
     }
 }
 
-/// Standalone app component for the glow window. Reads color from context.
+/// Root component for the screen-edge glow window. Reads the glow color from
+/// the shared `Config` signal so it updates live when appearance settings change.
 #[component]
 pub fn GlowApp() -> Element {
     let config: Signal<Config> = use_context();

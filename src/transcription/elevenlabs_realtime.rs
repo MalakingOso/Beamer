@@ -7,7 +7,9 @@ use tungstenite::Message;
 
 use super::{RealtimeSession, TranscriptEvent, TranscriptKind};
 
-/// Connect to ElevenLabs realtime STT and return a session handle.
+/// Open a WebSocket to the ElevenLabs Scribe v2 realtime STT endpoint.
+/// Audio is base64-encoded as JSON frames; transcripts arrive as JSON messages.
+/// Uses `commit_strategy=manual` so the caller controls when to finalize.
 pub async fn start_realtime_session(
     api_key: &str,
     language: &str,
@@ -44,12 +46,12 @@ pub async fn start_realtime_session(
     let (audio_tx, mut audio_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let (transcript_tx, transcript_rx) = mpsc::unbounded_channel::<TranscriptEvent>();
 
-    // Send task: forward audio chunks as base64 JSON (mirrors ws_test.rs)
+    // Audio sender: encodes PCM → base64 JSON and streams to the WebSocket
     tokio::spawn(async move {
         let engine = base64::engine::general_purpose::STANDARD;
         while let Some(chunk) = audio_rx.recv().await {
             let msg = if chunk.is_empty() {
-                // Empty chunk = commit signal
+                // Convention: empty Vec triggers manual commit
                 serde_json::json!({
                     "message_type": "input_audio_chunk",
                     "audio_base_64": "",
@@ -75,7 +77,7 @@ pub async fn start_realtime_session(
         let _ = write.close().await;
     });
 
-    // Receive task: parse transcript messages from server
+    // Transcript receiver: parses JSON messages into TranscriptEvents
     tokio::spawn(async move {
         while let Some(Ok(msg)) = read.next().await {
             if let Message::Text(text) = msg {

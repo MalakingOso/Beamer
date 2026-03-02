@@ -35,7 +35,7 @@ pub fn App() -> Element {
 
     let window = use_window();
 
-    // Enable acrylic system backdrop via DWM
+    // Windows 11 acrylic backdrop — DWM system backdrop type 3 (transient window)
     use_hook({
         let window = window.clone();
         move || {
@@ -44,7 +44,7 @@ pub fn App() -> Element {
             use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_SYSTEMBACKDROP_TYPE};
             let hwnd_raw = window.hwnd() as isize;
             unsafe {
-                let backdrop_type: i32 = 3; // DWMSBT_TRANSIENTWINDOW = Acrylic
+                let backdrop_type: i32 = 3; // DWMSBT_TRANSIENTWINDOW
                 let _ = DwmSetWindowAttribute(
                     HWND(hwnd_raw as *mut c_void),
                     DWMWA_SYSTEMBACKDROP_TYPE,
@@ -63,13 +63,12 @@ pub fn App() -> Element {
     let config = use_signal(|| Config::load().unwrap_or_default());
     let status_log = use_signal(StatusLog::new);
 
-    // Provide shared signals for child components / future multi-window use
+    // Shared signals — consumed by overlay/glow windows and child components
     use_context_provider(|| is_recording);
     use_context_provider(|| overlay_text);
     use_context_provider(|| last_injection);
     use_context_provider(|| config);
 
-    // Spawn the orchestration coroutine (hotkey → audio → transcribe → inject)
     let coroutine = use_coroutine(move |rx: UnboundedReceiver<HotkeyEvent>| {
         orchestrator::run(
             rx,
@@ -82,7 +81,7 @@ pub fn App() -> Element {
         )
     });
 
-    // Register global hotkey — store handle so we can swap it on save
+    // Re-registers the global hotkey whenever config changes (reactive via use_effect)
     let window_for_shortcut = window.clone();
     let mut shortcut_handle: Signal<Option<ShortcutHandle>> = use_signal(|| None);
 
@@ -92,7 +91,6 @@ pub fn App() -> Element {
         let is_toggle = cfg.recording.mode == "toggle";
         drop(cfg);
 
-        // Remove old shortcut if any
         if let Some(old) = shortcut_handle.write().take() {
             window_for_shortcut.remove_shortcut(old);
         }
@@ -132,7 +130,6 @@ pub fn App() -> Element {
         }
     });
 
-    // Tray menu events (Settings / Quit)
     use_tray_menu_event_handler({
         let quit_id = items.quit.id().clone();
         let settings_id = items.settings.id().clone();
@@ -152,7 +149,6 @@ pub fn App() -> Element {
         }
     });
 
-    // Tray icon left-click toggles window
     use_tray_icon_event_handler({
         let window = window.clone();
         move |event| {
@@ -207,7 +203,6 @@ pub fn App() -> Element {
                 }
             }
             div { class: "app-body",
-                // Sidebar
                 nav { class: "sidebar",
                     div { class: "sidebar-top",
                         button {
@@ -229,7 +224,6 @@ pub fn App() -> Element {
                         }
                     }
                 }
-                // Content
                 match page {
                     Page::Home => rsx! {
                         HomePage {

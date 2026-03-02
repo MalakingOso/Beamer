@@ -14,7 +14,6 @@ pub struct DebugCardProps {
 #[component]
 pub fn DebugCard(props: DebugCardProps) -> Element {
     let log = props.status_log.read();
-    // Show entries in reverse chronological order
     let entries: Vec<_> = log.entries.iter().rev().collect();
 
     rsx! {

@@ -13,6 +13,9 @@ use dioxus::desktop::tao::window::Icon;
 use dioxus::desktop::{Config, WindowBuilder, WindowCloseBehaviour};
 use dioxus::prelude::*;
 
+/// Configure and launch the Dioxus desktop window. This call blocks the main
+/// thread for the lifetime of the application — the tray icon keeps the process
+/// alive even when the window is hidden (`WindowCloseBehaviour::WindowHides`).
 pub fn launch_app() {
     let icon_bytes = include_bytes!("../../assets/icon.png");
     let icon_image = image::load_from_memory(icon_bytes)
