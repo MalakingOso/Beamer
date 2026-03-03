@@ -17,7 +17,7 @@ const SKIP_SENDINPUT_PROCESSES: &[&str] = &["warp.exe"];
 /// Inject text into the focused window. Runs the entire Win32/COM fallback chain
 /// on a blocking thread (required because UIA and SendInput are synchronous COM calls).
 ///
-/// Fallback order: UIA SetValue → SendInput → Clipboard paste.
+/// Fallback order: SendInput → Clipboard paste → UIA SetValue (last resort).
 pub async fn inject_text(text: &str, preferred: &str) -> Result<InjectionResult> {
     let text = text.to_string();
     let preferred = preferred.to_string();
@@ -46,16 +46,7 @@ fn inject_text_blocking(text: &str, preferred: &str) -> Result<InjectionResult> 
         );
     }
 
-    // 1. UIA SetValue — highest fidelity: preserves undo, respects accessibility tree
-    match try_uia(text) {
-        Ok(result) => {
-            tracing::info!("Injection succeeded via {}: {}", result.method, result.target_info);
-            return Ok(result);
-        }
-        Err(e) => tracing::debug!("UIA failed: {}", e),
-    }
-
-    // 2. SendInput Unicode events — works with most standard text fields
+    // 1. SendInput — types at cursor position, preserves existing text
     if !skip_sendinput {
         match try_sendinput(text) {
             Ok(result) => {
@@ -66,8 +57,17 @@ fn inject_text_blocking(text: &str, preferred: &str) -> Result<InjectionResult> 
         }
     }
 
-    // 3. Clipboard Ctrl+V — universal fallback, but clobbers user clipboard briefly
-    let result = try_clipboard(text)?;
+    // 2. Clipboard Ctrl+V — pastes at cursor, preserves existing text
+    match try_clipboard(text) {
+        Ok(result) => {
+            tracing::info!("Injection succeeded via {}: {}", result.method, result.target_info);
+            return Ok(result);
+        }
+        Err(e) => tracing::debug!("Clipboard failed: {}", e),
+    }
+
+    // 3. UIA SetValue — last resort, replaces entire field value
+    let result = try_uia(text)?;
     tracing::info!("Injection succeeded via {}: {}", result.method, result.target_info);
     Ok(result)
 }

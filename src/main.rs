@@ -1,9 +1,8 @@
-#![allow(dead_code)]
-
 mod audio;
 mod config;
 mod hotkey;
 mod injection;
+mod media;
 mod orchestrator;
 mod sounds;
 mod tray;

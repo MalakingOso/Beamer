@@ -31,7 +31,11 @@ RUST_LOG=beamer=debug cargo run  # Run with debug logging
 - All UIA/Win32 calls MUST go through tokio::task::spawn_blocking() with COM initialized
 - tray-icon and global-hotkey used directly (not via Dioxus re-exports)
 - API keys stored in Windows Credential Manager via keyring — never on disk
-- Design language: Deploy Purple (purple accent, 2px borders, hard-offset shadows, acrylic backdrop)
+- Design language: Deploy Purple (purple accent, 2px borders, hard-offset shadows, solid backgrounds)
+
+## Git & Commits
+
+- Do not add "Co-Authored-By: Claude" footers to commits — only use when actually writing code alongside the user, not for commit messages alone
 
 ## Detailed Docs (read before working on related code)
 

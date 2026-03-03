@@ -32,19 +32,23 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
             .map(|v| v.list().to_vec())
             .unwrap_or_default()
     });
-    let mut elevenlabs_key = use_signal(|| load_api_key("elevenlabs_api_key"));
-    let mut mistral_key = use_signal(|| load_api_key("mistral_api_key"));
+    let mut elevenlabs_key = use_signal(|| crate::config::load_api_key("elevenlabs_api_key"));
+    let mut mistral_key = use_signal(|| crate::config::load_api_key("mistral_api_key"));
 
     rsx! {
         div { class: "content",
             RecordingCard {
                 hotkey: config.read().recording.hotkey.clone(),
                 mode: config.read().recording.mode.clone(),
+                pause_media: config.read().recording.pause_media,
                 on_hotkey_change: move |hotkey: String| {
                     config.write().recording.hotkey = hotkey;
                 },
                 on_mode_change: move |mode: String| {
                     config.write().recording.mode = mode;
+                },
+                on_pause_media_change: move |v: bool| {
+                    config.write().recording.pause_media = v;
                 },
             }
 
@@ -75,21 +79,33 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                 on_add: move |term: String| {
                     let mut terms = vocab_terms.read().clone();
                     if !terms.contains(&term) {
-                        terms.push(term);
+                        terms.push(term.clone());
                         vocab_terms.set(terms);
+                    }
+                    // Persist immediately to disk
+                    if let Ok(mut vocab) = crate::config::vocabulary::Vocabulary::load() {
+                        if let Err(e) = vocab.add(&term) {
+                            tracing::error!("Failed to save vocabulary term: {}", e);
+                        }
                     }
                 },
                 on_remove: move |term: String| {
                     let mut terms = vocab_terms.read().clone();
                     terms.retain(|t| t != &term);
                     vocab_terms.set(terms);
+                    // Persist immediately to disk
+                    if let Ok(mut vocab) = crate::config::vocabulary::Vocabulary::load() {
+                        if let Err(e) = vocab.remove(&term) {
+                            tracing::error!("Failed to remove vocabulary term: {}", e);
+                        }
+                    }
                 },
             }
 
             AppearanceCard {
-                glow_color: config.read().appearance.glow_color.clone(),
-                on_color_change: move |color: String| {
-                    config.write().appearance.glow_color = color;
+                pill_enabled: config.read().appearance.pill_enabled,
+                on_pill_toggle: move |v: bool| {
+                    config.write().appearance.pill_enabled = v;
                 },
             }
 
@@ -110,41 +126,13 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                         if let Err(e) = cfg.save() {
                             tracing::error!("Failed to save config: {}", e);
                         }
-                        save_api_key("elevenlabs_api_key", &elevenlabs_key.read());
-                        save_api_key("mistral_api_key", &mistral_key.read());
-                        // Vocabulary uses a separate file — reload, diff, and persist
-                        if let Ok(mut vocab) = crate::config::vocabulary::Vocabulary::load() {
-                            let current = vocab.list().to_vec();
-                            for term in &current {
-                                let _ = vocab.remove(term);
-                            }
-                            for term in vocab_terms.read().iter() {
-                                let _ = vocab.add(term);
-                            }
-                        }
+                        crate::config::save_api_key("elevenlabs_api_key", &elevenlabs_key.read());
+                        crate::config::save_api_key("mistral_api_key", &mistral_key.read());
                         tracing::info!("Settings saved");
                     },
                     "Save Changes"
                 }
             }
         }
-    }
-}
-
-/// Read an API key from Windows Credential Manager (keyring crate, service "beamer").
-fn load_api_key(name: &str) -> String {
-    keyring::Entry::new("beamer", name)
-        .and_then(|e| e.get_password())
-        .unwrap_or_default()
-}
-
-/// Write or delete an API key in Windows Credential Manager.
-fn save_api_key(name: &str, value: &str) {
-    if value.is_empty() {
-        if let Ok(entry) = keyring::Entry::new("beamer", name) {
-            let _ = entry.delete_credential();
-        }
-    } else if let Ok(entry) = keyring::Entry::new("beamer", name) {
-        let _ = entry.set_password(value);
     }
 }

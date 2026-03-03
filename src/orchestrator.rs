@@ -70,7 +70,7 @@ async fn handle_recording(
         "voxtral" => ("mistral_api_key", "Voxtral"),
         _ => ("elevenlabs_api_key", "ElevenLabs"),
     };
-    let api_key = load_api_key(key_name);
+    let api_key = crate::config::load_api_key(key_name);
     if api_key.is_empty() {
         log_status(status_log, LogLevel::Error, format!("No {} API key configured — open Settings", display_name));
         show_notification("Beamer", &format!("No {} API key configured. Open Settings to add one.", display_name));
@@ -108,6 +108,9 @@ async fn handle_recording(
     is_recording.set(true);
     overlay_text.set("Listening...".to_string());
     log_status(status_log, LogLevel::Info, "Recording started");
+    if cfg.recording.pause_media {
+        crate::media::toggle_media_playback();
+    }
     crate::sounds::play_start_sound();
 
     loop {
@@ -116,6 +119,26 @@ async fn handle_recording(
                 match hotkey_event {
                     Some(HotkeyEvent::RecordStop) | None => {
                         crate::sounds::play_stop_sound();
+                        if cfg.recording.pause_media {
+                            crate::media::toggle_media_playback();
+                        }
+
+                        // Continue capturing audio briefly so the last word isn't clipped
+                        let tail = tokio::time::Instant::now()
+                            + tokio::time::Duration::from_millis(400);
+                        loop {
+                            tokio::select! {
+                                chunk = audio_rx.recv() => {
+                                    if let Some(bytes) = chunk {
+                                        if !bytes.is_empty() {
+                                            let _ = session.audio_tx.send(bytes);
+                                        }
+                                    }
+                                }
+                                _ = tokio::time::sleep_until(tail) => break,
+                            }
+                        }
+
                         // Empty Vec signals the backend to commit/finalize
                         let _ = session.audio_tx.send(Vec::new());
                         log_status(status_log, LogLevel::Info, "Sent commit, waiting for final transcript...");
@@ -225,13 +248,6 @@ async fn do_injection(
     }
 
     history.write().append(text.to_string());
-}
-
-/// Load an API key from Windows Credential Manager (keyring crate, service "beamer").
-fn load_api_key(name: &str) -> String {
-    keyring::Entry::new("beamer", name)
-        .and_then(|e| e.get_password())
-        .unwrap_or_default()
 }
 
 /// Show a Windows toast notification via WinRT (powershell app ID).

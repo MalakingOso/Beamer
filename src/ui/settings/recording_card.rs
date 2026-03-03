@@ -1,62 +1,89 @@
 use dioxus::prelude::*;
-use crate::ui::components::Card;
+use crate::ui::components::{Card, Toggle};
 
 #[derive(Props, Clone, PartialEq)]
 pub struct RecordingCardProps {
     hotkey: String,
     mode: String,
+    pause_media: bool,
     on_hotkey_change: EventHandler<String>,
     on_mode_change: EventHandler<String>,
+    on_pause_media_change: EventHandler<bool>,
 }
 
 #[component]
 pub fn RecordingCard(props: RecordingCardProps) -> Element {
-    let mut listening = use_signal(|| false);
+    let mut recording = use_signal(|| false);
 
     rsx! {
         Card { title: "Recording".to_string(),
             div { class: "card-row",
                 span { class: "card-label", "Hotkey" }
-                button {
-                    class: if *listening.read() { "hotkey-btn listening" } else { "hotkey-btn" },
-                    tabindex: 0,
-                    onclick: move |_| {
-                        listening.set(true);
-                    },
-                    onkeydown: move |e: Event<KeyboardData>| {
-                        if !*listening.read() { return; }
-                        e.prevent_default();
+                if *recording.read() {
+                    // Capture zone — full-width, auto-focused, catches keydown
+                    div {
+                        class: "hotkey-capture-zone",
+                        tabindex: 0,
+                        onmounted: move |e| async move {
+                            let _ = e.set_focus(true).await;
+                        },
+                        onfocusout: move |_| {
+                            recording.set(false);
+                        },
+                        onkeydown: move |e: Event<KeyboardData>| {
+                            e.prevent_default();
 
-                        let key = e.key();
+                            let key = e.key();
 
-                        if key == Key::Escape {
-                            listening.set(false);
-                            return;
+                            if key == Key::Escape {
+                                recording.set(false);
+                                return;
+                            }
+
+                            // Ignore modifier-only presses
+                            if matches!(key, Key::Control | Key::Shift | Key::Alt | Key::Meta) {
+                                return;
+                            }
+
+                            let mods = e.modifiers();
+                            let mut parts: Vec<&str> = Vec::new();
+                            if mods.contains(Modifiers::CONTROL) { parts.push("Ctrl"); }
+                            if mods.contains(Modifiers::ALT) { parts.push("Alt"); }
+                            if mods.contains(Modifiers::SHIFT) { parts.push("Shift"); }
+                            if mods.contains(Modifiers::META) { parts.push("Win"); }
+
+                            let key_name = format_key_name(&key);
+                            let mut combo_parts: Vec<String> = parts.iter().map(|s| s.to_string()).collect();
+                            combo_parts.push(key_name);
+                            let combo = combo_parts.join("+");
+
+                            recording.set(false);
+                            props.on_hotkey_change.call(combo);
+                        },
+                        "Press shortcut..."
+                    }
+                } else {
+                    // Idle state — keycap display + record button
+                    div { class: "hotkey-row",
+                        if props.hotkey.is_empty() {
+                            span { class: "hotkey-placeholder", "Not set" }
+                        } else {
+                            {props.hotkey.split('+').enumerate().map(|(i, part)| {
+                                rsx! {
+                                    if i > 0 {
+                                        span { class: "keycap-separator", "+" }
+                                    }
+                                    span { class: "keycap", "{part.trim()}" }
+                                }
+                            })}
                         }
-
-                        // Wait for a non-modifier key to complete the combo
-                        if matches!(key, Key::Control | Key::Shift | Key::Alt | Key::Meta) {
-                            return;
+                        button {
+                            class: "hotkey-record-btn",
+                            onclick: move |_| {
+                                recording.set(true);
+                            },
+                            "Record"
                         }
-
-                        let modifiers = e.modifiers();
-                        let mut parts = Vec::new();
-                        if modifiers.contains(Modifiers::CONTROL) { parts.push("Ctrl"); }
-                        if modifiers.contains(Modifiers::ALT) { parts.push("Alt"); }
-                        if modifiers.contains(Modifiers::SHIFT) { parts.push("Shift"); }
-                        if modifiers.contains(Modifiers::META) { parts.push("Win"); }
-
-                        let key_name = format_key_name(&key);
-                        parts.push(&key_name);
-
-                        let combo = parts.join("+");
-                        listening.set(false);
-                        props.on_hotkey_change.call(combo);
-                    },
-                    if *listening.read() {
-                        "Press a key combo..."
-                    } else {
-                        "{props.hotkey}"
                     }
                 }
             }
@@ -69,7 +96,7 @@ pub fn RecordingCard(props: RecordingCardProps) -> Element {
                         div {
                             class: if props.mode == "hold" { "radio-dot selected" } else { "radio-dot" },
                         }
-                        span { "Hold" }
+                        span { "Push to Talk" }
                     }
                     div {
                         class: "radio-option",
@@ -79,6 +106,13 @@ pub fn RecordingCard(props: RecordingCardProps) -> Element {
                         }
                         span { "Toggle" }
                     }
+                }
+            }
+            div { class: "card-row",
+                span { class: "card-label", "Pause media" }
+                Toggle {
+                    value: props.pause_media,
+                    ontoggle: move |v| props.on_pause_media_change.call(v),
                 }
             }
         }

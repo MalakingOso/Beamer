@@ -27,12 +27,12 @@
 
 /* ===== Tokens ===== */
 :root {
-  /* Backgrounds — transparent for acrylic blur */
-  --bg: transparent;
-  --bg-surface: rgba(255, 255, 255, 0.72);
-  --bg-hover: rgba(241, 243, 249, 0.80);
-  --bg-active: rgba(232, 235, 244, 0.85);
-  --bg-recessed: rgba(241, 243, 249, 0.50);
+  /* Backgrounds — solid */
+  --bg: #f5f5f7;
+  --bg-surface: #ffffff;
+  --bg-hover: #f1f3f9;
+  --bg-active: #e8ebf4;
+  --bg-recessed: #f1f3f9;
 
   /* Borders — purple-tinted, structural */
   --border: rgba(75, 0, 130, 0.12);
@@ -157,6 +157,7 @@ body {
   display: flex;
   flex-direction: row;
   flex: 1;
+  min-width: 0;
   overflow: hidden;
 }
 
@@ -221,7 +222,10 @@ body {
 /* ===== Content Area ===== */
 .content {
   flex: 1;
+  min-width: 0;
+  min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 24px 28px;
   display: flex;
   flex-direction: column;
@@ -273,6 +277,9 @@ body {
   border: 2px solid var(--border);
   border-radius: var(--radius-md);
   padding: 16px;
+  min-width: 0;
+  max-width: 100%;
+  flex-shrink: 0;
   transition: box-shadow var(--duration-fast) var(--ease);
 }
 
@@ -540,20 +547,6 @@ body {
   font-size: 12px;
 }
 
-.btn-text {
-  border: none;
-  padding: 2px 6px;
-  color: var(--accent);
-  background: none;
-  box-shadow: none;
-}
-
-.btn-text:hover {
-  color: var(--accent-hover);
-  background: none;
-  border-color: transparent;
-}
-
 /* ===== Footer ===== */
 .footer {
   padding: 12px 16px;
@@ -571,16 +564,6 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-/* ===== Color Preview ===== */
-.color-preview {
-  width: 20px;
-  height: 20px;
-  border-radius: var(--radius);
-  border: 2px solid var(--border);
-  display: inline-block;
-  vertical-align: middle;
-}
-
 /* ===== Hotkey Display ===== */
 .hotkey-display {
   font-family: "Cascadia Code", "JetBrains Mono", "Consolas", monospace;
@@ -593,7 +576,15 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-.hotkey-btn {
+/* ===== Hotkey Keycap Row ===== */
+.hotkey-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.keycap {
   font-family: "Cascadia Code", "JetBrains Mono", "Consolas", monospace;
   font-size: 12px;
   padding: 2px 8px;
@@ -602,52 +593,60 @@ body {
   color: var(--fg-secondary);
   background: var(--bg-recessed);
   font-variant-numeric: tabular-nums;
+  box-shadow: 0 2px 0 0 rgba(75, 0, 130, 0.10);
+}
+
+.keycap-separator {
+  color: var(--fg-muted);
+  font-size: 12px;
+  user-select: none;
+}
+
+.hotkey-placeholder {
+  font-size: 13px;
+  color: var(--fg-faint);
+  font-style: italic;
+}
+
+.hotkey-record-btn {
+  padding: 4px 12px;
+  border: 2px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-surface);
+  color: var(--fg-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
   cursor: pointer;
-  outline: none;
-  min-width: 100px;
-  text-align: center;
+  margin-left: 4px;
+  transition: border-color var(--duration-fast) var(--ease),
+              color var(--duration-fast) var(--ease),
+              background var(--duration-fast) var(--ease);
 }
 
-.hotkey-btn:hover {
-  border-color: var(--accent);
-}
-
-.hotkey-btn.listening {
+.hotkey-record-btn:hover {
   border-color: var(--accent);
   color: var(--accent);
+  background: var(--accent-subtle);
+}
+
+/* ===== Hotkey Capture Zone ===== */
+.hotkey-capture-zone {
+  flex: 1;
+  padding: 8px 16px;
+  border: 2px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--accent-subtle);
+  color: var(--accent);
+  font-size: 13px;
+  text-align: center;
+  outline: none;
   animation: pulse-border 1s ease-in-out infinite;
 }
 
 @keyframes pulse-border {
   0%, 100% { border-color: var(--accent); }
   50% { border-color: var(--border); }
-}
-
-/* ===== Overlay Window ===== */
-.overlay {
-  position: fixed;
-  bottom: 40px;
-  left: 50%;
-  transform: translateX(-50%);
-  background: rgba(0, 0, 0, 0.75);
-  color: white;
-  font-family: "Cascadia Code", "JetBrains Mono", "Consolas", monospace;
-  font-size: 14px;
-  padding: 12px 20px;
-  border-radius: var(--radius-lg);
-  max-width: 500px;
-  text-align: center;
-}
-
-/* ===== Glow Window ===== */
-.glow {
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: 100vw;
-  height: 100vh;
-  pointer-events: none;
-  box-shadow: inset 0 0 8px 3px var(--glow-color, #4B0082);
 }
 
 /* ===== Status Dot ===== */
@@ -665,10 +664,6 @@ body {
 .status-recording {
   background: var(--danger);
   animation: pulse 1.5s ease-in-out infinite;
-}
-
-.status-processing {
-  background: #EAB308;
 }
 
 @keyframes pulse {
@@ -721,14 +716,41 @@ body {
 .history-entry .copy-btn {
   opacity: 0;
   color: var(--fg-muted);
-  font-size: 12px;
   flex-shrink: 0;
   margin-left: auto;
-  transition: opacity var(--duration-fast) var(--ease);
+  background: none;
+  border: 2px solid transparent;
+  border-radius: var(--radius);
+  padding: 4px 6px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: opacity var(--duration-fast) var(--ease),
+              color var(--duration-fast) var(--ease),
+              border-color var(--duration-fast) var(--ease),
+              background var(--duration-fast) var(--ease);
 }
 
 .history-entry:hover .copy-btn {
   opacity: 1;
+}
+
+.history-entry .copy-btn:hover {
+  color: var(--accent);
+  border-color: var(--border);
+  background: var(--bg-hover);
+}
+
+.history-entry .copy-btn.copied {
+  opacity: 1;
+  color: var(--success);
+  border-color: var(--success);
+  background: rgba(22, 163, 74, 0.06);
+}
+
+.copy-icon.check {
+  color: var(--success);
 }
 
 .entry-time {

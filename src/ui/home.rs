@@ -3,6 +3,7 @@ use dioxus::prelude::*;
 use crate::config::Config;
 use crate::ui::components::{Card, Select};
 use crate::ui::history::TranscriptionHistory;
+use crate::ui::icons::{IconCheck, IconCopy};
 
 #[derive(Props, Clone, PartialEq)]
 pub struct HomePageProps {
@@ -49,7 +50,11 @@ pub fn HomePage(props: HomePageProps) -> Element {
                     div { class: "empty-state", "No transcriptions yet" }
                 } else {
                     for entry in &recent {
-                        { render_recent_entry(entry.timestamp.clone(), entry.text.clone()) }
+                        RecentEntry {
+                            key: "{entry.timestamp}",
+                            timestamp: entry.timestamp.clone(),
+                            text: entry.text.clone(),
+                        }
                     }
                 }
             }
@@ -80,7 +85,7 @@ pub fn HomePage(props: HomePageProps) -> Element {
                     Select {
                         value: props.config.read().recording.mode.clone(),
                         options: vec![
-                            ("hold".to_string(), "Hold to Talk".to_string()),
+                            ("hold".to_string(), "Push to Talk".to_string()),
                             ("toggle".to_string(), "Toggle".to_string()),
                         ],
                         onchange: {
@@ -97,31 +102,53 @@ pub fn HomePage(props: HomePageProps) -> Element {
     }
 }
 
-fn render_recent_entry(timestamp: String, text: String) -> Element {
-    let display_time = chrono::DateTime::parse_from_rfc3339(&timestamp)
+#[derive(Props, Clone, PartialEq)]
+struct RecentEntryProps {
+    timestamp: String,
+    text: String,
+}
+
+#[component]
+fn RecentEntry(props: RecentEntryProps) -> Element {
+    let mut copied = use_signal(|| false);
+
+    let display_time = chrono::DateTime::parse_from_rfc3339(&props.timestamp)
         .map(|dt| dt.with_timezone(&chrono::Local).format("%H:%M").to_string())
         .unwrap_or_else(|_| "??:??".to_string());
 
-    let truncated = if text.len() > 80 {
-        format!("{}...", &text[..80])
+    let truncated = if props.text.len() > 80 {
+        format!("{}...", &props.text[..80])
     } else {
-        text.clone()
+        props.text.clone()
     };
 
-    let text_for_copy = text.clone();
+    let text_for_copy = props.text.clone();
+
     rsx! {
         div {
             class: "history-entry",
-            onclick: move |_| {
-                let t = text_for_copy.clone();
-                spawn(async move {
-                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                        let _ = clipboard.set_text(&t);
-                    }
-                });
-            },
             span { class: "entry-time", "{display_time}" }
             span { class: "entry-text", "{truncated}" }
+            button {
+                class: if *copied.read() { "copy-btn copied" } else { "copy-btn" },
+                onclick: move |e| {
+                    e.stop_propagation();
+                    let t = text_for_copy.clone();
+                    spawn(async move {
+                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                            let _ = clipboard.set_text(&t);
+                        }
+                        copied.set(true);
+                        tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+                        copied.set(false);
+                    });
+                },
+                if *copied.read() {
+                    IconCheck { size: 14, class: "copy-icon check".to_string() }
+                } else {
+                    IconCopy { size: 14, class: "copy-icon".to_string() }
+                }
+            }
         }
     }
 }

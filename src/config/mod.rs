@@ -16,8 +16,6 @@ pub struct Config {
     pub injection: InjectionConfig,
     #[serde(default)]
     pub appearance: AppearanceConfig,
-    #[serde(default)]
-    pub advanced: AdvancedConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +24,8 @@ pub struct RecordingConfig {
     pub hotkey: String,
     #[serde(default = "default_mode")]
     pub mode: String,
+    #[serde(default)]
+    pub pause_media: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,16 +47,10 @@ pub struct InjectionConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppearanceConfig {
-    #[serde(default = "default_glow_color")]
-    pub glow_color: String,
     #[serde(default = "default_true")]
-    pub overlay_enabled: bool,
+    pub pill_enabled: bool,
     #[serde(default)]
     pub auto_start: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AdvancedConfig {
 }
 
 fn default_hotkey() -> String { "Ctrl+Space".into() }
@@ -64,7 +58,6 @@ fn default_mode() -> String { "hold".into() }
 fn default_backend() -> String { "elevenlabs".into() }
 fn default_language() -> String { "en".into() }
 fn default_preferred_method() -> String { "auto".into() }
-fn default_glow_color() -> String { "#4B0082".into() }
 fn default_true() -> bool { true }
 
 
@@ -75,7 +68,6 @@ impl Default for Config {
             transcription: TranscriptionConfig::default(),
             injection: InjectionConfig::default(),
             appearance: AppearanceConfig::default(),
-            advanced: AdvancedConfig::default(),
         }
     }
 }
@@ -85,6 +77,7 @@ impl Default for RecordingConfig {
         Self {
             hotkey: default_hotkey(),
             mode: default_mode(),
+            pause_media: false,
         }
     }
 }
@@ -110,16 +103,9 @@ impl Default for InjectionConfig {
 impl Default for AppearanceConfig {
     fn default() -> Self {
         Self {
-            glow_color: default_glow_color(),
-            overlay_enabled: default_true(),
+            pill_enabled: default_true(),
             auto_start: false,
         }
-    }
-}
-
-impl Default for AdvancedConfig {
-    fn default() -> Self {
-        Self {}
     }
 }
 
@@ -152,5 +138,23 @@ impl Config {
         let contents = toml::to_string_pretty(self)?;
         std::fs::write(Self::config_path(), contents)?;
         Ok(())
+    }
+}
+
+/// Read an API key from Windows Credential Manager (keyring crate, service "beamer").
+pub fn load_api_key(name: &str) -> String {
+    keyring::Entry::new("beamer", name)
+        .and_then(|e| e.get_password())
+        .unwrap_or_default()
+}
+
+/// Write or delete an API key in Windows Credential Manager.
+pub fn save_api_key(name: &str, value: &str) {
+    if value.is_empty() {
+        if let Ok(entry) = keyring::Entry::new("beamer", name) {
+            let _ = entry.delete_credential();
+        }
+    } else if let Ok(entry) = keyring::Entry::new("beamer", name) {
+        let _ = entry.set_password(value);
     }
 }
