@@ -1,7 +1,12 @@
+mod elevenlabs_batch;
 mod elevenlabs_realtime;
+mod voxtral_batch;
 mod voxtral_realtime;
+mod wav;
 
+pub use elevenlabs_batch::transcribe_batch;
 pub use elevenlabs_realtime::start_realtime_session as start_elevenlabs_session;
+pub use voxtral_batch::transcribe_batch as transcribe_voxtral_batch;
 pub use voxtral_realtime::start_realtime_session as start_voxtral_session;
 
 use tokio::sync::mpsc;

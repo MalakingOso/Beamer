@@ -67,7 +67,7 @@ async fn handle_recording(
     let preferred_method = cfg.injection.preferred_method.clone();
 
     let (key_name, display_name) = match backend.as_str() {
-        "voxtral" => ("mistral_api_key", "Voxtral"),
+        "voxtral" | "voxtral_batch" => ("mistral_api_key", "Voxtral"),
         _ => ("elevenlabs_api_key", "ElevenLabs"),
     };
     let api_key = crate::config::load_api_key(key_name);
@@ -75,6 +75,13 @@ async fn handle_recording(
         log_status(status_log, LogLevel::Error, format!("No {} API key configured — open Settings", display_name));
         show_notification("Beamer", &format!("No {} API key configured. Open Settings to add one.", display_name));
         return Ok(());
+    }
+
+    if backend == "elevenlabs_batch" || backend == "voxtral_batch" {
+        return handle_batch_recording(
+            backend, &api_key, language, &preferred_method, &cfg,
+            is_recording, overlay_text, last_injection, history, hotkey_rx, status_log,
+        ).await;
     }
 
     log_status(status_log, LogLevel::Info, format!("Connecting to {} realtime...", display_name));
@@ -219,6 +226,126 @@ async fn handle_recording(
         }
     }
 
+    Ok(())
+}
+
+/// Drive one batch recording session: capture mic → buffer all PCM → POST to ElevenLabs batch API.
+async fn handle_batch_recording(
+    backend: &str,
+    api_key: &str,
+    language: &str,
+    preferred_method: &str,
+    cfg: &Config,
+    is_recording: &mut Signal<bool>,
+    overlay_text: &mut Signal<String>,
+    last_injection: &mut Signal<String>,
+    history: &mut Signal<TranscriptionHistory>,
+    hotkey_rx: &mut UnboundedReceiver<HotkeyEvent>,
+    status_log: &mut Signal<StatusLog>,
+) -> Result<()> {
+    let pipeline = match AudioPipeline::new() {
+        Ok(p) => p,
+        Err(e) => {
+            log_status(status_log, LogLevel::Error, "Microphone not available");
+            show_notification("Beamer", "Microphone not available");
+            return Err(e);
+        }
+    };
+    let (_stream, mut audio_rx) = pipeline.start()?;
+
+    is_recording.set(true);
+    overlay_text.set("Listening...".to_string());
+    log_status(status_log, LogLevel::Info, "Recording started (batch mode)");
+    if cfg.recording.pause_media {
+        crate::media::toggle_media_playback();
+    }
+    crate::sounds::play_start_sound();
+
+    // Collect all PCM audio into a buffer
+    let mut pcm_buffer: Vec<u8> = Vec::new();
+    loop {
+        tokio::select! {
+            hotkey_event = hotkey_rx.next() => {
+                match hotkey_event {
+                    Some(HotkeyEvent::RecordStop) | None => {
+                        crate::sounds::play_stop_sound();
+                        if cfg.recording.pause_media {
+                            crate::media::toggle_media_playback();
+                        }
+
+                        // Capture 400ms tail audio so the last word isn't clipped
+                        let tail = tokio::time::Instant::now()
+                            + tokio::time::Duration::from_millis(400);
+                        loop {
+                            tokio::select! {
+                                chunk = audio_rx.recv() => {
+                                    if let Some(bytes) = chunk {
+                                        pcm_buffer.extend_from_slice(&bytes);
+                                    }
+                                }
+                                _ = tokio::time::sleep_until(tail) => break,
+                            }
+                        }
+                        break;
+                    }
+                    Some(HotkeyEvent::RecordStart) => {}
+                }
+            }
+            chunk = audio_rx.recv() => {
+                match chunk {
+                    Some(bytes) if !bytes.is_empty() => {
+                        pcm_buffer.extend_from_slice(&bytes);
+                    }
+                    _ => {
+                        log_status(status_log, LogLevel::Warn, "Audio channel closed");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if pcm_buffer.is_empty() {
+        log_status(status_log, LogLevel::Info, "No audio captured");
+        return Ok(());
+    }
+
+    overlay_text.set("Transcribing...".to_string());
+    let audio_secs = pcm_buffer.len() as f64 / (16000.0 * 2.0);
+    let backend_label = if backend == "voxtral_batch" { "Voxtral" } else { "ElevenLabs" };
+    log_status(
+        status_log,
+        LogLevel::Info,
+        format!("Sending {:.1}s of audio to {} batch API...", audio_secs, backend_label),
+    );
+
+    let start = tokio::time::Instant::now();
+    let result = if backend == "voxtral_batch" {
+        transcription::transcribe_voxtral_batch(api_key, pcm_buffer).await
+    } else {
+        let vocab = crate::config::vocabulary::Vocabulary::load()?.list().to_vec();
+        transcription::transcribe_batch(api_key, pcm_buffer, language, &vocab).await
+    };
+    match result {
+        Ok(text) => {
+            let elapsed = start.elapsed();
+            log_status(
+                status_log,
+                LogLevel::Info,
+                format!("[batch] {:.1}s round-trip: {}", elapsed.as_secs_f64(), text),
+            );
+            if !text.trim().is_empty() {
+                do_injection(&text, preferred_method, last_injection, history, overlay_text, status_log).await;
+            }
+        }
+        Err(e) => {
+            tracing::error!("Batch transcription failed: {}", e);
+            log_status(status_log, LogLevel::Error, format!("Batch transcription failed: {}", e));
+            show_notification("Beamer", &format!("Transcription failed: {}", e));
+        }
+    }
+
+    log_status(status_log, LogLevel::Info, "Recording stopped");
     Ok(())
 }
 

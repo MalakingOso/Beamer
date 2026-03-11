@@ -14,7 +14,9 @@ pub struct TranscriptionCardProps {
 pub fn TranscriptionCard(props: TranscriptionCardProps) -> Element {
     let backend_options = vec![
         ("elevenlabs".to_string(), "ElevenLabs".to_string()),
+        ("elevenlabs_batch".to_string(), "ElevenLabs (Batch)".to_string()),
         ("voxtral".to_string(), "Voxtral (Mistral)".to_string()),
+        ("voxtral_batch".to_string(), "Voxtral (Batch)".to_string()),
     ];
 
     let language_options = vec![
@@ -29,7 +31,7 @@ pub fn TranscriptionCard(props: TranscriptionCardProps) -> Element {
         ("zh".to_string(), "Chinese".to_string()),
     ];
 
-    let is_voxtral = props.backend == "voxtral";
+    let is_voxtral = props.backend == "voxtral" || props.backend == "voxtral_batch";
 
     rsx! {
         Card { title: "Transcription".to_string(),
