@@ -1,5 +1,5 @@
 use dioxus::prelude::*;
-use crate::ui::components::{Card, Toggle};
+use crate::ui::components::{Card, Select, Toggle};
 
 #[derive(Props, Clone, PartialEq)]
 pub struct RecordingCardProps {
@@ -11,79 +11,165 @@ pub struct RecordingCardProps {
     on_pause_media_change: EventHandler<bool>,
 }
 
+/// Split "Ctrl+Space" into (ctrl, alt, shift, win, key).
+fn parse_hotkey_parts(hotkey: &str) -> (bool, bool, bool, bool, String) {
+    let mut ctrl = false;
+    let mut alt = false;
+    let mut shift = false;
+    let mut win = false;
+    let mut key = String::new();
+
+    for part in hotkey.split('+') {
+        match part.trim().to_uppercase().as_str() {
+            "CTRL" | "CONTROL" => ctrl = true,
+            "ALT" | "OPTION" => alt = true,
+            "SHIFT" => shift = true,
+            "SUPER" | "WIN" | "CMD" | "COMMAND" | "META" => win = true,
+            _ => key = normalize_key(part.trim()),
+        }
+    }
+
+    if key.is_empty() {
+        key = "Space".to_string();
+    }
+
+    (ctrl, alt, shift, win, key)
+}
+
+/// Reassemble into a format the global_hotkey parser accepts.
+/// Uses "Super" for Win key (parser doesn't accept "WIN").
+fn format_hotkey(ctrl: bool, alt: bool, shift: bool, win: bool, key: &str) -> String {
+    let mut parts = Vec::new();
+    if ctrl { parts.push("Ctrl"); }
+    if alt { parts.push("Alt"); }
+    if shift { parts.push("Shift"); }
+    if win { parts.push("Super"); }
+    parts.push(key);
+    parts.join("+")
+}
+
+/// Normalize long-form key names to what global_hotkey expects.
+fn normalize_key(key: &str) -> String {
+    let upper = key.to_uppercase();
+    match upper.as_str() {
+        "ARROWUP" => "Up".into(),
+        "ARROWDOWN" => "Down".into(),
+        "ARROWLEFT" => "Left".into(),
+        "ARROWRIGHT" => "Right".into(),
+        "PAGEUP" => "PageUp".into(),
+        "PAGEDOWN" => "PageDown".into(),
+        s if s.starts_with("KEY") && s.len() == 4 => s[3..].to_string(),
+        s if s.starts_with("DIGIT") && s.len() == 6 => s[5..].to_string(),
+        _ => {
+            // Title-case: first char upper, rest lower
+            let mut chars = key.chars();
+            match chars.next() {
+                Some(c) => {
+                    let first: String = c.to_uppercase().collect();
+                    let rest: String = chars.collect::<String>().to_lowercase();
+                    format!("{first}{rest}")
+                }
+                None => key.to_string(),
+            }
+        }
+    }
+}
+
+/// Dropdown options for the key selector.
+fn key_options() -> Vec<(String, String)> {
+    let mut opts = Vec::new();
+
+    // Common keys
+    for k in ["Space", "Enter", "Tab", "Backspace", "Delete", "Insert", "Home", "End", "PageUp", "PageDown"] {
+        opts.push((k.to_string(), k.to_string()));
+    }
+
+    // Letters A-Z
+    for c in 'A'..='Z' {
+        let s = c.to_string();
+        opts.push((s.clone(), s));
+    }
+
+    // Digits 0-9
+    for d in '0'..='9' {
+        let s = d.to_string();
+        opts.push((s.clone(), s));
+    }
+
+    // F-keys
+    for n in 1..=12 {
+        let s = format!("F{n}");
+        opts.push((s.clone(), s));
+    }
+
+    // Arrows
+    for k in ["Up", "Down", "Left", "Right"] {
+        opts.push((k.to_string(), k.to_string()));
+    }
+
+    // Punctuation / symbols
+    for (val, label) in [
+        ("-", "Minus (-)"),
+        ("=", "Equal (=)"),
+        ("[", "Left Bracket ([)"),
+        ("]", "Right Bracket (])"),
+        ("\\", "Backslash (\\)"),
+        (";", "Semicolon (;)"),
+        ("'", "Quote (')"),
+        (",", "Comma (,)"),
+        (".", "Period (.)"),
+        ("/", "Slash (/)"),
+        ("`", "Backtick (`)"),
+    ] {
+        opts.push((val.to_string(), label.to_string()));
+    }
+
+    opts
+}
+
 #[component]
 pub fn RecordingCard(props: RecordingCardProps) -> Element {
-    let mut recording = use_signal(|| false);
+    let (ctrl, alt, shift, win, key) = parse_hotkey_parts(&props.hotkey);
+
+    let opts = key_options();
 
     rsx! {
         Card { title: "Recording".to_string(),
-            div { class: "card-row",
+            div { class: "card-row card-row-top",
                 span { class: "card-label", "Hotkey" }
-                if *recording.read() {
-                    // Capture zone — full-width, auto-focused, catches keydown
-                    div {
-                        class: "hotkey-capture-zone",
-                        tabindex: 0,
-                        onmounted: move |e| async move {
-                            let _ = e.set_focus(true).await;
-                        },
-                        onfocusout: move |_| {
-                            recording.set(false);
-                        },
-                        onkeydown: move |e: Event<KeyboardData>| {
-                            e.prevent_default();
-
-                            let key = e.key();
-
-                            if key == Key::Escape {
-                                recording.set(false);
-                                return;
+                div { class: "hotkey-picker",
+                    div { class: "hotkey-mods",
+                        ModPill { label: "Ctrl", active: ctrl, on_click: {
+                            let key = key.clone();
+                            move |_| {
+                                props.on_hotkey_change.call(format_hotkey(!ctrl, alt, shift, win, &key));
                             }
-
-                            // Ignore modifier-only presses
-                            if matches!(key, Key::Control | Key::Shift | Key::Alt | Key::Meta) {
-                                return;
+                        }}
+                        ModPill { label: "Alt", active: alt, on_click: {
+                            let key = key.clone();
+                            move |_| {
+                                props.on_hotkey_change.call(format_hotkey(ctrl, !alt, shift, win, &key));
                             }
-
-                            let mods = e.modifiers();
-                            let mut parts: Vec<&str> = Vec::new();
-                            if mods.contains(Modifiers::CONTROL) { parts.push("Ctrl"); }
-                            if mods.contains(Modifiers::ALT) { parts.push("Alt"); }
-                            if mods.contains(Modifiers::SHIFT) { parts.push("Shift"); }
-                            if mods.contains(Modifiers::META) { parts.push("Win"); }
-
-                            let key_name = format_key_name(&key);
-                            let mut combo_parts: Vec<String> = parts.iter().map(|s| s.to_string()).collect();
-                            combo_parts.push(key_name);
-                            let combo = combo_parts.join("+");
-
-                            recording.set(false);
-                            props.on_hotkey_change.call(combo);
-                        },
-                        "Press shortcut..."
+                        }}
+                        ModPill { label: "Shift", active: shift, on_click: {
+                            let key = key.clone();
+                            move |_| {
+                                props.on_hotkey_change.call(format_hotkey(ctrl, alt, !shift, win, &key));
+                            }
+                        }}
+                        ModPill { label: "Win", active: win, on_click: {
+                            let key = key.clone();
+                            move |_| {
+                                props.on_hotkey_change.call(format_hotkey(ctrl, alt, shift, !win, &key));
+                            }
+                        }}
                     }
-                } else {
-                    // Idle state — keycap display + record button
-                    div { class: "hotkey-row",
-                        if props.hotkey.is_empty() {
-                            span { class: "hotkey-placeholder", "Not set" }
-                        } else {
-                            {props.hotkey.split('+').enumerate().map(|(i, part)| {
-                                rsx! {
-                                    if i > 0 {
-                                        span { class: "keycap-separator", "+" }
-                                    }
-                                    span { class: "keycap", "{part.trim()}" }
-                                }
-                            })}
-                        }
-                        button {
-                            class: "hotkey-record-btn",
-                            onclick: move |_| {
-                                recording.set(true);
-                            },
-                            "Record"
-                        }
+                    Select {
+                        value: key.clone(),
+                        options: opts,
+                        onchange: move |new_key: String| {
+                            props.on_hotkey_change.call(format_hotkey(ctrl, alt, shift, win, &new_key));
+                        },
                     }
                 }
             }
@@ -119,28 +205,21 @@ pub fn RecordingCard(props: RecordingCardProps) -> Element {
     }
 }
 
-fn format_key_name(key: &Key) -> String {
-    match key {
-        Key::Character(c) if c == " " => "Space".into(),
-        Key::Character(c) => c.to_uppercase(),
-        Key::Backspace => "Backspace".into(),
-        Key::Tab => "Tab".into(),
-        Key::Enter => "Enter".into(),
-        Key::Escape => "Escape".into(),
-        Key::Delete => "Delete".into(),
-        Key::ArrowUp => "Up".into(),
-        Key::ArrowDown => "Down".into(),
-        Key::ArrowLeft => "Left".into(),
-        Key::ArrowRight => "Right".into(),
-        Key::F1 => "F1".into(), Key::F2 => "F2".into(), Key::F3 => "F3".into(),
-        Key::F4 => "F4".into(), Key::F5 => "F5".into(), Key::F6 => "F6".into(),
-        Key::F7 => "F7".into(), Key::F8 => "F8".into(), Key::F9 => "F9".into(),
-        Key::F10 => "F10".into(), Key::F11 => "F11".into(), Key::F12 => "F12".into(),
-        Key::End => "End".into(),
-        Key::Home => "Home".into(),
-        Key::Insert => "Insert".into(),
-        Key::PageUp => "PageUp".into(),
-        Key::PageDown => "PageDown".into(),
-        _ => format!("{:?}", key),
+#[derive(Props, Clone, PartialEq)]
+struct ModPillProps {
+    label: &'static str,
+    active: bool,
+    on_click: EventHandler<()>,
+}
+
+#[component]
+fn ModPill(props: ModPillProps) -> Element {
+    let class = if props.active { "mod-pill active" } else { "mod-pill" };
+    rsx! {
+        button {
+            class: "{class}",
+            onclick: move |_| props.on_click.call(()),
+            "{props.label}"
+        }
     }
 }

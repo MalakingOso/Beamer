@@ -86,23 +86,34 @@ pub fn App() -> Element {
                 let cfg = DesktopConfig::new()
                     .with_window(builder)
                     .with_background_color((0, 0, 0, 0))
-                    .with_custom_head(format!("<style>{}</style>", PILL_CSS))
+                    .with_custom_head(format!("<style>body{{opacity:0;transition:opacity 0.15s ease;}}{}</style>", PILL_CSS))
                     .with_exits_when_last_window_closes(false);
 
                 let dom = VirtualDom::new(RecordingPill);
                 let ctx: DesktopContext = window.new_window(dom, cfg).await;
                 let _ = ctx.set_ignore_cursor_events(true);
+                // Make the pill Win32-visible immediately (with CSS opacity:0 already
+                // applied via custom head). This must happen after webview init so
+                // transparency works. Once visible, parent show/hide won't trigger
+                // WM_SHOWWINDOW flashes since the window is already shown.
+                ctx.set_visible(true);
                 pill_ctx.set(Some(ctx));
             });
         }
     });
 
-    // Show/hide the pill when recording state changes
+    // Show/hide the pill when recording state changes (CSS opacity, not Win32 visibility,
+    // to avoid flash when parent window is shown — Win32 propagates WM_SHOWWINDOW to children)
     use_effect(move || {
         let recording = *is_recording.read();
         let pill_enabled = config.read().appearance.pill_enabled;
+        let should_show = recording && pill_enabled;
         if let Some(ctx) = pill_ctx.read().as_ref() {
-            ctx.set_visible(recording && pill_enabled);
+            let opacity = if should_show { "1" } else { "0" };
+            let _ = ctx.webview.evaluate_script(&format!(
+                "document.body.style.opacity='{}';",
+                opacity
+            ));
         }
     });
 
