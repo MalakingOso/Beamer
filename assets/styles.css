@@ -98,20 +98,13 @@ body {
 .titlebar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   height: 32px;
-  padding: 0 8px 0 16px;
+  padding: 0 8px;
   border-bottom: 2px solid var(--border);
   background: var(--bg-surface);
   -webkit-app-region: drag;
   user-select: none;
-}
-
-.titlebar-icon {
-  width: 20px;
-  height: 20px;
-  border-radius: 3px;
-  -webkit-app-region: no-drag;
 }
 
 .titlebar-controls {
@@ -148,14 +141,64 @@ body {
 /* ===== Layout Shell ===== */
 .app-container {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   height: 100vh;
   overflow: hidden;
 }
 
-.app-body {
+/* ===== Left Column (Badge + Sidebar) ===== */
+.left-column {
   display: flex;
-  flex-direction: row;
+  flex-direction: column;
+  width: 56px;
+  min-width: 56px;
+  border-right: 2px solid var(--border);
+  background: var(--bg-surface);
+}
+
+.corner-badge {
+  width: 56px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  position: relative;
+}
+
+.corner-badge::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 2px;
+  bottom: 2px;
+  background: var(--bg);
+  z-index: 0;
+}
+
+.corner-badge::after {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 2px;
+  height: 2px;
+  background: var(--border);
+}
+
+.corner-badge-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius);
+  position: relative;
+  z-index: 1;
+}
+
+/* ===== Right Column (Titlebar + Content) ===== */
+.right-column {
+  display: flex;
+  flex-direction: column;
   flex: 1;
   min-width: 0;
   overflow: hidden;
@@ -163,12 +206,10 @@ body {
 
 /* ===== Sidebar ===== */
 .sidebar {
-  width: 44px;
-  min-width: 44px;
   display: flex;
   flex-direction: column;
+  flex: 1;
   background: var(--bg-surface);
-  border-right: 2px solid var(--border);
 }
 
 .sidebar-top {
@@ -185,7 +226,7 @@ body {
 }
 
 .sidebar-icon {
-  width: 44px;
+  width: 56px;
   height: 44px;
   display: flex;
   align-items: center;
@@ -836,6 +877,133 @@ body {
   font-size: 12px;
   padding: 8px;
   text-align: center;
+}
+
+/* ===== Vocabulary Page ===== */
+.vocab-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.vocab-title {
+  font-family: "DM Mono", "Cascadia Code", monospace;
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--fg);
+  letter-spacing: -0.01em;
+}
+
+.vocab-count {
+  font-family: "Cascadia Code", "JetBrains Mono", "Consolas", monospace;
+  font-size: 12px;
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.vocab-description {
+  font-size: 13px;
+  color: var(--fg-secondary);
+  line-height: 1.5;
+  margin-top: -8px;
+}
+
+.vocab-add-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.vocab-add-input {
+  flex: 1;
+}
+
+.vocab-filter {
+  width: 100%;
+}
+
+.vocab-list {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-surface);
+  border: 2px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.vocab-row {
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  min-height: 44px;
+  transition: background var(--duration-fast) var(--ease);
+}
+
+.vocab-row + .vocab-row {
+  border-top: 1px solid var(--border);
+}
+
+.vocab-row:hover {
+  background: var(--bg-hover);
+}
+
+.vocab-row.editing {
+  background: var(--bg-hover);
+  gap: 8px;
+  padding: 6px 16px;
+}
+
+.vocab-row-text {
+  font-family: "Cascadia Code", "JetBrains Mono", "Consolas", monospace;
+  font-size: 13px;
+  color: var(--fg);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.vocab-row-actions {
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease);
+}
+
+.vocab-row:hover .vocab-row-actions {
+  opacity: 1;
+}
+
+.vocab-action-btn {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+  border-radius: var(--radius);
+  transition: color var(--duration-fast) var(--ease),
+              background var(--duration-fast) var(--ease);
+}
+
+.vocab-action-btn:hover {
+  color: var(--fg);
+  background: var(--bg-active);
+}
+
+.vocab-action-btn.danger:hover {
+  color: var(--danger);
+  background: var(--danger-subtle);
+}
+
+.vocab-edit-input {
+  flex: 1;
+  min-width: 0;
 }
 
 /* ===== Focus & Accessibility ===== */

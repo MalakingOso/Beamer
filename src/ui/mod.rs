@@ -7,6 +7,7 @@ pub mod icons;
 pub mod pill;
 pub mod settings;
 pub mod status_log;
+pub mod vocab_page;
 
 use dioxus::desktop::tao::window::Icon;
 use dioxus::desktop::{Config, WindowBuilder, WindowCloseBehaviour};

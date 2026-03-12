@@ -115,9 +115,11 @@ async fn handle_recording(
     is_recording.set(true);
     overlay_text.set("Listening...".to_string());
     log_status(status_log, LogLevel::Info, "Recording started");
-    if cfg.recording.pause_media {
-        crate::media::toggle_media_playback();
-    }
+    let did_pause = if cfg.recording.pause_media {
+        crate::media::pause_media_if_playing()
+    } else {
+        false
+    };
     crate::sounds::play_start_sound();
 
     loop {
@@ -126,8 +128,8 @@ async fn handle_recording(
                 match hotkey_event {
                     Some(HotkeyEvent::RecordStop) | None => {
                         crate::sounds::play_stop_sound();
-                        if cfg.recording.pause_media {
-                            crate::media::toggle_media_playback();
+                        if did_pause {
+                            crate::media::resume_media();
                         }
 
                         // Continue capturing audio briefly so the last word isn't clipped
@@ -256,9 +258,11 @@ async fn handle_batch_recording(
     is_recording.set(true);
     overlay_text.set("Listening...".to_string());
     log_status(status_log, LogLevel::Info, "Recording started (batch mode)");
-    if cfg.recording.pause_media {
-        crate::media::toggle_media_playback();
-    }
+    let did_pause = if cfg.recording.pause_media {
+        crate::media::pause_media_if_playing()
+    } else {
+        false
+    };
     crate::sounds::play_start_sound();
 
     // Collect all PCM audio into a buffer
@@ -269,8 +273,8 @@ async fn handle_batch_recording(
                 match hotkey_event {
                     Some(HotkeyEvent::RecordStop) | None => {
                         crate::sounds::play_stop_sound();
-                        if cfg.recording.pause_media {
-                            crate::media::toggle_media_playback();
+                        if did_pause {
+                            crate::media::resume_media();
                         }
 
                         // Capture 400ms tail audio so the last word isn't clipped

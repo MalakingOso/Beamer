@@ -26,15 +26,6 @@ pub fn HomePage(props: HomePageProps) -> Element {
 
     rsx! {
         div { class: "content",
-            div { class: "home-header",
-                img {
-                    class: "home-header-icon",
-                    src: asset!("assets/icon.png"),
-                    alt: "Beamer",
-                }
-                h1 { class: "home-header-title", "Beamer" }
-            }
-
             Card { title: "Status".to_string(),
                 div { class: "card-row",
                     div { style: "display: flex; align-items: center; gap: 8px;",

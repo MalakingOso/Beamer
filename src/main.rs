@@ -58,8 +58,11 @@ fn ensure_single_instance() -> bool {
 }
 
 /// Add or remove Beamer from the Windows Run registry key (HKCU\...\Run).
-fn set_auto_start(enable: bool) -> Result<()> {
+pub fn set_auto_start(enable: bool) -> Result<()> {
+    use std::os::windows::process::CommandExt;
     use std::process::Command;
+
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
 
     let exe_path = std::env::current_exe()?;
     let exe_str = exe_path.to_string_lossy();
@@ -77,6 +80,7 @@ fn set_auto_start(enable: bool) -> Result<()> {
                 &format!("\"{}\"", exe_str),
                 "/f",
             ])
+            .creation_flags(CREATE_NO_WINDOW)
             .output()?;
     } else {
         Command::new("reg")
@@ -87,6 +91,7 @@ fn set_auto_start(enable: bool) -> Result<()> {
                 "Beamer",
                 "/f",
             ])
+            .creation_flags(CREATE_NO_WINDOW)
             .output()?;
     }
 

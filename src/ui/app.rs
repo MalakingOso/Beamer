@@ -15,7 +15,8 @@ use crate::ui::pill::RecordingPill;
 use crate::ui::history::TranscriptionHistory;
 use crate::ui::history_page::HistoryPage;
 use crate::ui::home::HomePage;
-use crate::ui::icons::{IconClockCounterClockwise, IconGear, IconHouse, IconMinus, IconX};
+use crate::ui::icons::{IconBook, IconClockCounterClockwise, IconGear, IconHouse, IconMinus, IconX};
+use crate::ui::vocab_page::VocabPage;
 use crate::ui::settings::SettingsPage;
 use crate::ui::status_log::StatusLog;
 
@@ -23,6 +24,7 @@ use crate::ui::status_log::StatusLog;
 enum Page {
     Home,
     History,
+    Vocab,
     Settings,
 }
 
@@ -86,7 +88,7 @@ pub fn App() -> Element {
                 let cfg = DesktopConfig::new()
                     .with_window(builder)
                     .with_background_color((0, 0, 0, 0))
-                    .with_custom_head(format!("<style>body{{opacity:0;transition:opacity 0.15s ease;}}{}</style>", PILL_CSS))
+                    .with_custom_head(format!(r#"<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&display=swap" rel="stylesheet"><style>body{{opacity:0;transition:opacity 0.15s ease;}}{}</style>"#, PILL_CSS))
                     .with_exits_when_last_window_closes(false);
 
                 let dom = VirtualDom::new(RecordingPill);
@@ -219,34 +221,15 @@ pub fn App() -> Element {
             link { rel: "stylesheet", href: asset!("assets/styles.css") }
         }
         div { class: "app-container",
-            div { class: "titlebar",
-                img {
-                    class: "titlebar-icon",
-                    src: asset!("assets/icon.png"),
-                    alt: "Beamer",
-                    width: "20",
-                    height: "20",
-                }
-                div { class: "titlebar-controls",
-                    button {
-                        class: "titlebar-btn minimize",
-                        onclick: {
-                            let window = window.clone();
-                            move |_| window.set_minimized(true)
-                        },
-                        IconMinus { size: 14 }
-                    }
-                    button {
-                        class: "titlebar-btn close",
-                        onclick: {
-                            let window = window.clone();
-                            move |_| window.set_visible(false)
-                        },
-                        IconX { size: 14 }
+            // Left column: badge + sidebar stacked vertically
+            div { class: "left-column",
+                div { class: "corner-badge",
+                    img {
+                        class: "corner-badge-icon",
+                        src: asset!("assets/icon.png"),
+                        alt: "Beamer",
                     }
                 }
-            }
-            div { class: "app-body",
                 nav { class: "sidebar",
                     div { class: "sidebar-top",
                         button {
@@ -259,12 +242,40 @@ pub fn App() -> Element {
                             onclick: move |_| current_page.set(Page::History),
                             IconClockCounterClockwise {}
                         }
+                        button {
+                            class: if page == Page::Vocab { "sidebar-icon active" } else { "sidebar-icon" },
+                            onclick: move |_| current_page.set(Page::Vocab),
+                            IconBook {}
+                        }
                     }
                     div { class: "sidebar-bottom",
                         button {
                             class: if page == Page::Settings { "sidebar-icon active" } else { "sidebar-icon" },
                             onclick: move |_| current_page.set(Page::Settings),
                             IconGear {}
+                        }
+                    }
+                }
+            }
+            // Right column: titlebar + content stacked vertically
+            div { class: "right-column",
+                div { class: "titlebar",
+                    div { class: "titlebar-controls",
+                        button {
+                            class: "titlebar-btn minimize",
+                            onclick: {
+                                let window = window.clone();
+                                move |_| window.set_minimized(true)
+                            },
+                            IconMinus { size: 14 }
+                        }
+                        button {
+                            class: "titlebar-btn close",
+                            onclick: {
+                                let window = window.clone();
+                                move |_| window.set_visible(false)
+                            },
+                            IconX { size: 14 }
                         }
                     }
                 }
@@ -279,6 +290,9 @@ pub fn App() -> Element {
                     Page::History => rsx! {
                         HistoryPage { history }
                     },
+                    Page::Vocab => rsx! {
+                        VocabPage {}
+                    },
                     Page::Settings => rsx! {
                         SettingsPage { config, last_injection, status_log }
                     },
@@ -291,19 +305,20 @@ pub fn App() -> Element {
 const PILL_CSS: &str = r#"
 *, *::before, *::after { margin:0; padding:0; }
 html, body, #main { background:transparent!important; overflow:hidden;
-  font-family: "Segoe UI Variable","Segoe UI",system-ui,sans-serif; }
+  font-family: "DM Mono","Segoe UI Variable","Segoe UI",monospace,system-ui,sans-serif; }
 
 .pill { display:flex; align-items:center; gap:10px; padding:0 16px;
   height:44px; margin:4px auto; width:fit-content;
-  background:rgba(15,15,20,0.88); border-radius:22px;
-  border:1.5px solid rgba(255,255,255,0.08); }
+  background:rgba(255,255,255,0.92); border-radius:6px;
+  border:2px solid rgba(75,0,130,0.12);
+  box-shadow:2px 4px 0 0 rgba(75,0,130,0.12); }
 
 .pill-dot { width:8px; height:8px; border-radius:50%; background:#DC2626;
   flex-shrink:0; animation:dot-pulse 1.5s ease-in-out infinite; }
 @keyframes dot-pulse { 0%,100%{opacity:1} 50%{opacity:0.35} }
 
 .pill-bars { display:flex; align-items:center; gap:3px; height:24px; }
-.bar { width:3px; border-radius:1.5px; background:#9B6DFF;
+.bar { width:3px; border-radius:1.5px; background:#4B0082;
   animation:wave 1.2s ease-in-out infinite; }
 .bar-1{height:8px;  animation-delay:0s}
 .bar-2{height:16px; animation-delay:.15s}
@@ -313,5 +328,6 @@ html, body, #main { background:transparent!important; overflow:hidden;
 @keyframes wave { 0%,100%{transform:scaleY(.4)} 50%{transform:scaleY(1)} }
 
 .pill-label { font-size:13px; font-weight:500;
-  color:rgba(255,255,255,0.75); letter-spacing:.01em; user-select:none; }
+  color:#64708b; letter-spacing:.01em; user-select:none;
+  font-family:"DM Mono",monospace; }
 "#;

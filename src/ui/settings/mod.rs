@@ -12,7 +12,6 @@ use self::appearance_card::AppearanceCard;
 use self::debug_card::DebugCard;
 use self::recording_card::RecordingCard;
 use self::transcription_card::TranscriptionCard;
-use self::vocabulary_card::VocabularyCard;
 use crate::config::Config;
 use crate::ui::status_log::StatusLog;
 
@@ -27,11 +26,6 @@ pub struct SettingsPageProps {
 pub fn SettingsPage(props: SettingsPageProps) -> Element {
     let mut config = props.config;
     let last_injection = props.last_injection;
-    let mut vocab_terms = use_signal(|| {
-        crate::config::vocabulary::Vocabulary::load()
-            .map(|v| v.list().to_vec())
-            .unwrap_or_default()
-    });
     let mut elevenlabs_key = use_signal(|| crate::config::load_api_key("elevenlabs_api_key"));
     let mut mistral_key = use_signal(|| crate::config::load_api_key("mistral_api_key"));
 
@@ -74,38 +68,24 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                 },
             }
 
-            VocabularyCard {
-                terms: vocab_terms.read().clone(),
-                on_add: move |term: String| {
-                    let mut terms = vocab_terms.read().clone();
-                    if !terms.contains(&term) {
-                        terms.push(term.clone());
-                        vocab_terms.set(terms);
-                    }
-                    // Persist immediately to disk
-                    if let Ok(mut vocab) = crate::config::vocabulary::Vocabulary::load() {
-                        if let Err(e) = vocab.add(&term) {
-                            tracing::error!("Failed to save vocabulary term: {}", e);
-                        }
-                    }
-                },
-                on_remove: move |term: String| {
-                    let mut terms = vocab_terms.read().clone();
-                    terms.retain(|t| t != &term);
-                    vocab_terms.set(terms);
-                    // Persist immediately to disk
-                    if let Ok(mut vocab) = crate::config::vocabulary::Vocabulary::load() {
-                        if let Err(e) = vocab.remove(&term) {
-                            tracing::error!("Failed to remove vocabulary term: {}", e);
-                        }
-                    }
-                },
-            }
-
             AppearanceCard {
                 pill_enabled: config.read().appearance.pill_enabled,
                 on_pill_toggle: move |v: bool| {
                     config.write().appearance.pill_enabled = v;
+                },
+                auto_start: config.read().appearance.auto_start,
+                on_auto_start_toggle: move |v: bool| {
+                    config.write().appearance.auto_start = v;
+                    spawn(async move {
+                        let result = tokio::task::spawn_blocking(move || {
+                            crate::set_auto_start(v)
+                        }).await;
+                        match result {
+                            Ok(Err(e)) => tracing::error!("Failed to set auto-start: {}", e),
+                            Err(e) => tracing::error!("Auto-start task panicked: {}", e),
+                            _ => {}
+                        }
+                    });
                 },
             }
 
