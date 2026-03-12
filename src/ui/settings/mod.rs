@@ -37,12 +37,15 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                 pause_media: config.read().recording.pause_media,
                 on_hotkey_change: move |hotkey: String| {
                     config.write().recording.hotkey = hotkey;
+                    let _ = config.read().save();
                 },
                 on_mode_change: move |mode: String| {
                     config.write().recording.mode = mode;
+                    let _ = config.read().save();
                 },
                 on_pause_media_change: move |v: bool| {
                     config.write().recording.pause_media = v;
+                    let _ = config.read().save();
                 },
             }
 
@@ -50,10 +53,12 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                 backend: config.read().transcription.backend.clone(),
                 on_backend_change: move |b: String| {
                     config.write().transcription.backend = b;
+                    let _ = config.read().save();
                 },
                 language: config.read().transcription.language.clone(),
                 on_language_change: move |lang: String| {
                     config.write().transcription.language = lang;
+                    let _ = config.read().save();
                 },
             }
 
@@ -72,10 +77,12 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                 pill_enabled: config.read().appearance.pill_enabled,
                 on_pill_toggle: move |v: bool| {
                     config.write().appearance.pill_enabled = v;
+                    let _ = config.read().save();
                 },
                 auto_start: config.read().appearance.auto_start,
                 on_auto_start_toggle: move |v: bool| {
                     config.write().appearance.auto_start = v;
+                    let _ = config.read().save();
                     spawn(async move {
                         let result = tokio::task::spawn_blocking(move || {
                             crate::set_auto_start(v)
@@ -94,6 +101,7 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                 debug_logging: config.read().injection.debug_logging,
                 on_debug_toggle: move |v: bool| {
                     config.write().injection.debug_logging = v;
+                    let _ = config.read().save();
                 },
                 status_log: props.status_log,
             }

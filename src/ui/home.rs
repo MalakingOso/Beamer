@@ -1,24 +1,24 @@
 use dioxus::prelude::*;
 
 use crate::config::Config;
+use crate::orchestrator::RecordingState;
 use crate::ui::components::{Card, Select};
 use crate::ui::history::TranscriptionHistory;
 use crate::ui::icons::{IconCheck, IconCopy};
 
 #[derive(Props, Clone, PartialEq)]
 pub struct HomePageProps {
-    pub is_recording: Signal<bool>,
+    pub rec_state: Signal<RecordingState>,
     pub history: Signal<TranscriptionHistory>,
     pub config: Signal<Config>,
 }
 
 #[component]
 pub fn HomePage(props: HomePageProps) -> Element {
-    let is_recording = *props.is_recording.read();
-    let (status_class, status_label) = if is_recording {
-        ("status-dot status-recording", "Recording")
-    } else {
-        ("status-dot status-ready", "Ready")
+    let (status_class, status_label) = match *props.rec_state.read() {
+        RecordingState::Idle => ("status-dot status-ready", "Ready"),
+        RecordingState::Recording => ("status-dot status-recording", "Recording"),
+        RecordingState::Processing => ("status-dot status-processing", "Processing"),
     };
     let hotkey = props.config.read().recording.hotkey.clone();
 

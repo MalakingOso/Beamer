@@ -29,22 +29,26 @@ fn parse_hotkey_parts(hotkey: &str) -> (bool, bool, bool, bool, String) {
         }
     }
 
-    if key.is_empty() {
+    // When Win is active, it IS the trigger — no separate key needed.
+    // Otherwise default to Space.
+    if key.is_empty() && !win {
         key = "Space".to_string();
     }
 
     (ctrl, alt, shift, win, key)
 }
 
-/// Reassemble into a format the global_hotkey parser accepts.
-/// Uses "Super" for Win key (parser doesn't accept "WIN").
+/// Reassemble modifier+key into a hotkey string.
+/// Uses "Super" for Win key. Omits key when Win is the trigger.
 fn format_hotkey(ctrl: bool, alt: bool, shift: bool, win: bool, key: &str) -> String {
     let mut parts = Vec::new();
     if ctrl { parts.push("Ctrl"); }
     if alt { parts.push("Alt"); }
     if shift { parts.push("Shift"); }
     if win { parts.push("Super"); }
-    parts.push(key);
+    if !key.is_empty() {
+        parts.push(key);
+    }
     parts.join("+")
 }
 
@@ -160,16 +164,22 @@ pub fn RecordingCard(props: RecordingCardProps) -> Element {
                         ModPill { label: "Win", active: win, on_click: {
                             let key = key.clone();
                             move |_| {
-                                props.on_hotkey_change.call(format_hotkey(ctrl, alt, shift, !win, &key));
+                                let new_win = !win;
+                                // When Win is toggled on, it becomes the trigger (drop key).
+                                // When toggled off, restore Space as default trigger.
+                                let effective_key = if new_win { "" } else if key.is_empty() { "Space" } else { &key };
+                                props.on_hotkey_change.call(format_hotkey(ctrl, alt, shift, new_win, effective_key));
                             }
                         }}
                     }
-                    Select {
-                        value: key.clone(),
-                        options: opts,
-                        onchange: move |new_key: String| {
-                            props.on_hotkey_change.call(format_hotkey(ctrl, alt, shift, win, &new_key));
-                        },
+                    if !win {
+                        Select {
+                            value: key.clone(),
+                            options: opts,
+                            onchange: move |new_key: String| {
+                                props.on_hotkey_change.call(format_hotkey(ctrl, alt, shift, win, &new_key));
+                            },
+                        }
                     }
                 }
             }

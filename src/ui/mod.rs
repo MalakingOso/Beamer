@@ -34,7 +34,8 @@ pub fn launch_app() {
                         .with_visible(false)
                         .with_decorations(false)
                         .with_window_icon(Some(window_icon))
-                        .with_inner_size(dioxus::desktop::LogicalSize::new(500.0_f64, 600.0_f64)),
+                        .with_inner_size(dioxus::desktop::LogicalSize::new(500.0_f64, 600.0_f64))
+                        .with_min_inner_size(dioxus::desktop::LogicalSize::new(580.0_f64, 400.0_f64)),
                 )
                 .with_close_behaviour(WindowCloseBehaviour::WindowHides)
                 .with_exits_when_last_window_closes(false),

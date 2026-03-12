@@ -1,15 +1,17 @@
+use std::rc::Rc;
+
 use dioxus::desktop::tao::dpi::{PhysicalPosition, PhysicalSize};
 use dioxus::desktop::tao::platform::windows::WindowBuilderExtWindows;
 use dioxus::desktop::trayicon::{init_tray_icon, MouseButton, MouseButtonState, TrayIconEvent};
 use dioxus::desktop::{
     use_tray_icon_event_handler, use_tray_menu_event_handler, use_window,
-    Config as DesktopConfig, DesktopContext, HotKeyState, ShortcutHandle, WindowBuilder,
+    Config as DesktopConfig, DesktopContext, WindowBuilder,
 };
 use dioxus::prelude::*;
 
 use crate::config::Config;
-use crate::hotkey::HotkeyEvent;
-use crate::orchestrator;
+use crate::hotkey::{start_ll_hook, HotkeyConfig, HotkeyEvent};
+use crate::orchestrator::{self, RecordingState};
 use crate::tray;
 use crate::ui::pill::RecordingPill;
 use crate::ui::history::TranscriptionHistory;
@@ -39,8 +41,24 @@ pub fn App() -> Element {
 
     let window = use_window();
 
+    // Center the window on the primary monitor (runs once on first render)
+    use_hook({
+        let window = window.clone();
+        move || {
+            if let Some(monitor) = window.primary_monitor() {
+                let monitor_size = monitor.size();
+                let scale = monitor.scale_factor();
+                let win_w = (500.0 * scale) as i32;
+                let win_h = (600.0 * scale) as i32;
+                let x = (monitor_size.width as i32 - win_w) / 2;
+                let y = (monitor_size.height as i32 - win_h) / 2;
+                window.set_outer_position(PhysicalPosition::new(x, y));
+            }
+        }
+    });
+
     let mut current_page = use_signal(|| Page::Home);
-    let is_recording = use_signal(|| false);
+    let rec_state = use_signal(RecordingState::default);
     let overlay_text = use_signal(String::new);
     let last_injection = use_signal(|| "No injection yet".to_string());
     let history = use_signal(TranscriptionHistory::load);
@@ -48,7 +66,7 @@ pub fn App() -> Element {
     let status_log = use_signal(StatusLog::new);
 
     // Shared signals — consumed by child components
-    use_context_provider(|| is_recording);
+    use_context_provider(|| rec_state);
     use_context_provider(|| overlay_text);
     use_context_provider(|| last_injection);
     use_context_provider(|| config);
@@ -104,18 +122,36 @@ pub fn App() -> Element {
         }
     });
 
-    // Show/hide the pill when recording state changes (CSS opacity, not Win32 visibility,
-    // to avoid flash when parent window is shown — Win32 propagates WM_SHOWWINDOW to children)
+    // Update pill appearance when recording state changes (CSS opacity + content swap).
+    // Uses CSS opacity instead of Win32 visibility to avoid flash on parent show/hide.
     use_effect(move || {
-        let recording = *is_recording.read();
+        let state = *rec_state.read();
         let pill_enabled = config.read().appearance.pill_enabled;
-        let should_show = recording && pill_enabled;
         if let Some(ctx) = pill_ctx.read().as_ref() {
-            let opacity = if should_show { "1" } else { "0" };
-            let _ = ctx.webview.evaluate_script(&format!(
-                "document.body.style.opacity='{}';",
-                opacity
-            ));
+            let should_show = state != RecordingState::Idle && pill_enabled;
+            if should_show {
+                let (label, dot_class, bars_class) = match state {
+                    RecordingState::Recording => {
+                        ("Recording", "pill-dot", "pill-bars")
+                    }
+                    RecordingState::Processing => {
+                        ("Processing", "pill-dot processing", "pill-bars processing")
+                    }
+                    _ => unreachable!(),
+                };
+                // Set content first, then fade in
+                let _ = ctx.webview.evaluate_script(&format!(
+                    r#"var d=document.querySelector('[class^="pill-dot"]');if(d)d.className='{dot_class}';
+                       var b=document.querySelector('[class^="pill-bars"]');if(b)b.className='{bars_class}';
+                       var l=document.querySelector('.pill-label');if(l)l.textContent='{label}';
+                       document.body.style.opacity='1';"#,
+                ));
+            } else {
+                // Just fade out — don't touch classes to avoid flash
+                let _ = ctx.webview.evaluate_script(
+                    "document.body.style.opacity='0';",
+                );
+            }
         }
     });
 
@@ -123,7 +159,7 @@ pub fn App() -> Element {
         orchestrator::run(
             rx,
             config,
-            is_recording,
+            rec_state,
             overlay_text,
             last_injection,
             history,
@@ -131,52 +167,34 @@ pub fn App() -> Element {
         )
     });
 
-    // Re-registers the global hotkey whenever config changes (reactive via use_effect)
-    let window_for_shortcut = window.clone();
-    let mut shortcut_handle: Signal<Option<ShortcutHandle>> = use_signal(|| None);
+    // Low-level keyboard hook for hotkey detection (supports Win key combos)
+    let hotkey_handle = use_hook(move || {
+        let (hook_tx, mut hook_rx) = tokio::sync::mpsc::unbounded_channel::<HotkeyEvent>();
 
-    use_effect(move || {
-        let cfg = config.read();
-        let hotkey_str = cfg.recording.hotkey.clone();
-        let is_toggle = cfg.recording.mode == "toggle";
+        let cfg = config.peek();
+        let initial = HotkeyConfig::parse(&cfg.recording.hotkey, cfg.recording.mode == "toggle")
+            .unwrap_or_default();
         drop(cfg);
 
-        if let Some(old) = shortcut_handle.write().take() {
-            window_for_shortcut.remove_shortcut(old);
-        }
+        let handle = Rc::new(start_ll_hook(initial, hook_tx));
 
-        let hotkey = match hotkey_str.parse::<global_hotkey::hotkey::HotKey>() {
-            Ok(hk) => hk,
-            Err(e) => {
-                tracing::error!("Failed to parse hotkey '{}': {:?}", hotkey_str, e);
-                return;
+        // Bridge hook events to the orchestrator coroutine
+        spawn(async move {
+            while let Some(event) = hook_rx.recv().await {
+                coroutine.send(event);
             }
-        };
+        });
 
-        let mut toggled = false;
-        match window_for_shortcut.create_shortcut(hotkey, move |state| {
-            if is_toggle {
-                if state == HotKeyState::Pressed {
-                    toggled = !toggled;
-                    if toggled {
-                        coroutine.send(HotkeyEvent::RecordStart);
-                    } else {
-                        coroutine.send(HotkeyEvent::RecordStop);
-                    }
-                }
-            } else {
-                match state {
-                    HotKeyState::Pressed => coroutine.send(HotkeyEvent::RecordStart),
-                    HotKeyState::Released => coroutine.send(HotkeyEvent::RecordStop),
-                }
-            }
-        }) {
-            Ok(handle) => {
-                shortcut_handle.set(Some(handle));
-            }
-            Err(e) => {
-                tracing::error!("Failed to register hotkey '{}': {:?}", hotkey_str, e);
-            }
+        handle
+    });
+
+    // Re-configure hotkey when config changes
+    use_effect(move || {
+        let cfg = config.read();
+        if let Some(new_config) =
+            HotkeyConfig::parse(&cfg.recording.hotkey, cfg.recording.mode == "toggle")
+        {
+            hotkey_handle.update_config(new_config);
         }
     });
 
@@ -282,7 +300,7 @@ pub fn App() -> Element {
                 match page {
                     Page::Home => rsx! {
                         HomePage {
-                            is_recording,
+                            rec_state,
                             history,
                             config,
                         }
@@ -315,6 +333,7 @@ html, body, #main { background:transparent!important; overflow:hidden;
 
 .pill-dot { width:8px; height:8px; border-radius:50%; background:#DC2626;
   flex-shrink:0; animation:dot-pulse 1.5s ease-in-out infinite; }
+.pill-dot.processing { display:none; }
 @keyframes dot-pulse { 0%,100%{opacity:1} 50%{opacity:0.35} }
 
 .pill-bars { display:flex; align-items:center; gap:3px; height:24px; }
@@ -326,6 +345,19 @@ html, body, #main { background:transparent!important; overflow:hidden;
 .bar-4{height:16px; animation-delay:.45s}
 .bar-5{height:8px;  animation-delay:.6s}
 @keyframes wave { 0%,100%{transform:scaleY(.4)} 50%{transform:scaleY(1)} }
+
+.pill-bars.processing { gap:5px; align-items:center; }
+.pill-bars.processing .bar {
+  width:6px; height:6px; border-radius:50%;
+  animation:bounce-dot 1.2s ease-in-out infinite; }
+.pill-bars.processing .bar-1{animation-delay:0s}
+.pill-bars.processing .bar-2{animation-delay:.15s}
+.pill-bars.processing .bar-3{animation-delay:.3s}
+.pill-bars.processing .bar-4,
+.pill-bars.processing .bar-5{display:none}
+@keyframes bounce-dot {
+  0%,80%,100%{transform:translateY(0)}
+  40%{transform:translateY(-8px)} }
 
 .pill-label { font-size:13px; font-weight:500;
   color:#64708b; letter-spacing:.01em; user-select:none;

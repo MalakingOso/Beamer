@@ -10,12 +10,21 @@ use crate::transcription::{self, TranscriptKind};
 use crate::ui::history::TranscriptionHistory;
 use crate::ui::status_log::{log_status, LogLevel, StatusLog};
 
+/// Recording lifecycle state, drives both the pill overlay and home-page status dot.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum RecordingState {
+    #[default]
+    Idle,
+    Recording,
+    Processing,
+}
+
 /// Central orchestration loop: hotkey events → audio capture → transcription → text injection.
 /// Runs as a Dioxus coroutine, receiving `HotkeyEvent`s and driving recording sessions.
 pub async fn run(
     mut hotkey_rx: UnboundedReceiver<HotkeyEvent>,
     config: Signal<Config>,
-    mut is_recording: Signal<bool>,
+    mut rec_state: Signal<RecordingState>,
     mut overlay_text: Signal<String>,
     mut last_injection: Signal<String>,
     mut history: Signal<TranscriptionHistory>,
@@ -29,7 +38,7 @@ pub async fn run(
             HotkeyEvent::RecordStart => {
                 if let Err(e) = handle_recording(
                     &config,
-                    &mut is_recording,
+                    &mut rec_state,
                     &mut overlay_text,
                     &mut last_injection,
                     &mut history,
@@ -42,7 +51,7 @@ pub async fn run(
                     log_status(&mut status_log, LogLevel::Error, format!("Recording error: {}", e));
                     show_notification("Beamer", &format!("Recording error: {}", e));
                 }
-                is_recording.set(false);
+                rec_state.set(RecordingState::Idle);
                 overlay_text.set(String::new());
             }
             HotkeyEvent::RecordStop => {}
@@ -54,7 +63,7 @@ pub async fn run(
 /// On stop, sends a commit signal and drains final transcripts before returning.
 async fn handle_recording(
     config: &Signal<Config>,
-    is_recording: &mut Signal<bool>,
+    rec_state: &mut Signal<RecordingState>,
     overlay_text: &mut Signal<String>,
     last_injection: &mut Signal<String>,
     history: &mut Signal<TranscriptionHistory>,
@@ -80,7 +89,7 @@ async fn handle_recording(
     if backend == "elevenlabs_batch" || backend == "voxtral_batch" {
         return handle_batch_recording(
             backend, &api_key, language, &preferred_method, &cfg,
-            is_recording, overlay_text, last_injection, history, hotkey_rx, status_log,
+            rec_state, overlay_text, last_injection, history, hotkey_rx, status_log,
         ).await;
     }
 
@@ -112,7 +121,7 @@ async fn handle_recording(
     };
     let (_stream, mut audio_rx) = pipeline.start()?;
 
-    is_recording.set(true);
+    rec_state.set(RecordingState::Recording);
     overlay_text.set("Listening...".to_string());
     log_status(status_log, LogLevel::Info, "Recording started");
     let did_pause = if cfg.recording.pause_media {
@@ -128,6 +137,7 @@ async fn handle_recording(
                 match hotkey_event {
                     Some(HotkeyEvent::RecordStop) | None => {
                         crate::sounds::play_stop_sound();
+                        rec_state.set(RecordingState::Processing);
                         if did_pause {
                             crate::media::resume_media();
                         }
@@ -238,7 +248,7 @@ async fn handle_batch_recording(
     language: &str,
     preferred_method: &str,
     cfg: &Config,
-    is_recording: &mut Signal<bool>,
+    rec_state: &mut Signal<RecordingState>,
     overlay_text: &mut Signal<String>,
     last_injection: &mut Signal<String>,
     history: &mut Signal<TranscriptionHistory>,
@@ -255,7 +265,7 @@ async fn handle_batch_recording(
     };
     let (_stream, mut audio_rx) = pipeline.start()?;
 
-    is_recording.set(true);
+    rec_state.set(RecordingState::Recording);
     overlay_text.set("Listening...".to_string());
     log_status(status_log, LogLevel::Info, "Recording started (batch mode)");
     let did_pause = if cfg.recording.pause_media {
@@ -273,6 +283,7 @@ async fn handle_batch_recording(
                 match hotkey_event {
                     Some(HotkeyEvent::RecordStop) | None => {
                         crate::sounds::play_stop_sound();
+                        rec_state.set(RecordingState::Processing);
                         if did_pause {
                             crate::media::resume_media();
                         }
