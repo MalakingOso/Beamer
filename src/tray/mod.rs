@@ -5,22 +5,25 @@ use dioxus::desktop::trayicon::Icon;
 #[derive(Clone)]
 pub struct TrayMenuItems {
     pub settings: MenuItem,
+    pub check_updates: MenuItem,
     pub quit: MenuItem,
 }
 
 pub fn build_tray_menu() -> (Menu, TrayMenuItems) {
     let menu = Menu::new();
     let settings = MenuItem::new("Settings", true, None);
+    let check_updates = MenuItem::new("Check for Updates", true, None);
     let quit = MenuItem::new("Quit", true, None);
 
     menu.append_items(&[
         &settings,
+        &check_updates,
         &PredefinedMenuItem::separator(),
         &quit,
     ])
     .expect("Failed to build tray menu");
 
-    let items = TrayMenuItems { settings, quit };
+    let items = TrayMenuItems { settings, check_updates, quit };
     (menu, items)
 }
 

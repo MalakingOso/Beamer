@@ -38,6 +38,7 @@ futures-util = "0.3"
 image = { version = "0.25", default-features = false, features = ["png", "ico"] }
 rodio = { version = "0.20", default-features = false, features = ["mp3"] }
 reqwest = { version = "0.12", default-features = false, features = ["multipart", "native-tls", "json"] }
+self_update = { version = "0.42", features = ["archive-zip"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58", features = [

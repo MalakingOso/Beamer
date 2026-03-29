@@ -51,6 +51,8 @@ pub struct AppearanceConfig {
     pub pill_enabled: bool,
     #[serde(default)]
     pub auto_start: bool,
+    #[serde(default = "default_true")]
+    pub auto_check_updates: bool,
 }
 
 fn default_hotkey() -> String { "Ctrl+Space".into() }
@@ -105,6 +107,7 @@ impl Default for AppearanceConfig {
         Self {
             pill_enabled: default_true(),
             auto_start: false,
+            auto_check_updates: default_true(),
         }
     }
 }

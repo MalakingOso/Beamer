@@ -3,6 +3,7 @@ pub mod appearance_card;
 pub mod debug_card;
 pub mod recording_card;
 pub mod transcription_card;
+pub mod update_card;
 pub mod vocabulary_card;
 
 use dioxus::prelude::*;
@@ -12,14 +13,17 @@ use self::appearance_card::AppearanceCard;
 use self::debug_card::DebugCard;
 use self::recording_card::RecordingCard;
 use self::transcription_card::TranscriptionCard;
+use self::update_card::UpdateCard;
 use crate::config::Config;
 use crate::ui::status_log::StatusLog;
+use crate::update::UpdateStatus;
 
 #[derive(Props, Clone, PartialEq)]
 pub struct SettingsPageProps {
     pub config: Signal<Config>,
     pub last_injection: Signal<String>,
     pub status_log: Signal<StatusLog>,
+    pub update_status: Signal<UpdateStatus>,
 }
 
 #[component]
@@ -93,6 +97,15 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                             _ => {}
                         }
                     });
+                },
+            }
+
+            UpdateCard {
+                update_status: props.update_status,
+                auto_check_updates: config.read().appearance.auto_check_updates,
+                on_auto_check_toggle: move |v: bool| {
+                    config.write().appearance.auto_check_updates = v;
+                    let _ = config.read().save();
                 },
             }
 

@@ -13,6 +13,7 @@ use crate::config::Config;
 use crate::hotkey::{start_ll_hook, HotkeyConfig, HotkeyEvent};
 use crate::orchestrator::{self, RecordingState};
 use crate::tray;
+use crate::update::{self, UpdateStatus};
 use crate::ui::pill::RecordingPill;
 use crate::ui::history::TranscriptionHistory;
 use crate::ui::history_page::HistoryPage;
@@ -64,6 +65,7 @@ pub fn App() -> Element {
     let history = use_signal(TranscriptionHistory::load);
     let config = use_signal(|| Config::load().unwrap_or_default());
     let status_log = use_signal(StatusLog::new);
+    let mut update_status = use_signal(UpdateStatus::default);
 
     // Shared signals — consumed by child components
     use_context_provider(|| rec_state);
@@ -104,6 +106,7 @@ pub fn App() -> Element {
                     .with_skip_taskbar(true);
 
                 let cfg = DesktopConfig::new()
+                    .with_data_directory(super::webview_data_dir())
                     .with_window(builder)
                     .with_background_color((0, 0, 0, 0))
                     .with_custom_head(format!(r#"<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&display=swap" rel="stylesheet"><style>body{{opacity:0;transition:opacity 0.15s ease;}}{}</style>"#, PILL_CSS))
@@ -198,14 +201,69 @@ pub fn App() -> Element {
         }
     });
 
+    // Background update check on startup (3s delay to keep launch snappy)
+    use_hook({
+        let auto_check = config.peek().appearance.auto_check_updates;
+        move || {
+            if auto_check {
+                spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    update_status.set(UpdateStatus::Checking);
+                    let result = tokio::task::spawn_blocking(update::check_for_update_blocking).await;
+                    match result {
+                        Ok(Ok(Some(info))) => {
+                            tracing::info!("Update available: v{}", info.version);
+                            update_status.set(UpdateStatus::Available { version: info.version });
+                        }
+                        Ok(Ok(None)) => {
+                            tracing::debug!("No update available");
+                            update_status.set(UpdateStatus::Idle);
+                        }
+                        Ok(Err(e)) => {
+                            tracing::warn!("Update check failed: {}", e);
+                            update_status.set(UpdateStatus::Idle);
+                        }
+                        Err(e) => {
+                            tracing::warn!("Update check task panicked: {}", e);
+                            update_status.set(UpdateStatus::Idle);
+                        }
+                    }
+                });
+            }
+        }
+    });
+
     use_tray_menu_event_handler({
         let quit_id = items.quit.id().clone();
         let settings_id = items.settings.id().clone();
+        let check_updates_id = items.check_updates.id().clone();
         let window = window.clone();
         move |event| {
             if event.id == quit_id {
                 std::process::exit(0);
             } else if event.id == settings_id {
+                current_page.set(Page::Settings);
+                window.set_visible(true);
+                window.set_focus();
+            } else if event.id == check_updates_id {
+                spawn(async move {
+                    update_status.set(UpdateStatus::Checking);
+                    let result = tokio::task::spawn_blocking(update::check_for_update_blocking).await;
+                    match result {
+                        Ok(Ok(Some(info))) => {
+                            update_status.set(UpdateStatus::Available { version: info.version });
+                        }
+                        Ok(Ok(None)) => {
+                            update_status.set(UpdateStatus::Idle);
+                        }
+                        Ok(Err(e)) => {
+                            update_status.set(UpdateStatus::Error(e.to_string()));
+                        }
+                        Err(e) => {
+                            update_status.set(UpdateStatus::Error(format!("Task panicked: {e}")));
+                        }
+                    }
+                });
                 current_page.set(Page::Settings);
                 window.set_visible(true);
                 window.set_focus();
@@ -312,7 +370,7 @@ pub fn App() -> Element {
                         VocabPage {}
                     },
                     Page::Settings => rsx! {
-                        SettingsPage { config, last_injection, status_log }
+                        SettingsPage { config, last_injection, status_log, update_status }
                     },
                 }
             }

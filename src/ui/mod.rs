@@ -9,9 +9,18 @@ pub mod settings;
 pub mod status_log;
 pub mod vocab_page;
 
+use std::path::PathBuf;
+
 use dioxus::desktop::tao::window::Icon;
 use dioxus::desktop::{Config, WindowBuilder, WindowCloseBehaviour};
 use dioxus::prelude::*;
+
+/// WebView2 data dir must be writable — Program Files is not.
+pub fn webview_data_dir() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Beamer")
+}
 
 /// Configure and launch the Dioxus desktop window. This call blocks the main
 /// thread for the lifetime of the application — the tray icon keeps the process
@@ -28,6 +37,7 @@ pub fn launch_app() {
     LaunchBuilder::new()
         .with_cfg(
             Config::new()
+                .with_data_directory(webview_data_dir())
                 .with_window(
                     WindowBuilder::new()
                         .with_title("Beamer")

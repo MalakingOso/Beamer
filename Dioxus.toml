@@ -1,0 +1,27 @@
+[application]
+name = "Beamer"
+out_dir = "dist"
+asset_dir = "assets"
+
+[bundle]
+identifier = "com.beamer.app"
+publisher = "Beamer"
+icon = ["assets/icon.ico", "assets/icon.png"]
+resources = ["assets/*", "assets/fonts/*"]
+copyright = "Copyright Beamer"
+category = "Utility"
+short_description = "Voice dictation for Windows"
+long_description = """
+Beamer is a system-tray dictation app that captures your voice, transcribes it using cloud APIs, and injects text into any focused input field.
+"""
+
+[bundle.windows]
+icon_path = "assets/icon.ico"
+
+[bundle.windows.nsis]
+sidebar_image = "installer/welcome.bmp"
+header_image = "installer/header.bmp"
+installer_icon = "assets/icon.ico"
+install_mode = "Both"
+display_language_selector = false
+start_menu_folder = "Beamer"

@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::UnboundedSender;
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetMessageW, PostThreadMessageW, SetWindowsHookExW, UnhookWindowsHookEx,
     HHOOK, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN,
@@ -12,6 +13,16 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::hotkey::HotkeyEvent;
+
+/// Query the OS for whether a key is physically held right now.
+/// This avoids stale state when key-up events are dropped by Windows.
+fn is_key_physically_held(vk: i32) -> bool {
+    unsafe { GetAsyncKeyState(vk) < 0 }
+}
+
+fn modifier_physically_held(left_vk: i32, right_vk: i32) -> bool {
+    is_key_physically_held(left_vk) || is_key_physically_held(right_vk)
+}
 
 const VK_LCONTROL: u32 = 0xA2;
 const VK_RCONTROL: u32 = 0xA3;
@@ -192,10 +203,24 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
 
         if is_press {
             if !state.trigger_held {
-                // First press: check if required modifiers match
-                let mods_match = state.ctrl_held == req_ctrl
-                    && state.alt_held == req_alt
-                    && state.shift_held == req_shift;
+                // First press: check physical modifier state to avoid stale
+                // tracked state (key-up events can be dropped by Windows)
+                let ctrl_down = modifier_physically_held(
+                    VK_LCONTROL as i32, VK_RCONTROL as i32,
+                );
+                let alt_down = modifier_physically_held(
+                    VK_LMENU as i32, VK_RMENU as i32,
+                );
+                let shift_down = modifier_physically_held(
+                    VK_LSHIFT as i32, VK_RSHIFT as i32,
+                );
+                let mods_match = ctrl_down == req_ctrl
+                    && alt_down == req_alt
+                    && shift_down == req_shift;
+                // Sync tracked state to match reality
+                state.ctrl_held = ctrl_down;
+                state.alt_held = alt_down;
+                state.shift_held = shift_down;
 
                 if mods_match {
                     state.trigger_held = true;

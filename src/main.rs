@@ -8,6 +8,7 @@ mod sounds;
 mod tray;
 mod transcription;
 mod ui;
+mod update;
 
 use anyhow::Result;
 

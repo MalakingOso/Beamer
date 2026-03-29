@@ -28,12 +28,11 @@ pub fn Select(props: SelectProps) -> Element {
     rsx! {
         select {
             class: "select",
-            value: "{props.value}",
             onchange: move |e: Event<FormData>| {
                 props.onchange.call(e.value().to_string());
             },
             for (val, label) in &props.options {
-                option { value: "{val}", "{label}" }
+                option { value: "{val}", selected: *val == props.value, "{label}" }
             }
         }
     }
