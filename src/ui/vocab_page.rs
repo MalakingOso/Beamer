@@ -145,64 +145,62 @@ pub fn VocabPage() -> Element {
                     span { class: "empty-state-hint", "Add terms above to improve transcription accuracy." }
                 }
             } else {
-                div { class: "vocab-list",
-                    for (idx, term) in &filtered {
-                        {
-                            let idx = *idx;
-                            let term = term.clone();
-                            let is_editing = *editing.read() == Some(idx);
-                            rsx! {
-                                div {
-                                    class: if is_editing { "vocab-row editing" } else { "vocab-row" },
-                                    key: "{idx}",
-                                    if is_editing {
-                                        input {
-                                            class: "input input-mono vocab-edit-input",
-                                            value: "{edit_value}",
-                                            oninput: move |e: Event<FormData>| {
-                                                edit_value.set(e.value().to_string());
-                                            },
-                                            onkeypress: move |e: Event<KeyboardData>| {
-                                                if e.key() == Key::Enter {
-                                                    save_edit(idx);
-                                                } else if e.key() == Key::Escape {
-                                                    editing.set(None);
+                for (idx, term) in &filtered {
+                    {
+                        let idx = *idx;
+                        let term = term.clone();
+                        let is_editing = *editing.read() == Some(idx);
+                        rsx! {
+                            div {
+                                class: if is_editing { "vocab-term-card editing" } else { "vocab-term-card" },
+                                key: "{idx}",
+                                if is_editing {
+                                    input {
+                                        class: "input input-mono vocab-edit-input",
+                                        value: "{edit_value}",
+                                        oninput: move |e: Event<FormData>| {
+                                            edit_value.set(e.value().to_string());
+                                        },
+                                        onkeypress: move |e: Event<KeyboardData>| {
+                                            if e.key() == Key::Enter {
+                                                save_edit(idx);
+                                            } else if e.key() == Key::Escape {
+                                                editing.set(None);
+                                            }
+                                        },
+                                        autofocus: true,
+                                    }
+                                    button {
+                                        class: "btn btn-small",
+                                        onclick: move |_| save_edit(idx),
+                                        "Save"
+                                    }
+                                    button {
+                                        class: "btn btn-small",
+                                        onclick: move |_| editing.set(None),
+                                        "Cancel"
+                                    }
+                                } else {
+                                    span { class: "vocab-row-text", "{term}" }
+                                    div { class: "vocab-row-actions",
+                                        button {
+                                            class: "vocab-action-btn",
+                                            onclick: {
+                                                let term = term.clone();
+                                                move |_| {
+                                                    edit_value.set(term.clone());
+                                                    editing.set(Some(idx));
                                                 }
                                             },
-                                            autofocus: true,
+                                            IconPencil { size: 15 }
                                         }
                                         button {
-                                            class: "btn btn-small",
-                                            onclick: move |_| save_edit(idx),
-                                            "Save"
-                                        }
-                                        button {
-                                            class: "btn btn-small",
-                                            onclick: move |_| editing.set(None),
-                                            "Cancel"
-                                        }
-                                    } else {
-                                        span { class: "vocab-row-text", "{term}" }
-                                        div { class: "vocab-row-actions",
-                                            button {
-                                                class: "vocab-action-btn",
-                                                onclick: {
-                                                    let term = term.clone();
-                                                    move |_| {
-                                                        edit_value.set(term.clone());
-                                                        editing.set(Some(idx));
-                                                    }
-                                                },
-                                                IconPencil { size: 15 }
-                                            }
-                                            button {
-                                                class: "vocab-action-btn danger",
-                                                onclick: {
-                                                    let term = term.clone();
-                                                    move |_| remove_term(term.clone())
-                                                },
-                                                IconTrash { size: 15 }
-                                            }
+                                            class: "vocab-action-btn danger",
+                                            onclick: {
+                                                let term = term.clone();
+                                                move |_| remove_term(term.clone())
+                                            },
+                                            IconTrash { size: 15 }
                                         }
                                     }
                                 }
@@ -214,3 +212,5 @@ pub fn VocabPage() -> Element {
         }
     }
 }
+
+

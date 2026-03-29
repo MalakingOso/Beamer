@@ -4,7 +4,7 @@ use dioxus::desktop::tao::dpi::{PhysicalPosition, PhysicalSize};
 use dioxus::desktop::tao::platform::windows::WindowBuilderExtWindows;
 use dioxus::desktop::trayicon::{init_tray_icon, MouseButton, MouseButtonState, TrayIconEvent};
 use dioxus::desktop::{
-    use_tray_icon_event_handler, use_tray_menu_event_handler, use_window,
+    use_muda_event_handler, use_tray_icon_event_handler, use_window,
     Config as DesktopConfig, DesktopContext, WindowBuilder,
 };
 use dioxus::prelude::*;
@@ -233,18 +233,49 @@ pub fn App() -> Element {
         }
     });
 
-    use_tray_menu_event_handler({
-        let quit_id = items.quit.id().clone();
+    // NOTE: use_muda_event_handler instead of use_tray_menu_event_handler because
+    // dioxus-desktop 0.7.3 has a bug: set_menubar_receiver() claims the muda OnceCell
+    // before set_tray_icon_receiver(), so tray menu clicks arrive as MudaMenuEvent,
+    // never as TrayMenuEvent.
+    use_muda_event_handler({
+        let home_id = items.home.id().clone();
+        let history_id = items.history.id().clone();
+        let vocab_id = items.vocab.id().clone();
         let settings_id = items.settings.id().clone();
+        let paste_last_id = items.paste_last.id().clone();
         let check_updates_id = items.check_updates.id().clone();
+        let quit_id = items.quit.id().clone();
         let window = window.clone();
         move |event| {
             if event.id == quit_id {
+                tracing::info!("Quit menu item clicked — exiting");
                 std::process::exit(0);
+            } else if event.id == home_id {
+                current_page.set(Page::Home);
+                window.set_visible(true);
+                window.set_focus();
+            } else if event.id == history_id {
+                current_page.set(Page::History);
+                window.set_visible(true);
+                window.set_focus();
+            } else if event.id == vocab_id {
+                current_page.set(Page::Vocab);
+                window.set_visible(true);
+                window.set_focus();
             } else if event.id == settings_id {
                 current_page.set(Page::Settings);
                 window.set_visible(true);
                 window.set_focus();
+            } else if event.id == paste_last_id {
+                let text = last_injection.read().clone();
+                if text != "No injection yet" && !text.is_empty() {
+                    let preferred = config.read().injection.preferred_method.clone();
+                    spawn(async move {
+                        if let Err(e) = crate::injection::inject_text(&text, &preferred).await {
+                            tracing::error!("Paste last transcript failed: {e}");
+                        }
+                    });
+                }
             } else if event.id == check_updates_id {
                 spawn(async move {
                     update_status.set(UpdateStatus::Checking);

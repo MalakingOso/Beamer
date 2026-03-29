@@ -265,7 +265,7 @@ body {
   flex: 1;
   min-width: 0;
   min-height: 0;
-  overflow-y: overlay;
+  overflow-y: auto;
   overflow-x: hidden;
   padding: 24px 28px;
   display: flex;
@@ -932,32 +932,28 @@ body {
   width: 100%;
 }
 
-.vocab-list {
-  display: flex;
-  flex-direction: column;
-  background: var(--bg-surface);
-  border: 2px solid var(--border);
-  border-radius: var(--radius-md);
-  overflow: hidden;
-}
-
-.vocab-row {
+.vocab-term-card {
   display: flex;
   align-items: center;
   padding: 0 16px;
   min-height: 44px;
-  transition: background var(--duration-fast) var(--ease);
+  background: var(--bg-surface);
+  border: 2px solid var(--border);
+  border-radius: var(--radius-md);
+  transition: background var(--duration-fast) var(--ease),
+              box-shadow var(--duration-fast) var(--ease);
 }
 
-.vocab-row + .vocab-row {
-  border-top: 1px solid var(--border);
+.vocab-term-card + .vocab-term-card {
+  margin-top: -12px;
 }
 
-.vocab-row:hover {
+.vocab-term-card:hover {
   background: var(--bg-hover);
+  box-shadow: 2px 4px 0 0 rgba(75, 0, 130, 0.08);
 }
 
-.vocab-row.editing {
+.vocab-term-card.editing {
   background: var(--bg-hover);
   gap: 8px;
   padding: 6px 16px;
@@ -982,7 +978,7 @@ body {
   transition: opacity var(--duration-fast) var(--ease);
 }
 
-.vocab-row:hover .vocab-row-actions {
+.vocab-term-card:hover .vocab-row-actions {
   opacity: 1;
 }
 

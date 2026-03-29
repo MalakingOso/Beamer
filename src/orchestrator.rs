@@ -335,10 +335,10 @@ async fn handle_batch_recording(
     );
 
     let start = tokio::time::Instant::now();
+    let vocab = crate::config::vocabulary::Vocabulary::load()?.list().to_vec();
     let result = if backend == "voxtral_batch" {
-        transcription::transcribe_voxtral_batch(api_key, pcm_buffer).await
+        transcription::transcribe_voxtral_batch(api_key, pcm_buffer, &vocab).await
     } else {
-        let vocab = crate::config::vocabulary::Vocabulary::load()?.list().to_vec();
         transcription::transcribe_batch(api_key, pcm_buffer, language, &vocab).await
     };
     match result {
