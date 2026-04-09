@@ -40,9 +40,22 @@ fn main() {
     ui::launch_app();
 }
 
-/// Prevent multiple Beamer instances via a named kernel mutex.
-/// Returns false if another instance already holds the mutex.
+// ─── Single-instance guard ────────────────────────────────────────────────────
+
+/// Prevent multiple Beamer instances. Returns false if another instance is already running.
 fn ensure_single_instance() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        ensure_single_instance_windows()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        ensure_single_instance_lockfile()
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_single_instance_windows() -> bool {
     use windows::Win32::System::Threading::CreateMutexW;
     use windows::core::w;
 
@@ -58,8 +71,41 @@ fn ensure_single_instance() -> bool {
     }
 }
 
-/// Add or remove Beamer from the Windows Run registry key (HKCU\...\Run).
+#[cfg(not(target_os = "windows"))]
+fn ensure_single_instance_lockfile() -> bool {
+    let lock_path = std::env::temp_dir().join("beamer.lock");
+
+    // If a PID file exists, check if that process is still alive
+    if let Ok(contents) = std::fs::read_to_string(&lock_path) {
+        if let Ok(pid) = contents.trim().parse::<u32>() {
+            // /proc/<pid> exists for every running process on Linux
+            if std::path::Path::new(&format!("/proc/{}", pid)).exists() {
+                return false;
+            }
+        }
+    }
+
+    // Write our PID — best effort, don't fail startup if this doesn't work
+    let _ = std::fs::write(&lock_path, format!("{}", std::process::id()));
+    true
+}
+
+// ─── Auto-start ───────────────────────────────────────────────────────────────
+
+/// Add or remove Beamer from the system's auto-start mechanism.
 pub fn set_auto_start(enable: bool) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        set_auto_start_windows(enable)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        set_auto_start_xdg(enable)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn set_auto_start_windows(enable: bool) -> Result<()> {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
 
@@ -94,6 +140,32 @@ pub fn set_auto_start(enable: bool) -> Result<()> {
             ])
             .creation_flags(CREATE_NO_WINDOW)
             .output()?;
+    }
+
+    Ok(())
+}
+
+/// XDG autostart: writes/removes ~/.config/autostart/beamer.desktop
+#[cfg(not(target_os = "windows"))]
+fn set_auto_start_xdg(enable: bool) -> Result<()> {
+    let autostart_dir = dirs::config_dir()
+        .ok_or_else(|| anyhow::anyhow!("Could not determine config directory"))?
+        .join("autostart");
+
+    let desktop_path = autostart_dir.join("beamer.desktop");
+
+    if enable {
+        std::fs::create_dir_all(&autostart_dir)?;
+        let exe_path = std::env::current_exe()?;
+        let desktop = format!(
+            "[Desktop Entry]\nType=Application\nName=Beamer\nExec={}\nX-GNOME-Autostart-enabled=true\n",
+            exe_path.display()
+        );
+        std::fs::write(&desktop_path, desktop)?;
+        tracing::info!("XDG autostart written to {:?}", desktop_path);
+    } else if desktop_path.exists() {
+        std::fs::remove_file(&desktop_path)?;
+        tracing::info!("XDG autostart entry removed");
     }
 
     Ok(())

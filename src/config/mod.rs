@@ -38,11 +38,14 @@ pub struct TranscriptionConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InjectionConfig {
-    /// "auto" | "uia" | "sendinput" | "clipboard" — selects the text injection strategy
-    #[serde(default = "default_preferred_method")]
-    pub preferred_method: String,
+    /// Ordered list of injection backends to try (e.g. ["clipboard", "wtype", "enigo"]).
+    #[serde(default = "default_backends")]
+    pub backends: Vec<String>,
     #[serde(default)]
     pub debug_logging: bool,
+    /// Migration: old field from previous config format. Read but never written back.
+    #[serde(default, skip_serializing)]
+    preferred_method: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,7 +62,7 @@ fn default_hotkey() -> String { "Ctrl+Space".into() }
 fn default_mode() -> String { "hold".into() }
 fn default_backend() -> String { "elevenlabs".into() }
 fn default_language() -> String { "en".into() }
-fn default_preferred_method() -> String { "auto".into() }
+fn default_backends() -> Vec<String> { crate::injection::default_backend_names() }
 fn default_true() -> bool { true }
 
 
@@ -96,8 +99,9 @@ impl Default for TranscriptionConfig {
 impl Default for InjectionConfig {
     fn default() -> Self {
         Self {
-            preferred_method: default_preferred_method(),
+            backends: default_backends(),
             debug_logging: false,
+            preferred_method: None,
         }
     }
 }
@@ -126,7 +130,20 @@ impl Config {
         let path = Self::config_path();
         if path.exists() {
             let contents = std::fs::read_to_string(&path)?;
-            let config: Config = toml::from_str(&contents)?;
+            let mut config: Config = toml::from_str(&contents)?;
+
+            // Migrate old preferred_method → backends list
+            if let Some(ref method) = config.injection.preferred_method {
+                if config.injection.backends == default_backends() {
+                    config.injection.backends = match method.as_str() {
+                        "auto" => default_backends(),
+                        other => vec![other.to_string()],
+                    };
+                }
+                config.injection.preferred_method = None;
+                let _ = config.save();
+            }
+
             Ok(config)
         } else {
             let config = Config::default();

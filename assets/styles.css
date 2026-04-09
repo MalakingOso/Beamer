@@ -664,6 +664,51 @@ body {
   align-items: flex-start;
 }
 
+/* ===== Injection Card ===== */
+.injection-backend-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.injection-backend-controls {
+  display: flex;
+  gap: 2px;
+  align-items: center;
+}
+
+.status-dot.ok {
+  background: var(--success);
+}
+
+.status-dot.err {
+  background: var(--danger);
+}
+
+.btn-icon {
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  color: var(--fg-muted);
+  font-size: 10px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+}
+
+.btn-icon:hover {
+  background: var(--bg-elevated);
+  color: var(--fg-primary);
+}
+
+.btn-icon.remove:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
 /* ===== Status Dot ===== */
 .status-dot {
   width: 8px;

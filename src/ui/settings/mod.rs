@@ -1,6 +1,7 @@
 pub mod api_keys_card;
 pub mod appearance_card;
 pub mod debug_card;
+pub mod injection_card;
 pub mod recording_card;
 pub mod transcription_card;
 pub mod update_card;
@@ -11,6 +12,7 @@ use dioxus::prelude::*;
 use self::api_keys_card::ApiKeysCard;
 use self::appearance_card::AppearanceCard;
 use self::debug_card::DebugCard;
+use self::injection_card::InjectionCard;
 use self::recording_card::RecordingCard;
 use self::transcription_card::TranscriptionCard;
 use self::update_card::UpdateCard;
@@ -62,6 +64,14 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                 language: config.read().transcription.language.clone(),
                 on_language_change: move |lang: String| {
                     config.write().transcription.language = lang;
+                    let _ = config.read().save();
+                },
+            }
+
+            InjectionCard {
+                backends: config.read().injection.backends.clone(),
+                on_backends_change: move |backends: Vec<String>| {
+                    config.write().injection.backends = backends;
                     let _ = config.read().save();
                 },
             }

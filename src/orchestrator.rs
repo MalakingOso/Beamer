@@ -73,7 +73,7 @@ async fn handle_recording(
     let cfg = config.read().clone();
     let backend = &cfg.transcription.backend;
     let language = &cfg.transcription.language;
-    let preferred_method = cfg.injection.preferred_method.clone();
+    let backends = cfg.injection.backends.clone();
 
     let (key_name, display_name) = match backend.as_str() {
         "voxtral" | "voxtral_batch" => ("mistral_api_key", "Voxtral"),
@@ -81,6 +81,7 @@ async fn handle_recording(
     };
     let api_key = crate::config::load_api_key(key_name);
     if api_key.is_empty() {
+        tracing::error!("No {} API key found in keyring (looked up '{}'). Open Settings to add one.", display_name, key_name);
         log_status(status_log, LogLevel::Error, format!("No {} API key configured — open Settings", display_name));
         show_notification("Beamer", &format!("No {} API key configured. Open Settings to add one.", display_name));
         return Ok(());
@@ -88,7 +89,7 @@ async fn handle_recording(
 
     if backend == "elevenlabs_batch" || backend == "voxtral_batch" {
         return handle_batch_recording(
-            backend, &api_key, language, &preferred_method, &cfg,
+            backend, &api_key, language, &backends, &cfg,
             rec_state, overlay_text, last_injection, history, hotkey_rx, status_log,
         ).await;
     }
@@ -174,7 +175,7 @@ async fn handle_recording(
                                                 if !ev.text.trim().is_empty() {
                                                     tracing::info!("[final] {}", ev.text);
                                                     log_status(status_log, LogLevel::Info, format!("[final] {}", ev.text));
-                                                    do_injection(&ev.text, &preferred_method, last_injection, history, overlay_text, status_log).await;
+                                                    do_injection(&ev.text, &backends, last_injection, history, overlay_text, status_log).await;
                                                 }
                                             }
                                         }
@@ -211,7 +212,7 @@ async fn handle_recording(
                             if !ev.text.trim().is_empty() {
                                 tracing::info!("[final] {}", ev.text);
                                 log_status(status_log, LogLevel::Info, format!("[final] {}", ev.text));
-                                do_injection(&ev.text, &preferred_method, last_injection, history, overlay_text, status_log).await;
+                                do_injection(&ev.text, &backends, last_injection, history, overlay_text, status_log).await;
                             }
                         }
                         TranscriptKind::Partial => {
@@ -246,7 +247,7 @@ async fn handle_batch_recording(
     backend: &str,
     api_key: &str,
     language: &str,
-    preferred_method: &str,
+    backends: &[String],
     cfg: &Config,
     rec_state: &mut Signal<RecordingState>,
     overlay_text: &mut Signal<String>,
@@ -325,6 +326,31 @@ async fn handle_batch_recording(
         return Ok(());
     }
 
+    // Check audio levels — if the buffer is all silence, the mic may not be
+    // capturing or the wrong device is selected
+    let max_amplitude = pcm_buffer
+        .chunks_exact(2)
+        .map(|c| i16::from_le_bytes([c[0], c[1]]).unsigned_abs())
+        .max()
+        .unwrap_or(0);
+    let rms = {
+        let sum: f64 = pcm_buffer
+            .chunks_exact(2)
+            .map(|c| {
+                let s = i16::from_le_bytes([c[0], c[1]]) as f64;
+                s * s
+            })
+            .sum();
+        let count = pcm_buffer.len() / 2;
+        (sum / count as f64).sqrt()
+    };
+    tracing::info!("Audio stats: {:.1}s, peak={}, RMS={:.0}", pcm_buffer.len() as f64 / 32000.0, max_amplitude, rms);
+    if max_amplitude < 100 {
+        log_status(status_log, LogLevel::Warn,
+            "Audio appears to be silence — check that your microphone is working and selected as the default input device");
+        tracing::warn!("Audio buffer is essentially silence (peak={}). Wrong input device or mic muted?", max_amplitude);
+    }
+
     overlay_text.set("Transcribing...".to_string());
     let audio_secs = pcm_buffer.len() as f64 / (16000.0 * 2.0);
     let backend_label = if backend == "voxtral_batch" { "Voxtral" } else { "ElevenLabs" };
@@ -350,7 +376,7 @@ async fn handle_batch_recording(
                 format!("[batch] {:.1}s round-trip: {}", elapsed.as_secs_f64(), text),
             );
             if !text.trim().is_empty() {
-                do_injection(&text, preferred_method, last_injection, history, overlay_text, status_log).await;
+                do_injection(&text, backends, last_injection, history, overlay_text, status_log).await;
             }
         }
         Err(e) => {
@@ -367,7 +393,7 @@ async fn handle_batch_recording(
 /// Inject transcribed text into the focused window using the configured fallback chain.
 async fn do_injection(
     text: &str,
-    preferred_method: &str,
+    backends: &[String],
     last_injection: &mut Signal<String>,
     history: &mut Signal<TranscriptionHistory>,
     overlay_text: &mut Signal<String>,
@@ -375,7 +401,7 @@ async fn do_injection(
 ) {
     overlay_text.set(text.to_string());
 
-    match injection::inject_text(text, preferred_method).await {
+    match injection::inject_text(text, backends).await {
         Ok(result) => {
             let status = format!("{}: {}", result.method, result.target_info);
             tracing::info!("Injected via {}", status);
@@ -383,23 +409,81 @@ async fn do_injection(
             last_injection.set(status);
         }
         Err(e) => {
-            tracing::error!("Injection failed: {}", e);
-            log_status(status_log, LogLevel::Error, format!("Injection failed: {}", e));
-            last_injection.set(format!("Failed: {}", e));
+            tracing::error!("Injection failed: {}, trying clipboard-only fallback", e);
+            // Last resort: copy to clipboard and notify user to paste manually
+            match clipboard_only_fallback(text).await {
+                Ok(()) => {
+                    let msg = "Copied to clipboard — press Ctrl+V to paste";
+                    tracing::info!("{}", msg);
+                    log_status(status_log, LogLevel::Info, msg.to_string());
+                    last_injection.set(msg.to_string());
+                    show_notification("Beamer", msg);
+                }
+                Err(cb_err) => {
+                    tracing::error!("Clipboard fallback also failed: {}", cb_err);
+                    log_status(status_log, LogLevel::Error, format!("Injection failed: {}", e));
+                    last_injection.set(format!("Failed: {}", e));
+                }
+            }
         }
     }
 
     history.write().append(text.to_string());
 }
 
-/// Show a Windows toast notification via WinRT (powershell app ID).
+/// Last-resort fallback: just put text on clipboard without sending Ctrl+V.
+/// User pastes manually. This avoids all compositor/keyboard protocol issues.
+async fn clipboard_only_fallback(text: &str) -> anyhow::Result<()> {
+    let text = text.to_string();
+    tokio::task::spawn_blocking(move || {
+        let mut clipboard = arboard::Clipboard::new()?;
+        clipboard.set_text(&text)?;
+
+        // On Wayland, verify with wl-paste
+        #[cfg(not(target_os = "windows"))]
+        if std::env::var("WAYLAND_DISPLAY").is_ok() {
+            // Also try wl-copy as backup
+            if let Ok(mut child) = std::process::Command::new("wl-copy")
+                .arg("--type")
+                .arg("text/plain")
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+            {
+                if let Some(mut stdin) = child.stdin.take() {
+                    use std::io::Write;
+                    let _ = stdin.write_all(text.as_bytes());
+                }
+            }
+        }
+
+        Ok(())
+    })
+    .await?
+}
+
+/// Show a desktop notification. Falls back to tracing-only if the platform
+/// notification mechanism is unavailable.
 fn show_notification(title: &str, message: &str) {
     tracing::info!("Notification: {} - {}", title, message);
-    if let Err(e) = winrt_notification::Toast::new(winrt_notification::Toast::POWERSHELL_APP_ID)
-        .title(title)
-        .text1(message)
-        .show()
+    #[cfg(target_os = "windows")]
     {
-        tracing::warn!("Failed to show notification: {}", e);
+        if let Err(e) = winrt_notification::Toast::new(winrt_notification::Toast::POWERSHELL_APP_ID)
+            .title(title)
+            .text1(message)
+            .show()
+        {
+            tracing::warn!("Failed to show notification: {}", e);
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Err(e) = notify_rust::Notification::new()
+            .appname("Beamer")
+            .summary(title)
+            .body(message)
+            .show()
+        {
+            tracing::warn!("Failed to show notification: {}", e);
+        }
     }
 }

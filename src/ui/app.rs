@@ -1,6 +1,7 @@
 use std::rc::Rc;
 
 use dioxus::desktop::tao::dpi::{PhysicalPosition, PhysicalSize};
+#[cfg(target_os = "windows")]
 use dioxus::desktop::tao::platform::windows::WindowBuilderExtWindows;
 use dioxus::desktop::trayicon::{init_tray_icon, MouseButton, MouseButtonState, TrayIconEvent};
 use dioxus::desktop::{
@@ -75,6 +76,9 @@ pub fn App() -> Element {
 
     // Recording pill window — small, transparent, click-through, always-on-top
     let mut pill_ctx: Signal<Option<DesktopContext>> = use_signal(|| None);
+    // Track whether we've set up click-through on the pill (GTK needs the
+    // window to be realized/visible before input_shape_combine_region works).
+    let mut pill_click_through_set: Signal<bool> = use_signal(|| false);
 
     use_hook({
         let window = window.clone();
@@ -94,7 +98,8 @@ pub fn App() -> Element {
                 let x = (monitor_size.width.saturating_sub(pill_w)) / 2;
                 let y = monitor_size.height.saturating_sub(pill_h + (60.0 * scale) as u32);
 
-                let builder = WindowBuilder::new()
+                #[allow(unused_mut)]
+                let mut builder = WindowBuilder::new()
                     .with_title("Beamer Recording")
                     .with_decorations(false)
                     .with_transparent(true)
@@ -102,8 +107,9 @@ pub fn App() -> Element {
                     .with_visible(false)
                     .with_focusable(false)
                     .with_inner_size(PhysicalSize::new(pill_w, pill_h))
-                    .with_position(PhysicalPosition::new(x as i32, y as i32))
-                    .with_skip_taskbar(true);
+                    .with_position(PhysicalPosition::new(x as i32, y as i32));
+                #[cfg(target_os = "windows")]
+                let builder = builder.with_skip_taskbar(true);
 
                 let cfg = DesktopConfig::new()
                     .with_data_directory(super::webview_data_dir())
@@ -114,19 +120,27 @@ pub fn App() -> Element {
 
                 let dom = VirtualDom::new(RecordingPill);
                 let ctx: DesktopContext = window.new_window(dom, cfg).await;
-                let _ = ctx.set_ignore_cursor_events(true);
-                // Make the pill Win32-visible immediately (with CSS opacity:0 already
-                // applied via custom head). This must happen after webview init so
-                // transparency works. Once visible, parent show/hide won't trigger
-                // WM_SHOWWINDOW flashes since the window is already shown.
-                ctx.set_visible(true);
+
+                // On Windows, realize the window immediately so
+                // set_ignore_cursor_events works. On Linux/GTK, keep it hidden
+                // — we'll set click-through on first recording start to avoid
+                // showing an opaque rectangle when transparency isn't composited.
+                #[cfg(target_os = "windows")]
+                {
+                    ctx.set_visible(true);
+                    let _ = ctx.set_ignore_cursor_events(true);
+                    pill_click_through_set.set(true);
+                }
+
                 pill_ctx.set(Some(ctx));
             });
         }
     });
 
-    // Update pill appearance when recording state changes (CSS opacity + content swap).
-    // Uses CSS opacity instead of Win32 visibility to avoid flash on parent show/hide.
+    // Update pill appearance when recording state changes.
+    // Windows: CSS opacity for smooth transitions (window stays visible but transparent).
+    // Linux: set_visible() to show/hide the window (avoids opaque-background flash
+    // when the compositor doesn't support per-window transparency).
     use_effect(move || {
         let state = *rec_state.read();
         let pill_enabled = config.read().appearance.pill_enabled;
@@ -142,6 +156,18 @@ pub fn App() -> Element {
                     }
                     _ => unreachable!(),
                 };
+
+                // On Linux/GTK, make the window visible and set click-through
+                // on first show (GTK needs the GDK window realized first).
+                #[cfg(not(target_os = "windows"))]
+                {
+                    ctx.set_visible(true);
+                    if !*pill_click_through_set.read() {
+                        let _ = ctx.set_ignore_cursor_events(true);
+                        pill_click_through_set.set(true);
+                    }
+                }
+
                 // Set content first, then fade in
                 let _ = ctx.webview.evaluate_script(&format!(
                     r#"var d=document.querySelector('[class^="pill-dot"]');if(d)d.className='{dot_class}';
@@ -150,10 +176,21 @@ pub fn App() -> Element {
                        document.body.style.opacity='1';"#,
                 ));
             } else {
-                // Just fade out — don't touch classes to avoid flash
+                // Fade out via CSS
                 let _ = ctx.webview.evaluate_script(
                     "document.body.style.opacity='0';",
                 );
+                // On Linux, also hide the window entirely to avoid showing
+                // an opaque rectangle when transparency isn't composited
+                #[cfg(not(target_os = "windows"))]
+                {
+                    // Brief delay to allow the CSS fade-out before hiding
+                    let ctx_clone = ctx.clone();
+                    spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                        ctx_clone.set_visible(false);
+                    });
+                }
             }
         }
     });
@@ -269,9 +306,9 @@ pub fn App() -> Element {
             } else if event.id == paste_last_id {
                 let text = last_injection.read().clone();
                 if text != "No injection yet" && !text.is_empty() {
-                    let preferred = config.read().injection.preferred_method.clone();
+                    let backends = config.read().injection.backends.clone();
                     spawn(async move {
-                        if let Err(e) = crate::injection::inject_text(&text, &preferred).await {
+                        if let Err(e) = crate::injection::inject_text(&text, &backends).await {
                             tracing::error!("Paste last transcript failed: {e}");
                         }
                     });
@@ -366,7 +403,14 @@ pub fn App() -> Element {
             }
             // Right column: titlebar + content stacked vertically
             div { class: "right-column",
-                div { class: "titlebar",
+                div {
+                    class: "titlebar",
+                    // -webkit-app-region:drag works on Windows (Chromium webview)
+                    // but not on Linux (WebKitGTK). Use onmousedown to drag on all platforms.
+                    onmousedown: {
+                        let window = window.clone();
+                        move |_| { let _ = window.drag_window(); }
+                    },
                     div { class: "titlebar-controls",
                         button {
                             class: "titlebar-btn minimize",

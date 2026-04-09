@@ -1,3 +1,6 @@
+#![cfg(target_os = "windows")]
+
+use super::{InjectionBackend, InjectionResult};
 use anyhow::Result;
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
@@ -7,6 +10,34 @@ use windows::Win32::UI::Accessibility::{
 };
 use windows::core::Interface;
 
+pub struct UiaBackend;
+
+impl InjectionBackend for UiaBackend {
+    fn name(&self) -> &'static str {
+        "uia"
+    }
+
+    fn display_name(&self) -> &'static str {
+        "UIA SetValue (accessibility)"
+    }
+
+    fn available(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn inject(&self, text: &str) -> Result<InjectionResult> {
+        let result = try_inject_set_value(text)?;
+        if result.success {
+            Ok(InjectionResult {
+                method: result.method.to_string(),
+                target_info: result.target_info,
+            })
+        } else {
+            anyhow::bail!("UIA SetValue failed for: {}", result.target_info)
+        }
+    }
+}
+
 pub struct UiaResult {
     pub success: bool,
     pub method: &'static str,
@@ -14,9 +45,6 @@ pub struct UiaResult {
 }
 
 /// Attempt text injection via the UI Automation `IValueProvider::SetValue` pattern.
-/// This is the preferred method because it integrates with the accessibility tree,
-/// supports undo, and works with most native Win32 and WPF text controls.
-///
 /// COM is initialized and torn down per call because this runs on a
 /// `spawn_blocking` thread that may be recycled by the tokio thread pool.
 pub fn try_inject_set_value(text: &str) -> Result<UiaResult> {

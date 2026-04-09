@@ -22,7 +22,7 @@ pub fn AppearanceCard(props: AppearanceCardProps) -> Element {
                 }
             }
             div { class: "card-row",
-                span { class: "card-label", "Start with Windows" }
+                span { class: "card-label", "Launch at login" }
                 Toggle {
                     value: props.auto_start,
                     ontoggle: move |v: bool| props.on_auto_start_toggle.call(v),

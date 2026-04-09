@@ -37,8 +37,10 @@ impl AudioCapture {
     }
 
     pub fn device_sample_rate(&self) -> u32 {
-        let supported = self.device.default_input_config().unwrap();
-        supported.sample_rate().0
+        self.device
+            .default_input_config()
+            .map(|c| c.sample_rate().0)
+            .unwrap_or(16000)
     }
 
     /// Start capturing audio. The returned `Stream` must be kept alive for the
@@ -67,6 +69,10 @@ impl AudioCapture {
 
         let needs_resample = native_rate != 16000;
         let needs_downmix = native_channels > 1;
+        tracing::info!(
+            "Audio capture: native {}Hz {}ch → 16kHz 1ch (resample={}, downmix={})",
+            native_rate, native_channels, needs_resample, needs_downmix
+        );
         let resample_ratio = if needs_resample {
             16000.0 / native_rate as f64
         } else {

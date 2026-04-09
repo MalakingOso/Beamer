@@ -17,8 +17,9 @@ pub fn play_stop_sound() {
 }
 
 /// Decode and play an mp3 buffer on a new OS thread.
-/// Uses a dedicated thread because rodio's WASAPI backend requires per-thread
-/// COM initialization, and the Dioxus WebView2 process already owns COM on main.
+/// Uses a dedicated thread because on Windows, rodio's WASAPI backend requires
+/// per-thread COM initialization, and the Dioxus WebView process already owns
+/// COM on the main thread. On Linux (ALSA/PulseAudio) no COM is involved.
 fn play(data: &'static [u8]) {
     std::thread::spawn(move || {
         // WASAPI requires COM — Dioxus already initialized it as STA on main,

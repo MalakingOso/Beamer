@@ -15,7 +15,7 @@ use dioxus::desktop::tao::window::Icon;
 use dioxus::desktop::{Config, WindowBuilder, WindowCloseBehaviour};
 use dioxus::prelude::*;
 
-/// WebView2 data dir must be writable — Program Files is not.
+/// WebView user-data dir must be writable and persistent across launches.
 pub fn webview_data_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(std::env::temp_dir)
@@ -41,11 +41,11 @@ pub fn launch_app() {
                 .with_window(
                     WindowBuilder::new()
                         .with_title("Beamer")
-                        .with_visible(false)
+                        .with_visible(cfg!(not(target_os = "windows")))
                         .with_decorations(false)
                         .with_window_icon(Some(window_icon))
                         .with_inner_size(dioxus::desktop::LogicalSize::new(500.0_f64, 600.0_f64))
-                        .with_min_inner_size(dioxus::desktop::LogicalSize::new(580.0_f64, 400.0_f64)),
+                        .with_min_inner_size(dioxus::desktop::LogicalSize::new(500.0_f64, 400.0_f64)),
                 )
                 .with_close_behaviour(WindowCloseBehaviour::WindowHides)
                 .with_exits_when_last_window_closes(false),

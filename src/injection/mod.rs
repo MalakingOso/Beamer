@@ -1,8 +1,24 @@
 pub mod clipboard;
+
+#[cfg(target_os = "windows")]
 pub mod sendinput;
+#[cfg(target_os = "windows")]
 pub mod uia;
 
+#[cfg(not(target_os = "windows"))]
+pub mod atspi_backend;
+#[cfg(not(target_os = "windows"))]
+pub mod ydotool;
+#[cfg(not(target_os = "windows"))]
+pub mod wtype;
+#[cfg(not(target_os = "windows"))]
+pub mod dotool;
+#[cfg(not(target_os = "windows"))]
+pub mod enigo_backend;
+
 use anyhow::Result;
+
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct InjectionResult {
@@ -10,142 +26,109 @@ pub struct InjectionResult {
     pub target_info: String,
 }
 
-/// Apps whose custom input pipelines silently drop synthetic Unicode events,
-/// making SendInput ineffective. These skip straight to clipboard injection.
-const SKIP_SENDINPUT_PROCESSES: &[&str] = &["warp.exe"];
-
-/// Inject text into the focused window. Runs the entire Win32/COM fallback chain
-/// on a blocking thread (required because UIA and SendInput are synchronous COM calls).
-///
-/// Fallback order: SendInput → Clipboard paste → UIA SetValue (last resort).
-pub async fn inject_text(text: &str, preferred: &str) -> Result<InjectionResult> {
-    let text = text.to_string();
-    let preferred = preferred.to_string();
-
-    tokio::task::spawn_blocking(move || inject_text_blocking(&text, &preferred))
-        .await?
+/// A text injection backend. Each implementation is self-contained
+/// with its own availability checks and injection logic.
+pub trait InjectionBackend: Send + Sync {
+    /// Machine-readable name matching the TOML config value.
+    fn name(&self) -> &'static str;
+    /// Human-readable label for the Settings UI.
+    fn display_name(&self) -> &'static str;
+    /// Check whether this backend can run right now.
+    fn available(&self) -> Result<(), String>;
+    /// Inject the given text into the currently focused window.
+    fn inject(&self, text: &str) -> Result<InjectionResult>;
 }
 
-fn inject_text_blocking(text: &str, preferred: &str) -> Result<InjectionResult> {
-    match preferred {
-        "uia" => return try_uia(text),
-        "sendinput" => return try_sendinput(text),
-        "clipboard" => return try_clipboard(text),
-        _ => {} // "auto" — run the full fallback chain below
+// ─── Registry ─────────────────────────────────────────────────────────────────
+
+/// All backends available on this platform.
+pub fn all_backends() -> Vec<Box<dyn InjectionBackend>> {
+    let mut backends: Vec<Box<dyn InjectionBackend>> = Vec::new();
+
+    #[cfg(target_os = "windows")]
+    {
+        backends.push(Box::new(sendinput::SendInputBackend));
+        backends.push(Box::new(clipboard::ClipboardBackend));
+        backends.push(Box::new(uia::UiaBackend));
     }
 
-    let process_name = get_foreground_process_name().unwrap_or_default();
-    let skip_sendinput = SKIP_SENDINPUT_PROCESSES
+    #[cfg(not(target_os = "windows"))]
+    {
+        backends.push(Box::new(atspi_backend::AtspiBackend));
+        backends.push(Box::new(clipboard::ClipboardBackend));
+        backends.push(Box::new(ydotool::YdotoolBackend));
+        backends.push(Box::new(dotool::DotoolBackend));
+        backends.push(Box::new(wtype::WtypeBackend));
+        backends.push(Box::new(enigo_backend::EnigoBackend));
+    }
+
+    backends
+}
+
+/// Check which backends are available (for Settings UI display).
+/// Returns (name, display_name, availability_result) for each backend.
+pub fn check_availability() -> Vec<(&'static str, &'static str, Result<(), String>)> {
+    all_backends()
         .iter()
-        .any(|&p| process_name.eq_ignore_ascii_case(p));
+        .map(|b| (b.name(), b.display_name(), b.available()))
+        .collect()
+}
 
-    if skip_sendinput {
-        tracing::info!(
-            "Skipping SendInput for process '{}' — using clipboard directly",
-            process_name
-        );
+/// Platform default backend order.
+pub fn default_backend_names() -> Vec<String> {
+    #[cfg(target_os = "windows")]
+    {
+        vec!["sendinput".into(), "clipboard".into(), "uia".into()]
     }
+    #[cfg(not(target_os = "windows"))]
+    {
+        vec!["atspi".into(), "clipboard".into(), "ydotool".into(), "dotool".into(), "wtype".into(), "enigo".into()]
+    }
+}
 
-    // 1. SendInput — types at cursor position, preserves existing text
-    if !skip_sendinput {
-        match try_sendinput(text) {
-            Ok(result) => {
-                tracing::info!("Injection succeeded via {}: {}", result.method, result.target_info);
-                return Ok(result);
+// ─── Dispatch ─────────────────────────────────────────────────────────────────
+
+/// Inject text into the focused window using the configured backend chain.
+pub async fn inject_text(text: &str, backends: &[String]) -> Result<InjectionResult> {
+    let text = text.to_string();
+    let backends = backends.to_vec();
+
+    tokio::task::spawn_blocking(move || inject_text_blocking(&text, &backends)).await?
+}
+
+fn inject_text_blocking(text: &str, backend_names: &[String]) -> Result<InjectionResult> {
+    let all = all_backends();
+    let mut errors = Vec::new();
+
+    for name in backend_names {
+        if let Some(backend) = all.iter().find(|b| b.name() == name.as_str()) {
+            match backend.available() {
+                Ok(()) => match backend.inject(text) {
+                    Ok(result) => {
+                        tracing::info!(
+                            "Injection succeeded via {}: {}",
+                            result.method,
+                            result.target_info
+                        );
+                        return Ok(result);
+                    }
+                    Err(e) => {
+                        tracing::debug!("{} injection failed: {}", name, e);
+                        errors.push(format!("{}: {}", name, e));
+                    }
+                },
+                Err(reason) => {
+                    tracing::debug!("{} unavailable: {}", name, reason);
+                }
             }
-            Err(e) => tracing::debug!("SendInput failed: {}", e),
+        } else {
+            tracing::debug!("Unknown backend '{}', skipping", name);
         }
     }
 
-    // 2. Clipboard Ctrl+V — pastes at cursor, preserves existing text
-    match try_clipboard(text) {
-        Ok(result) => {
-            tracing::info!("Injection succeeded via {}: {}", result.method, result.target_info);
-            return Ok(result);
-        }
-        Err(e) => tracing::debug!("Clipboard failed: {}", e),
-    }
-
-    // 3. UIA SetValue — last resort, replaces entire field value
-    let result = try_uia(text)?;
-    tracing::info!("Injection succeeded via {}: {}", result.method, result.target_info);
-    Ok(result)
-}
-
-/// Get the executable name (e.g. "warp.exe") of the foreground window's process.
-/// Used to apply per-app injection workarounds via `SKIP_SENDINPUT_PROCESSES`.
-fn get_foreground_process_name() -> Option<String> {
-    use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
-    };
-    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
-
-    unsafe {
-        let hwnd = GetForegroundWindow();
-        if hwnd.is_invalid() {
-            return None;
-        }
-
-        let mut pid: u32 = 0;
-        GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        if pid == 0 {
-            return None;
-        }
-
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
-
-        let mut buf = [0u16; 260];
-        let mut len = buf.len() as u32;
-        let ok = QueryFullProcessImageNameW(
-            handle,
-            PROCESS_NAME_FORMAT(0),
-            windows::core::PWSTR(buf.as_mut_ptr()),
-            &mut len,
-        );
-        let _ = CloseHandle(handle);
-
-        if ok.is_err() {
-            return None;
-        }
-
-        let path = String::from_utf16_lossy(&buf[..len as usize]);
-        path.rsplit('\\').next().map(|s| s.to_string())
-    }
-}
-
-fn try_uia(text: &str) -> Result<InjectionResult> {
-    let result = uia::try_inject_set_value(text)?;
-    if result.success {
-        Ok(InjectionResult {
-            method: result.method.to_string(),
-            target_info: result.target_info,
-        })
+    if errors.is_empty() {
+        anyhow::bail!("No injection backends were available")
     } else {
-        anyhow::bail!("UIA SetValue failed for: {}", result.target_info)
-    }
-}
-
-fn try_sendinput(text: &str) -> Result<InjectionResult> {
-    let success = sendinput::inject_via_sendinput(text)?;
-    if success {
-        Ok(InjectionResult {
-            method: "SendInput".to_string(),
-            target_info: "via Unicode key events".to_string(),
-        })
-    } else {
-        anyhow::bail!("SendInput failed")
-    }
-}
-
-fn try_clipboard(text: &str) -> Result<InjectionResult> {
-    let success = clipboard::inject_via_clipboard(text)?;
-    if success {
-        Ok(InjectionResult {
-            method: "Clipboard".to_string(),
-            target_info: "via Ctrl+V paste".to_string(),
-        })
-    } else {
-        anyhow::bail!("Clipboard injection failed")
+        anyhow::bail!("All injection backends failed: {}", errors.join("; "))
     }
 }

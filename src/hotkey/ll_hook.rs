@@ -12,7 +12,15 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_SYSKEYUP,
 };
 
-use crate::hotkey::HotkeyEvent;
+use crate::hotkey::{HotkeyConfig, HotkeyEvent, VK_LWIN};
+
+const VK_LCONTROL: u32 = 0xA2;
+const VK_RCONTROL: u32 = 0xA3;
+const VK_LMENU: u32 = 0xA4;
+const VK_RMENU: u32 = 0xA5;
+const VK_LSHIFT: u32 = 0xA0;
+const VK_RSHIFT: u32 = 0xA1;
+const VK_RWIN: u32 = 0x5C;
 
 /// Query the OS for whether a key is physically held right now.
 /// This avoids stale state when key-up events are dropped by Windows.
@@ -22,107 +30,6 @@ fn is_key_physically_held(vk: i32) -> bool {
 
 fn modifier_physically_held(left_vk: i32, right_vk: i32) -> bool {
     is_key_physically_held(left_vk) || is_key_physically_held(right_vk)
-}
-
-const VK_LCONTROL: u32 = 0xA2;
-const VK_RCONTROL: u32 = 0xA3;
-const VK_LMENU: u32 = 0xA4;
-const VK_RMENU: u32 = 0xA5;
-const VK_LSHIFT: u32 = 0xA0;
-const VK_RSHIFT: u32 = 0xA1;
-pub const VK_LWIN: u32 = 0x5B;
-const VK_RWIN: u32 = 0x5C;
-
-pub struct HotkeyConfig {
-    pub ctrl: bool,
-    pub alt: bool,
-    pub shift: bool,
-    pub trigger_vk: u32,
-    pub is_toggle: bool,
-}
-
-impl Default for HotkeyConfig {
-    fn default() -> Self {
-        Self {
-            ctrl: true,
-            alt: false,
-            shift: false,
-            trigger_vk: 0x20, // VK_SPACE
-            is_toggle: false,
-        }
-    }
-}
-
-impl HotkeyConfig {
-    pub fn parse(hotkey_str: &str, is_toggle: bool) -> Option<Self> {
-        let mut ctrl = false;
-        let mut alt = false;
-        let mut shift = false;
-        let mut has_win = false;
-        let mut key_str = String::new();
-
-        for part in hotkey_str.split('+') {
-            match part.trim().to_uppercase().as_str() {
-                "CTRL" | "CONTROL" => ctrl = true,
-                "ALT" | "OPTION" => alt = true,
-                "SHIFT" => shift = true,
-                "SUPER" | "WIN" | "CMD" | "COMMAND" | "META" => has_win = true,
-                other => key_str = other.to_string(),
-            }
-        }
-
-        let trigger_vk = if has_win && key_str.is_empty() {
-            VK_LWIN
-        } else if !key_str.is_empty() {
-            key_name_to_vk(&key_str)?
-        } else {
-            0x20 // VK_SPACE default
-        };
-
-        Some(Self {
-            ctrl,
-            alt,
-            shift,
-            trigger_vk,
-            is_toggle,
-        })
-    }
-}
-
-fn key_name_to_vk(name: &str) -> Option<u32> {
-    match name.to_uppercase().as_str() {
-        "SPACE" => Some(0x20),
-        "ENTER" | "RETURN" => Some(0x0D),
-        "TAB" => Some(0x09),
-        "BACKSPACE" | "BACK" => Some(0x08),
-        "DELETE" => Some(0x2E),
-        "INSERT" => Some(0x2D),
-        "HOME" => Some(0x24),
-        "END" => Some(0x23),
-        "PAGEUP" => Some(0x21),
-        "PAGEDOWN" => Some(0x22),
-        "UP" => Some(0x26),
-        "DOWN" => Some(0x28),
-        "LEFT" => Some(0x25),
-        "RIGHT" => Some(0x27),
-        s if s.len() == 1 => {
-            let c = s.as_bytes()[0];
-            if c.is_ascii_uppercase() || c.is_ascii_digit() {
-                Some(c as u32)
-            } else {
-                None
-            }
-        }
-        s if s.starts_with('F') && s.len() <= 3 => {
-            let n: u32 = s[1..].parse().ok()?;
-            if (1..=12).contains(&n) {
-                Some(0x70 + n - 1)
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
 }
 
 struct HookState {
