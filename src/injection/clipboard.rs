@@ -334,12 +334,11 @@ fn choose_use_shift_v(setting: &str, focused: Option<&str>) -> bool {
 }
 
 /// Decide which paste keystroke to send. Precedence:
-///   1. BEAMER_PASTE_SHORTCUT env var ("ctrl_v" | "ctrl_shift_v")
+///   1. BEAMER_PASTE_SHORTCUT env var ("ctrl_v" | "ctrl_shift_v" | "auto")
 ///   2. injection.paste_shortcut in config.toml
-///   3. Default: Ctrl+Shift+V
-///
-/// "auto" is retained as a legacy alias (old configs on disk) and maps to
-/// Ctrl+Shift+V — the same value as the new default.
+///   3. Default: "auto" — queries the Beamer GNOME focus helper extension
+///      (if installed and enabled) to pick per-app. Falls back to Ctrl+Shift+V
+///      when the extension is absent or the call fails.
 #[cfg(not(target_os = "windows"))]
 fn resolve_use_shift_v() -> bool {
     let setting = std::env::var("BEAMER_PASTE_SHORTCUT")
@@ -349,16 +348,15 @@ fn resolve_use_shift_v() -> bool {
                 .ok()
                 .map(|c| c.injection.paste_shortcut)
         })
-        .unwrap_or_else(|| "ctrl_shift_v".into());
+        .unwrap_or_else(|| "auto".into());
 
-    match setting.to_ascii_lowercase().as_str() {
-        "ctrl_v" | "ctrl+v" => {
-            tracing::info!("Clipboard: paste_shortcut={} → Ctrl+V", setting);
-            false
-        }
-        _ => {
-            tracing::info!("Clipboard: paste_shortcut={} → Ctrl+Shift+V", setting);
-            true
-        }
+    let focused = crate::injection::focus::focused_app_id();
+    let use_shift = choose_use_shift_v(&setting, focused.as_deref());
+
+    let combo = if use_shift { "Ctrl+Shift+V" } else { "Ctrl+V" };
+    match focused.as_deref() {
+        Some(app) => tracing::info!("Clipboard: paste_shortcut={} focus={} → {}", setting, app, combo),
+        None => tracing::info!("Clipboard: paste_shortcut={} focus=unknown → {}", setting, combo),
     }
+    use_shift
 }
