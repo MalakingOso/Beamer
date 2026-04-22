@@ -7,6 +7,8 @@ pub mod uia;
 
 #[cfg(not(target_os = "windows"))]
 pub mod ydotool;
+#[cfg(not(target_os = "windows"))]
+pub mod focus;
 
 use anyhow::Result;
 
