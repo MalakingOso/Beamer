@@ -93,6 +93,41 @@ Chain (in order): **ydotool → clipboard**
 - The previous clipboard is only restored when the paste actually fires — otherwise the transcript would get clobbered before the user could paste it.
 - Mainly used for transcripts too long to type comfortably or containing non-ASCII text that ydotool-type can't handle.
 
+### Focus-aware paste-shortcut detection (GNOME)
+
+On GNOME Wayland, the compositor does not expose focused-window metadata to
+unprivileged clients. To pick Ctrl+V vs Ctrl+Shift+V per-app, Beamer bundles
+a minimal GNOME Shell extension (`extension/beamer-focus@beamer.app/`) that
+exports `app.beamer.FocusProvider.GetFocusedAppId() -> s` on the session bus
+via the `org.gnome.Shell` name.
+
+The Rust side (`src/injection/focus.rs`) queries this method on each paste
+via zbus and classifies the returned app id against a curated terminal
+list. Terminals → Ctrl+Shift+V; anything else → Ctrl+V. Any failure
+(extension missing, disabled, D-Bus timeout, unknown app) falls back to
+Ctrl+Shift+V — the current pre-feature default — so users who never
+install the extension see no regression.
+
+**Install:** Settings → Text Injection → "Install GNOME focus helper".
+Button copies the extension files to
+`~/.local/share/gnome-shell/extensions/beamer-focus@beamer.app/` and runs
+`gnome-extensions enable`. GNOME renders its own native "enable extension?"
+dialog — that's the privilege-grant moment.
+
+**After install on Wayland**, the user must log out and back in once.
+GNOME Shell does not hot-load new extensions on Wayland. The Settings card
+hints at this when it detects the extension installed-but-not-yet-loaded
+state.
+
+**Terminal list** lives at `src/injection/focus.rs::TERMINAL_APP_IDS`.
+To add a terminal, PR-append the app id (lowercase, exact match — no
+substring heuristic).
+
+**Supported GNOME versions:** 48, 49, 50. Older versions fall through the
+feature-detection guard (`XDG_CURRENT_DESKTOP` + `XDG_SESSION_TYPE`) and
+get the pre-feature default Ctrl+Shift+V. Non-GNOME desktops (KDE, wlroots)
+same treatment — adding support per-compositor is a future item.
+
 ### What was removed and why
 
 Earlier versions tried `dotool`, `wtype`, `enigo`, and an AT-SPI accessibility backend. All four are gone:
