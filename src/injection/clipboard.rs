@@ -279,6 +279,60 @@ fn try_ydotool_paste() -> bool {
     }
 }
 
+#[cfg(all(test, not(target_os = "windows")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_ctrl_v_wins_over_focus() {
+        assert!(!choose_use_shift_v("ctrl_v", Some("org.wezfurlong.wezterm")));
+    }
+
+    #[test]
+    fn explicit_ctrl_shift_v_wins_over_focus() {
+        assert!(choose_use_shift_v("ctrl_shift_v", Some("firefox")));
+    }
+
+    #[test]
+    fn auto_on_terminal_picks_shift_v() {
+        assert!(choose_use_shift_v("auto", Some("org.wezfurlong.wezterm")));
+        assert!(choose_use_shift_v("auto", Some("kitty")));
+    }
+
+    #[test]
+    fn auto_on_non_terminal_picks_ctrl_v() {
+        assert!(!choose_use_shift_v("auto", Some("firefox")));
+        assert!(!choose_use_shift_v("auto", Some("code")));
+    }
+
+    #[test]
+    fn auto_unknown_focus_falls_back_to_shift_v() {
+        assert!(choose_use_shift_v("auto", None));
+    }
+
+    #[test]
+    fn unrecognised_setting_falls_back_to_shift_v() {
+        assert!(choose_use_shift_v("nonsense", Some("firefox")));
+    }
+}
+
+/// Pure decision function: given the configured setting and the currently
+/// focused app id (or None if unknown), return true for Ctrl+Shift+V, false
+/// for Ctrl+V. Extracted for testability — the side-effectful
+/// `resolve_use_shift_v` is a thin wrapper that fetches the inputs.
+#[cfg(not(target_os = "windows"))]
+fn choose_use_shift_v(setting: &str, focused: Option<&str>) -> bool {
+    match setting.to_ascii_lowercase().as_str() {
+        "ctrl_v" | "ctrl+v" => false,
+        "auto" => match focused {
+            Some(app) if crate::injection::focus::is_terminal(app) => true,
+            Some(_) => false,
+            None => true, // unknown focus → safe default
+        },
+        _ => true, // "ctrl_shift_v", "ctrl+shift+v", anything unrecognised
+    }
+}
+
 /// Decide which paste keystroke to send. Precedence:
 ///   1. BEAMER_PASTE_SHORTCUT env var ("ctrl_v" | "ctrl_shift_v")
 ///   2. injection.paste_shortcut in config.toml
