@@ -168,7 +168,7 @@ pub fn InjectionCard(props: InjectionCardProps) -> Element {
                             crate::install::gnome_extension::Status::Enabled =>
                                 ("GNOME focus helper: Active".into(), Some("Remove")),
                             crate::install::gnome_extension::Status::Disabled =>
-                                ("GNOME focus helper: Installed but disabled — log out and back in".into(), Some("Remove")),
+                                ("GNOME focus helper: Installed but not yet loaded — log out and back in".into(), None),
                             crate::install::gnome_extension::Status::NotInstalled =>
                                 ("Install GNOME focus helper for app-aware pasting".into(), Some("Install")),
                         };

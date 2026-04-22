@@ -43,10 +43,10 @@ pub struct InjectionConfig {
     pub backends: Vec<String>,
     #[serde(default)]
     pub debug_logging: bool,
-    /// Linux only: which keystroke the clipboard backend should send to paste.
-    /// "ctrl_shift_v" (default) — works in terminals and pastes as plain text in
-    ///   most other apps.
-    /// "ctrl_v" — standard paste; some terminals (Warp, Kitty, Alacritty) ignore it.
+    /// Linux only: which keystroke the clipboard backend sends to paste.
+    /// Valid values: "auto" (default — queries the GNOME focus helper
+    /// extension to pick per-app; falls back to Ctrl+Shift+V when the
+    /// extension is unavailable), "ctrl_v", "ctrl_shift_v".
     /// Overridden at runtime by the `BEAMER_PASTE_SHORTCUT` env var.
     #[serde(default = "default_paste_shortcut")]
     pub paste_shortcut: String,

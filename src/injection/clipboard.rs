@@ -232,8 +232,9 @@ fn make_key_input(
 /// (env var `BEAMER_PASTE_SHORTCUT` overrides config). Default is Ctrl+Shift+V:
 /// it's the correct paste shortcut in every terminal, and in browsers/office apps
 /// it degrades to "paste without formatting" — which is usually what you want for
-/// a transcript. There's no cross-compositor way to identify the focused app on
-/// Wayland, so auto-detection was removed.
+/// a transcript. On GNOME Wayland, the bundled focus helper extension provides
+/// per-app detection via D-Bus (see `resolve_use_shift_v`); other compositors
+/// still fall back to the configured default.
 ///
 /// Returns `true` if ydotool successfully sent the keystroke, `false` if ydotool
 /// is unavailable or failed (caller should fall back to manual paste).
