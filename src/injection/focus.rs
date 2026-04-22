@@ -29,12 +29,26 @@ pub fn is_terminal(app_id: &str) -> bool {
     TERMINAL_APP_IDS.iter().any(|id| app_id.eq_ignore_ascii_case(id))
 }
 
+fn call_extension() -> Result<String, zbus::Error> {
+    use std::time::Duration;
+    let conn = zbus::blocking::connection::Builder::session()?
+        .method_timeout(Duration::from_millis(100))
+        .build()?;
+    let proxy = zbus::blocking::Proxy::new(
+        &conn,
+        "org.gnome.Shell",
+        "/app/beamer/FocusProvider",
+        "app.beamer.FocusProvider",
+    )?;
+    proxy.call("GetFocusedAppId", &())
+}
+
 /// Returns the focused window's app id, lowercased. Returns `None` if the
 /// extension isn't installed/enabled, the D-Bus call fails, or no window
 /// is focused. Every failure path is silent (debug-logged) so callers can
 /// treat `None` as "unknown, fall back to defaults".
 pub fn focused_app_id() -> Option<String> {
-    None // filled in later tasks
+    map_call_result(call_extension())
 }
 
 fn map_call_result(result: Result<String, zbus::Error>) -> Option<String> {
