@@ -1,4 +1,5 @@
 #![cfg(not(target_os = "windows"))]
+#![allow(dead_code)]
 
 //! Install / enable / disable helper for the bundled Beamer Focus Helper
 //! GNOME Shell extension.
@@ -16,31 +17,42 @@ pub enum Status {
 }
 
 /// Parses a line from `gnome-extensions list --details`. Output is
-/// whitespace-indented key/value lines per extension, e.g.:
+/// whitespace-indented key/value lines per extension, with optional blank
+/// lines and unindented description continuation text between blocks:
 ///
 /// ```text
-/// beamer-focus@beamer.app
-///   Name: Beamer Focus Helper
+/// other-ext@example.com
+///   Description: Multi-line description text
+///
+/// Unindented continuation text here.
+///
 ///   State: ACTIVE
-///   Type: PER_USER
+/// beamer-focus@beamer.app
+///   State: ACTIVE
 /// ```
 ///
-/// We only care about the `State:` line for our UUID. Returns `None` if the
-/// UUID is not mentioned.
+/// A real UUID line is identified by containing `@` and no leading
+/// whitespace. Any other unindented text is treated as free-form continuation
+/// and ignored. Returns `None` if the UUID is not mentioned.
 fn parse_status(output: &str, uuid: &str) -> Option<Status> {
     let mut in_block = false;
     for line in output.lines() {
-        let trimmed = line.trim_end();
-        if trimmed == uuid {
+        let trimmed_end = line.trim_end();
+        let is_uuid_line = !line.starts_with(' ')
+            && !line.starts_with('\t')
+            && trimmed_end.contains('@')
+            && !trimmed_end.is_empty();
+
+        if is_uuid_line && trimmed_end == uuid {
             in_block = true;
             continue;
         }
+        if is_uuid_line && in_block {
+            // Crossed into the next extension's block without finding State:.
+            return Some(Status::Disabled);
+        }
         if in_block {
-            if !trimmed.starts_with(' ') && !trimmed.starts_with('\t') {
-                // Next extension's UUID line — we left the block without a State.
-                return Some(Status::Disabled);
-            }
-            if let Some(state) = trimmed.trim().strip_prefix("State:") {
+            if let Some(state) = trimmed_end.trim_start().strip_prefix("State:") {
                 return Some(match state.trim() {
                     "ACTIVE" => Status::Enabled,
                     _ => Status::Disabled,
@@ -84,5 +96,48 @@ third-ext@example.com
   State: ACTIVE
 ";
         assert_eq!(parse_status(out, "beamer-focus@beamer.app"), Some(Status::Disabled));
+    }
+
+    #[test]
+    fn parse_status_handles_description_continuations() {
+        let out = "\
+other-ext@example.com
+  Name: Other Extension
+  Description: Multi-line description
+
+You can support my work by sponsoring me on:
+- github.com/example
+
+  Path: /home/x/.local/share/gnome-shell/extensions/other-ext@example.com
+  State: ACTIVE
+beamer-focus@beamer.app
+  Name: Beamer Focus Helper
+  State: ACTIVE
+  Path: /home/x/.local/share/gnome-shell/extensions/beamer-focus@beamer.app
+";
+        assert_eq!(
+            parse_status(out, "beamer-focus@beamer.app"),
+            Some(Status::Enabled)
+        );
+    }
+
+    #[test]
+    fn parse_status_ignores_description_text_before_state() {
+        // Regression: target extension's own Description continuation must not
+        // cause an early exit before we reach its State: line.
+        let out = "\
+beamer-focus@beamer.app
+  Name: Beamer Focus Helper
+  Description: Some description
+
+Free-form continuation line without indent.
+
+  Path: /some/path
+  State: ACTIVE
+";
+        assert_eq!(
+            parse_status(out, "beamer-focus@beamer.app"),
+            Some(Status::Enabled)
+        );
     }
 }
