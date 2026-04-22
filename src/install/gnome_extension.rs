@@ -129,6 +129,11 @@ pub fn install() -> Result<()> {
     let src = locate_source_dir()
         .ok_or_else(|| anyhow::anyhow!("extension source directory not found; set BEAMER_EXTENSION_DIR"))?;
     let dst = target_dir()?;
+    // Clear any stale files from a prior install so the target reflects
+    // only what's bundled with this Beamer version.
+    if dst.exists() {
+        std::fs::remove_dir_all(&dst)?;
+    }
     std::fs::create_dir_all(&dst)?;
     for entry in std::fs::read_dir(&src)? {
         let entry = entry?;
