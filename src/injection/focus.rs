@@ -26,8 +26,7 @@ const TERMINAL_APP_IDS: &[&str] = &[
 /// Exact-match against a curated list, case-insensitive. No substring
 /// heuristic — "thunderbird" contains "term" but is not a terminal.
 pub fn is_terminal(app_id: &str) -> bool {
-    let lower = app_id.to_ascii_lowercase();
-    TERMINAL_APP_IDS.iter().any(|id| *id == lower)
+    TERMINAL_APP_IDS.iter().any(|id| app_id.eq_ignore_ascii_case(id))
 }
 
 /// Returns the focused window's app id, lowercased. Returns `None` if the
