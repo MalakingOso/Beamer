@@ -37,6 +37,17 @@ pub fn focused_app_id() -> Option<String> {
     None // filled in later tasks
 }
 
+fn map_call_result(result: Result<String, zbus::Error>) -> Option<String> {
+    match result {
+        Ok(s) if s.is_empty() => None,
+        Ok(s) => Some(s.to_ascii_lowercase()),
+        Err(e) => {
+            tracing::debug!("focus: D-Bus call failed: {}", e);
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -56,5 +67,24 @@ mod tests {
         assert!(!is_terminal("org.mozilla.firefox"));
         assert!(!is_terminal(""));
         assert!(!is_terminal("thunderbird")); // contains "term"; must not match
+    }
+
+    #[test]
+    fn empty_string_maps_to_none() {
+        let got = map_call_result(Ok(String::new()));
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn non_empty_string_is_lowercased() {
+        let got = map_call_result(Ok("Org.WezFurlong.WezTerm".into()));
+        assert_eq!(got.as_deref(), Some("org.wezfurlong.wezterm"));
+    }
+
+    #[test]
+    fn dbus_error_maps_to_none() {
+        let err = zbus::Error::Failure("simulated".into());
+        let got = map_call_result(Err(err));
+        assert_eq!(got, None);
     }
 }
