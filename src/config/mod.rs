@@ -38,11 +38,18 @@ pub struct TranscriptionConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InjectionConfig {
-    /// Ordered list of injection backends to try (e.g. ["clipboard", "wtype", "enigo"]).
+    /// Ordered list of injection backends to try (e.g. ["ydotool", "clipboard"]).
     #[serde(default = "default_backends")]
     pub backends: Vec<String>,
     #[serde(default)]
     pub debug_logging: bool,
+    /// Linux only: which keystroke the clipboard backend should send to paste.
+    /// "ctrl_shift_v" (default) — works in terminals and pastes as plain text in
+    ///   most other apps.
+    /// "ctrl_v" — standard paste; some terminals (Warp, Kitty, Alacritty) ignore it.
+    /// Overridden at runtime by the `BEAMER_PASTE_SHORTCUT` env var.
+    #[serde(default = "default_paste_shortcut")]
+    pub paste_shortcut: String,
     /// Migration: old field from previous config format. Read but never written back.
     #[serde(default, skip_serializing)]
     preferred_method: Option<String>,
@@ -63,6 +70,7 @@ fn default_mode() -> String { "hold".into() }
 fn default_backend() -> String { "elevenlabs".into() }
 fn default_language() -> String { "en".into() }
 fn default_backends() -> Vec<String> { crate::injection::default_backend_names() }
+fn default_paste_shortcut() -> String { "ctrl_shift_v".into() }
 fn default_true() -> bool { true }
 
 
@@ -101,6 +109,7 @@ impl Default for InjectionConfig {
         Self {
             backends: default_backends(),
             debug_logging: false,
+            paste_shortcut: default_paste_shortcut(),
             preferred_method: None,
         }
     }
@@ -131,6 +140,7 @@ impl Config {
         if path.exists() {
             let contents = std::fs::read_to_string(&path)?;
             let mut config: Config = toml::from_str(&contents)?;
+            let mut dirty = false;
 
             // Migrate old preferred_method → backends list
             if let Some(ref method) = config.injection.preferred_method {
@@ -141,6 +151,29 @@ impl Config {
                     };
                 }
                 config.injection.preferred_method = None;
+                dirty = true;
+            }
+
+            // Migrate: drop backends that no longer exist in this build.
+            // dotool/wtype/enigo were removed because XTEST under Ubuntu 26.04+
+            // Xwayland forwards to the Remote Desktop portal and none of them
+            // worked around it on GNOME Mutter. atspi was removed because its
+            // registry deserialization broke against current at-spi2-core, and
+            // ydotool-type covers every app we care about anyway.
+            const REMOVED: &[&str] = &["dotool", "wtype", "enigo", "atspi"];
+            let before = config.injection.backends.len();
+            config.injection.backends.retain(|b| !REMOVED.contains(&b.as_str()));
+            if config.injection.backends.len() != before {
+                dirty = true;
+            }
+
+            // Safety net: never leave the user with an empty backend chain.
+            if config.injection.backends.is_empty() {
+                config.injection.backends = default_backends();
+                dirty = true;
+            }
+
+            if dirty {
                 let _ = config.save();
             }
 

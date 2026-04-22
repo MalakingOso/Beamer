@@ -6,15 +6,7 @@ pub mod sendinput;
 pub mod uia;
 
 #[cfg(not(target_os = "windows"))]
-pub mod atspi_backend;
-#[cfg(not(target_os = "windows"))]
 pub mod ydotool;
-#[cfg(not(target_os = "windows"))]
-pub mod wtype;
-#[cfg(not(target_os = "windows"))]
-pub mod dotool;
-#[cfg(not(target_os = "windows"))]
-pub mod enigo_backend;
 
 use anyhow::Result;
 
@@ -54,12 +46,8 @@ pub fn all_backends() -> Vec<Box<dyn InjectionBackend>> {
 
     #[cfg(not(target_os = "windows"))]
     {
-        backends.push(Box::new(atspi_backend::AtspiBackend));
-        backends.push(Box::new(clipboard::ClipboardBackend));
         backends.push(Box::new(ydotool::YdotoolBackend));
-        backends.push(Box::new(dotool::DotoolBackend));
-        backends.push(Box::new(wtype::WtypeBackend));
-        backends.push(Box::new(enigo_backend::EnigoBackend));
+        backends.push(Box::new(clipboard::ClipboardBackend));
     }
 
     backends
@@ -82,7 +70,7 @@ pub fn default_backend_names() -> Vec<String> {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        vec!["atspi".into(), "clipboard".into(), "ydotool".into(), "dotool".into(), "wtype".into(), "enigo".into()]
+        vec!["ydotool".into(), "clipboard".into()]
     }
 }
 
@@ -113,12 +101,12 @@ fn inject_text_blocking(text: &str, backend_names: &[String]) -> Result<Injectio
                         return Ok(result);
                     }
                     Err(e) => {
-                        tracing::debug!("{} injection failed: {}", name, e);
+                        tracing::info!("{} injection failed → falling through: {:#}", name, e);
                         errors.push(format!("{}: {}", name, e));
                     }
                 },
                 Err(reason) => {
-                    tracing::debug!("{} unavailable: {}", name, reason);
+                    tracing::info!("{} unavailable → falling through: {}", name, reason);
                 }
             }
         } else {

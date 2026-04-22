@@ -19,16 +19,31 @@ impl InjectionBackend for ClipboardBackend {
     }
 
     fn inject(&self, text: &str) -> Result<InjectionResult> {
-        inject_via_clipboard(text)?;
+        let auto_pasted = inject_via_clipboard(text)?;
+
+        #[cfg(target_os = "windows")]
+        let target_info = "via Ctrl+V paste".to_string();
+        #[cfg(not(target_os = "windows"))]
+        let target_info = if auto_pasted {
+            "via ydotool paste".to_string()
+        } else {
+            "set on clipboard — paste manually".to_string()
+        };
+        let _ = auto_pasted;
+
         Ok(InjectionResult {
             method: "Clipboard".into(),
-            target_info: "via Ctrl+V paste".into(),
+            target_info,
         })
     }
 }
 
-/// Sets clipboard text, verifies it was set, sends Ctrl+V, then restores clipboard.
-fn inject_via_clipboard(text: &str) -> Result<()> {
+/// Sets clipboard text and attempts to paste. On Windows, always sends Ctrl+V via
+/// SendInput. On Linux, tries ydotool (kernel uinput — no portal prompt) and falls
+/// back to manual paste if ydotool is unavailable. Returns `true` if the text was
+/// auto-pasted, `false` if the user needs to paste it manually. The previous
+/// clipboard is only restored when the paste actually happened.
+fn inject_via_clipboard(text: &str) -> Result<bool> {
     let mut clipboard = Clipboard::new()?;
     let saved = clipboard.get_text().ok();
 
@@ -45,21 +60,41 @@ fn inject_via_clipboard(text: &str) -> Result<()> {
         }
     }
 
-    // --- Step 2: Send Ctrl+V ---
-    std::thread::sleep(std::time::Duration::from_millis(80));
-
-    tracing::info!("Clipboard: sending Ctrl+V");
-    send_ctrl_v()?;
-
-    // Give the target app time to process the paste
-    std::thread::sleep(std::time::Duration::from_millis(500));
-
-    // --- Step 3: Restore clipboard ---
-    if let Some(saved_text) = saved {
-        let _ = clipboard.set_text(saved_text);
+    #[cfg(target_os = "windows")]
+    {
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        tracing::info!("Clipboard: sending Ctrl+V");
+        send_ctrl_v()?;
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if let Some(saved_text) = saved {
+            let _ = clipboard.set_text(saved_text);
+        }
+        Ok(true)
     }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Give the compositor a tick to settle after the clipboard write
+        // before we fire the keystroke.
+        std::thread::sleep(std::time::Duration::from_millis(80));
 
-    Ok(())
+        if try_ydotool_paste() {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            // Only restore the previous clipboard if the paste actually happened —
+            // otherwise we'd overwrite the transcript before the user could paste.
+            if let Some(saved_text) = saved {
+                let _ = clipboard.set_text(saved_text);
+            }
+            Ok(true)
+        } else {
+            tracing::info!(
+                "Clipboard: ydotool unavailable — text set on clipboard, press Ctrl+V (or Ctrl+Shift+V in a terminal) to paste. Clipboard will not auto-restore."
+            );
+            // Deliberately do NOT restore the previous clipboard: the user
+            // hasn't pasted yet and we would clobber the transcript.
+            let _ = clipboard; // keep handle alive until wl-copy has served the selection
+            Ok(false)
+        }
+    }
 }
 
 /// Set clipboard on Linux, with wl-copy fallback and verification.
@@ -192,74 +227,84 @@ fn make_key_input(
     }
 }
 
+/// On Linux, attempts the paste shortcut via ydotool (kernel uinput — no portal
+/// prompt). Picks Ctrl+V or Ctrl+Shift+V based on the configured `paste_shortcut`
+/// (env var `BEAMER_PASTE_SHORTCUT` overrides config). Default is Ctrl+Shift+V:
+/// it's the correct paste shortcut in every terminal, and in browsers/office apps
+/// it degrades to "paste without formatting" — which is usually what you want for
+/// a transcript. There's no cross-compositor way to identify the focused app on
+/// Wayland, so auto-detection was removed.
+///
+/// Returns `true` if ydotool successfully sent the keystroke, `false` if ydotool
+/// is unavailable or failed (caller should fall back to manual paste).
+///
+/// Linux evdev keycodes used:
+///   29 = KEY_LEFTCTRL, 42 = KEY_LEFTSHIFT, 47 = KEY_V
+/// Suffix: `:1` = key down, `:0` = key up.
 #[cfg(not(target_os = "windows"))]
-fn send_ctrl_v() -> Result<()> {
-    // Try ydotool first — kernel-level uinput, works in ALL apps including browsers
-    tracing::debug!("Clipboard: trying ydotool key for Ctrl+V");
-    if let Ok(output) = std::process::Command::new("ydotool")
-        .arg("key")
-        .arg("29:1")  // Ctrl down
-        .arg("47:1")  // V down
-        .arg("47:0")  // V up
-        .arg("29:0")  // Ctrl up
-        .output()
-    {
-        if output.status.success() {
-            tracing::info!("Clipboard: Ctrl+V sent via ydotool");
-            return Ok(());
-        }
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::warn!("ydotool key failed (status {}): {}", output.status, stderr.trim());
+fn try_ydotool_paste() -> bool {
+    let use_shift = resolve_use_shift_v();
+    let (combo, args): (&str, Vec<&str>) = if use_shift {
+        (
+            "Ctrl+Shift+V",
+            vec!["key", "29:1", "42:1", "47:1", "47:0", "42:0", "29:0"],
+        )
     } else {
-        tracing::debug!("ydotool not found, trying dotool");
-    }
+        (
+            "Ctrl+V",
+            vec!["key", "29:1", "47:1", "47:0", "29:0"],
+        )
+    };
 
-    // Try dotool — also kernel-level uinput
-    tracing::debug!("Clipboard: trying dotool for Ctrl+V");
-    if let Ok(mut child) = std::process::Command::new("dotool")
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-    {
-        if let Some(mut stdin) = child.stdin.take() {
-            use std::io::Write;
-            let _ = stdin.write_all(b"key ctrl+v");
+    tracing::debug!("Clipboard: trying ydotool key for {}", combo);
+    match std::process::Command::new("ydotool").args(&args).output() {
+        Ok(output) if output.status.success() => {
+            tracing::info!("Clipboard: {} sent via ydotool", combo);
+            true
         }
-        if let Ok(status) = child.wait() {
-            if status.success() {
-                tracing::info!("Clipboard: Ctrl+V sent via dotool");
-                return Ok(());
-            }
-        }
-    }
-
-    // Try wtype on Wayland (uses virtual keyboard — may not work in all compositors)
-    if std::env::var("WAYLAND_DISPLAY").is_ok() {
-        tracing::debug!("Clipboard: trying wtype for Ctrl+V");
-        if let Ok(output) = std::process::Command::new("wtype")
-            .arg("-M")
-            .arg("ctrl")
-            .arg("v")
-            .arg("-m")
-            .arg("ctrl")
-            .output()
-        {
-            if output.status.success() {
-                tracing::info!("Clipboard: Ctrl+V sent via wtype");
-                return Ok(());
-            }
+        Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::warn!("wtype Ctrl+V failed: {}", stderr.trim());
+            tracing::warn!(
+                "ydotool key failed for {} (status {}): {}",
+                combo,
+                output.status,
+                stderr.trim()
+            );
+            false
+        }
+        Err(e) => {
+            tracing::debug!("ydotool unavailable: {}", e);
+            false
         }
     }
+}
 
-    // Last resort: enigo
-    tracing::debug!("Clipboard: trying enigo for Ctrl+V");
-    use enigo::{Direction, Enigo, Key, Keyboard, Settings};
-    let mut enigo = Enigo::new(&Settings::default())?;
-    enigo.key(Key::Control, Direction::Press)?;
-    enigo.key(Key::Unicode('v'), Direction::Press)?;
-    enigo.key(Key::Unicode('v'), Direction::Release)?;
-    enigo.key(Key::Control, Direction::Release)?;
-    tracing::info!("Clipboard: Ctrl+V sent via enigo");
-    Ok(())
+/// Decide which paste keystroke to send. Precedence:
+///   1. BEAMER_PASTE_SHORTCUT env var ("ctrl_v" | "ctrl_shift_v")
+///   2. injection.paste_shortcut in config.toml
+///   3. Default: Ctrl+Shift+V
+///
+/// "auto" is retained as a legacy alias (old configs on disk) and maps to
+/// Ctrl+Shift+V — the same value as the new default.
+#[cfg(not(target_os = "windows"))]
+fn resolve_use_shift_v() -> bool {
+    let setting = std::env::var("BEAMER_PASTE_SHORTCUT")
+        .ok()
+        .or_else(|| {
+            crate::config::Config::load()
+                .ok()
+                .map(|c| c.injection.paste_shortcut)
+        })
+        .unwrap_or_else(|| "ctrl_shift_v".into());
+
+    match setting.to_ascii_lowercase().as_str() {
+        "ctrl_v" | "ctrl+v" => {
+            tracing::info!("Clipboard: paste_shortcut={} → Ctrl+V", setting);
+            false
+        }
+        _ => {
+            tracing::info!("Clipboard: paste_shortcut={} → Ctrl+Shift+V", setting);
+            true
+        }
+    }
 }

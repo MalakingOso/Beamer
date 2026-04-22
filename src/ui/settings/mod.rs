@@ -74,6 +74,11 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                     config.write().injection.backends = backends;
                     let _ = config.read().save();
                 },
+                paste_shortcut: config.read().injection.paste_shortcut.clone(),
+                on_paste_shortcut_change: move |v: String| {
+                    config.write().injection.paste_shortcut = v;
+                    let _ = config.read().save();
+                },
             }
 
             ApiKeysCard {

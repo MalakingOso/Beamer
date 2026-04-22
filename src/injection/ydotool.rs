@@ -41,10 +41,15 @@ impl InjectionBackend for YdotoolBackend {
             anyhow::bail!("Text contains characters outside ydotool's ASCII range");
         }
 
+        // --key-delay is milliseconds between keypresses. Apps process keyboard
+        // input on their event loop (~16 ms per frame for a 60 Hz app); values
+        // below ~12 ms reliably drop characters — especially the space following
+        // a run of letters, which produces merged words like "endsuppasting".
+        // 12 ms gives apps enough headroom without feeling sluggish.
         let output = std::process::Command::new("ydotool")
             .arg("type")
             .arg("--key-delay")
-            .arg("3")
+            .arg("12")
             .arg("--")
             .arg(&ascii_text)
             .output()?;

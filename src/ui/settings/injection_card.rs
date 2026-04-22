@@ -1,10 +1,14 @@
 use dioxus::prelude::*;
-use crate::ui::components::Card;
+use crate::ui::components::{Card, Select};
 
 #[derive(Props, Clone, PartialEq)]
 pub struct InjectionCardProps {
     pub backends: Vec<String>,
     pub on_backends_change: EventHandler<Vec<String>>,
+    #[props(default = String::from("ctrl_shift_v"))]
+    pub paste_shortcut: String,
+    #[props(default)]
+    pub on_paste_shortcut_change: EventHandler<String>,
 }
 
 #[component]
@@ -122,6 +126,22 @@ pub fn InjectionCard(props: InjectionCardProps) -> Element {
                         },
                         "Reset"
                     }
+                }
+            }
+
+            // Paste-shortcut override for the clipboard backend (Linux only).
+            // Default Ctrl+Shift+V covers terminals (Warp, Kitty, Alacritty) and
+            // pastes as plain text in most other apps. Switch to Ctrl+V only if
+            // you mostly paste into apps that don't honor Ctrl+Shift+V.
+            div { class: "card-row",
+                span { class: "card-label", "Paste shortcut (Linux)" }
+                Select {
+                    value: props.paste_shortcut.clone(),
+                    options: vec![
+                        ("ctrl_shift_v".into(), "Ctrl+Shift+V (default)".into()),
+                        ("ctrl_v".into(), "Ctrl+V".into()),
+                    ],
+                    onchange: move |v: String| props.on_paste_shortcut_change.call(v),
                 }
             }
         }

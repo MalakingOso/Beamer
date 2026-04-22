@@ -83,10 +83,13 @@
 }
 
 /* ===== Body ===== */
+html, body, #main {
+  background: transparent;
+}
+
 body {
   font-family: "Recursive", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
   color: var(--fg);
-  background: var(--bg);
   font-size: 14px;
   line-height: 1.55;
   overflow: hidden;
@@ -144,6 +147,8 @@ body {
   flex-direction: row;
   height: 100vh;
   overflow: hidden;
+  background: var(--bg);
+  border-radius: var(--radius-lg);
 }
 
 /* ===== Left Column (Badge + Sidebar) ===== */

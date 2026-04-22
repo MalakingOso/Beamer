@@ -36,6 +36,13 @@ fn main() {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    {
+        if let Err(e) = install_linux_desktop_entry() {
+            tracing::warn!("Failed to install Linux desktop entry: {}", e);
+        }
+    }
+
     // Dioxus owns the main thread and tokio runtime — nothing runs after this
     ui::launch_app();
 }
@@ -158,7 +165,7 @@ fn set_auto_start_xdg(enable: bool) -> Result<()> {
         std::fs::create_dir_all(&autostart_dir)?;
         let exe_path = std::env::current_exe()?;
         let desktop = format!(
-            "[Desktop Entry]\nType=Application\nName=Beamer\nExec={}\nX-GNOME-Autostart-enabled=true\n",
+            "[Desktop Entry]\nType=Application\nName=Beamer\nIcon=beamer\nExec={}\nStartupWMClass=beamer\nX-GNOME-Autostart-enabled=true\n",
             exe_path.display()
         );
         std::fs::write(&desktop_path, desktop)?;
@@ -166,6 +173,57 @@ fn set_auto_start_xdg(enable: bool) -> Result<()> {
     } else if desktop_path.exists() {
         std::fs::remove_file(&desktop_path)?;
         tracing::info!("XDG autostart entry removed");
+    }
+
+    Ok(())
+}
+
+// ─── Linux desktop integration ────────────────────────────────────────────────
+
+/// GNOME's dock/taskbar locates app icons by matching a window's Wayland `app_id`
+/// (or X11 `WM_CLASS`) against `StartupWMClass` in an installed `.desktop` file —
+/// window-level icon hints are ignored under Wayland. Without this install step,
+/// Beamer shows up as a generic window in the dock even though the tray icon
+/// (which uses AppIndicator and embeds bytes directly) works fine.
+///
+/// Installs:
+///   ~/.local/share/icons/hicolor/512x512/apps/beamer.png
+///   ~/.local/share/applications/beamer.desktop   (StartupWMClass=beamer)
+///
+/// GTK defaults the Wayland app_id to the binary basename when no GApplication
+/// id is set (which is Dioxus/tao's behavior), so `beamer` matches.
+#[cfg(target_os = "linux")]
+fn install_linux_desktop_entry() -> Result<()> {
+    let data_dir = dirs::data_dir()
+        .ok_or_else(|| anyhow::anyhow!("Could not determine data directory"))?;
+
+    let icon_dir = data_dir.join("icons/hicolor/512x512/apps");
+    let icon_path = icon_dir.join("beamer.png");
+    std::fs::create_dir_all(&icon_dir)?;
+
+    let icon_bytes: &[u8] = include_bytes!("../assets/icon.png");
+    let needs_write = std::fs::metadata(&icon_path)
+        .map(|m| m.len() as usize != icon_bytes.len())
+        .unwrap_or(true);
+    if needs_write {
+        std::fs::write(&icon_path, icon_bytes)?;
+        tracing::info!("Installed app icon to {:?}", icon_path);
+    }
+
+    let apps_dir = data_dir.join("applications");
+    std::fs::create_dir_all(&apps_dir)?;
+    let desktop_path = apps_dir.join("beamer.desktop");
+
+    let exe_path = std::env::current_exe()?;
+    let desktop = format!(
+        "[Desktop Entry]\nType=Application\nName=Beamer\nComment=Dictation with cloud transcription\nExec={}\nIcon=beamer\nStartupWMClass=beamer\nTerminal=false\nCategories=Utility;AudioVideo;\n",
+        exe_path.display()
+    );
+
+    let existing = std::fs::read_to_string(&desktop_path).ok();
+    if existing.as_deref() != Some(desktop.as_str()) {
+        std::fs::write(&desktop_path, &desktop)?;
+        tracing::info!("Installed desktop entry to {:?}", desktop_path);
     }
 
     Ok(())

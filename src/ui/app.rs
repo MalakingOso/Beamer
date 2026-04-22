@@ -1,13 +1,14 @@
 use std::rc::Rc;
 
-use dioxus::desktop::tao::dpi::{PhysicalPosition, PhysicalSize};
+use dioxus::desktop::tao::dpi::PhysicalPosition;
+#[cfg(not(target_os = "linux"))]
+use dioxus::desktop::tao::dpi::PhysicalSize;
 #[cfg(target_os = "windows")]
 use dioxus::desktop::tao::platform::windows::WindowBuilderExtWindows;
 use dioxus::desktop::trayicon::{init_tray_icon, MouseButton, MouseButtonState, TrayIconEvent};
-use dioxus::desktop::{
-    use_muda_event_handler, use_tray_icon_event_handler, use_window,
-    Config as DesktopConfig, DesktopContext, WindowBuilder,
-};
+use dioxus::desktop::{use_muda_event_handler, use_tray_icon_event_handler, use_window};
+#[cfg(not(target_os = "linux"))]
+use dioxus::desktop::{Config as DesktopConfig, DesktopContext, WindowBuilder};
 use dioxus::prelude::*;
 
 use crate::config::Config;
@@ -15,6 +16,7 @@ use crate::hotkey::{start_ll_hook, HotkeyConfig, HotkeyEvent};
 use crate::orchestrator::{self, RecordingState};
 use crate::tray;
 use crate::update::{self, UpdateStatus};
+#[cfg(not(target_os = "linux"))]
 use crate::ui::pill::RecordingPill;
 use crate::ui::history::TranscriptionHistory;
 use crate::ui::history_page::HistoryPage;
@@ -74,12 +76,16 @@ pub fn App() -> Element {
     use_context_provider(|| last_injection);
     use_context_provider(|| config);
 
-    // Recording pill window — small, transparent, click-through, always-on-top
+    // Recording pill window — small, transparent, click-through, always-on-top.
+    // Linux: the pill is replaced by an AppIndicator tray-icon swap (see below).
+    // GNOME Shell doesn't accept in-tray GTK widgets from standalone apps, and the
+    // floating-pill approach has compositor/transparency quirks under Wayland.
+    #[cfg(not(target_os = "linux"))]
     let mut pill_ctx: Signal<Option<DesktopContext>> = use_signal(|| None);
-    // Track whether we've set up click-through on the pill (GTK needs the
-    // window to be realized/visible before input_shape_combine_region works).
+    #[cfg(not(target_os = "linux"))]
     let mut pill_click_through_set: Signal<bool> = use_signal(|| false);
 
+    #[cfg(not(target_os = "linux"))]
     use_hook({
         let window = window.clone();
         move || {
@@ -122,9 +128,7 @@ pub fn App() -> Element {
                 let ctx: DesktopContext = window.new_window(dom, cfg).await;
 
                 // On Windows, realize the window immediately so
-                // set_ignore_cursor_events works. On Linux/GTK, keep it hidden
-                // — we'll set click-through on first recording start to avoid
-                // showing an opaque rectangle when transparency isn't composited.
+                // set_ignore_cursor_events works.
                 #[cfg(target_os = "windows")]
                 {
                     ctx.set_visible(true);
@@ -137,10 +141,8 @@ pub fn App() -> Element {
         }
     });
 
-    // Update pill appearance when recording state changes.
-    // Windows: CSS opacity for smooth transitions (window stays visible but transparent).
-    // Linux: set_visible() to show/hide the window (avoids opaque-background flash
-    // when the compositor doesn't support per-window transparency).
+    // Update pill appearance when recording state changes (Windows/macOS only).
+    #[cfg(not(target_os = "linux"))]
     use_effect(move || {
         let state = *rec_state.read();
         let pill_enabled = config.read().appearance.pill_enabled;
@@ -157,8 +159,7 @@ pub fn App() -> Element {
                     _ => unreachable!(),
                 };
 
-                // On Linux/GTK, make the window visible and set click-through
-                // on first show (GTK needs the GDK window realized first).
+                // On macOS, realize the window and set click-through on first show.
                 #[cfg(not(target_os = "windows"))]
                 {
                     ctx.set_visible(true);
@@ -176,15 +177,11 @@ pub fn App() -> Element {
                        document.body.style.opacity='1';"#,
                 ));
             } else {
-                // Fade out via CSS
                 let _ = ctx.webview.evaluate_script(
                     "document.body.style.opacity='0';",
                 );
-                // On Linux, also hide the window entirely to avoid showing
-                // an opaque rectangle when transparency isn't composited
                 #[cfg(not(target_os = "windows"))]
                 {
-                    // Brief delay to allow the CSS fade-out before hiding
                     let ctx_clone = ctx.clone();
                     spawn(async move {
                         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -194,6 +191,27 @@ pub fn App() -> Element {
             }
         }
     });
+
+    // Linux: swap the tray icon to reflect recording state (mirrors Handy's behavior).
+    // GNOME's AppIndicator extension renders the tray icon in the top bar; tray-icon
+    // wraps libappindicator and `set_icon` writes a PNG to /tmp and signals a reload.
+    #[cfg(target_os = "linux")]
+    {
+        use dioxus::desktop::trayicon::use_tray_icon;
+        let tray_handle = use_tray_icon();
+        use_effect(move || {
+            let state = *rec_state.read();
+            if let Some(tray) = tray_handle.as_ref() {
+                let icon = match state {
+                    RecordingState::Idle => tray::load_icon(),
+                    RecordingState::Recording | RecordingState::Processing => {
+                        tray::load_recording_icon()
+                    }
+                };
+                let _ = tray.set_icon(Some(icon));
+            }
+        });
+    }
 
     let coroutine = use_coroutine(move |rx: UnboundedReceiver<HotkeyEvent>| {
         orchestrator::run(
@@ -414,6 +432,9 @@ pub fn App() -> Element {
                     div { class: "titlebar-controls",
                         button {
                             class: "titlebar-btn minimize",
+                            // Prevent the titlebar's onmousedown from starting a window drag,
+                            // which would grab the pointer and swallow the click (Linux/WebKitGTK).
+                            onmousedown: move |e| e.stop_propagation(),
                             onclick: {
                                 let window = window.clone();
                                 move |_| window.set_minimized(true)
@@ -422,6 +443,7 @@ pub fn App() -> Element {
                         }
                         button {
                             class: "titlebar-btn close",
+                            onmousedown: move |e| e.stop_propagation(),
                             onclick: {
                                 let window = window.clone();
                                 move |_| window.set_visible(false)
@@ -453,6 +475,7 @@ pub fn App() -> Element {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 const PILL_CSS: &str = r#"
 *, *::before, *::after { margin:0; padding:0; }
 html, body, #main { background:transparent!important; overflow:hidden;

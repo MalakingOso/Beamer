@@ -56,3 +56,11 @@ pub fn load_icon() -> Icon {
     let (width, height) = rgba.dimensions();
     Icon::from_rgba(rgba.into_raw(), width, height).expect("Failed to create tray icon")
 }
+
+pub fn load_recording_icon() -> Icon {
+    let icon_bytes = include_bytes!("../../assets/icon_recording.ico");
+    let img = image::load_from_memory(icon_bytes).expect("Failed to load recording icon");
+    let rgba = img.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    Icon::from_rgba(rgba.into_raw(), width, height).expect("Failed to create tray icon")
+}

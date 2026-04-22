@@ -38,11 +38,13 @@ pub fn launch_app() {
         .with_cfg(
             Config::new()
                 .with_data_directory(webview_data_dir())
+                .with_background_color((0, 0, 0, 0))
                 .with_window(
                     WindowBuilder::new()
                         .with_title("Beamer")
                         .with_visible(cfg!(not(target_os = "windows")))
                         .with_decorations(false)
+                        .with_transparent(true)
                         .with_window_icon(Some(window_icon))
                         .with_inner_size(dioxus::desktop::LogicalSize::new(500.0_f64, 600.0_f64))
                         .with_min_inner_size(dioxus::desktop::LogicalSize::new(500.0_f64, 400.0_f64)),
