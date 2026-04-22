@@ -5,7 +5,7 @@ use crate::ui::components::{Card, Select};
 pub struct InjectionCardProps {
     pub backends: Vec<String>,
     pub on_backends_change: EventHandler<Vec<String>>,
-    #[props(default = String::from("ctrl_shift_v"))]
+    #[props(default = String::from("auto"))]
     pub paste_shortcut: String,
     #[props(default)]
     pub on_paste_shortcut_change: EventHandler<String>,
@@ -130,18 +130,74 @@ pub fn InjectionCard(props: InjectionCardProps) -> Element {
             }
 
             // Paste-shortcut override for the clipboard backend (Linux only).
-            // Default Ctrl+Shift+V covers terminals (Warp, Kitty, Alacritty) and
-            // pastes as plain text in most other apps. Switch to Ctrl+V only if
-            // you mostly paste into apps that don't honor Ctrl+Shift+V.
+            // "Auto" queries the GNOME focus helper extension (see section below)
+            // to pick Ctrl+V or Ctrl+Shift+V per-app. If the helper isn't installed
+            // we fall back to Ctrl+Shift+V — the universal terminal paste that also
+            // degrades to "paste plain text" in most other apps.
             div { class: "card-row",
                 span { class: "card-label", "Paste shortcut (Linux)" }
                 Select {
                     value: props.paste_shortcut.clone(),
                     options: vec![
-                        ("ctrl_shift_v".into(), "Ctrl+Shift+V (default)".into()),
+                        ("auto".into(), "Auto (recommended)".into()),
+                        ("ctrl_shift_v".into(), "Ctrl+Shift+V".into()),
                         ("ctrl_v".into(), "Ctrl+V".into()),
                     ],
                     onchange: move |v: String| props.on_paste_shortcut_change.call(v),
+                }
+            }
+
+            // GNOME focus helper — only show on GNOME Wayland
+            {
+                let is_gnome_wayland = std::env::var("XDG_CURRENT_DESKTOP")
+                    .map(|d| d.to_ascii_uppercase().contains("GNOME"))
+                    .unwrap_or(false)
+                    && std::env::var("XDG_SESSION_TYPE").ok().as_deref() == Some("wayland");
+
+                #[cfg(not(target_os = "windows"))]
+                if is_gnome_wayland {
+                    let mut status = use_signal(|| crate::install::gnome_extension::status());
+
+                    let current = status();
+                    let (label, action): (String, Option<&str>) = match current {
+                        crate::install::gnome_extension::Status::Enabled =>
+                            ("GNOME focus helper: Active".into(), Some("Remove")),
+                        crate::install::gnome_extension::Status::Disabled =>
+                            ("GNOME focus helper: Installed but disabled — log out and back in".into(), Some("Remove")),
+                        crate::install::gnome_extension::Status::NotInstalled =>
+                            ("Install GNOME focus helper for app-aware pasting".into(), Some("Install")),
+                    };
+
+                    rsx! {
+                        div { class: "card-row",
+                            span { class: "card-label", "{label}" }
+                            if let Some(btn) = action {
+                                button {
+                                    class: "btn-small",
+                                    onclick: move |_| {
+                                        let result = match current {
+                                            crate::install::gnome_extension::Status::NotInstalled =>
+                                                crate::install::gnome_extension::install(),
+                                            _ => crate::install::gnome_extension::uninstall(),
+                                        };
+                                        if let Err(e) = result {
+                                            tracing::warn!("GNOME extension action failed: {}", e);
+                                        }
+                                        status.set(crate::install::gnome_extension::status());
+                                    },
+                                    "{btn}"
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    rsx! { }
+                }
+
+                #[cfg(target_os = "windows")]
+                {
+                    let _ = is_gnome_wayland;
+                    rsx! { }
                 }
             }
         }
