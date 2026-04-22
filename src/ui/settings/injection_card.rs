@@ -155,43 +155,49 @@ pub fn InjectionCard(props: InjectionCardProps) -> Element {
                     && std::env::var("XDG_SESSION_TYPE").ok().as_deref() == Some("wayland");
 
                 #[cfg(not(target_os = "windows"))]
-                if is_gnome_wayland {
+                {
+                    // Hook must be called unconditionally to satisfy Dioxus's hook ordering
+                    // contract. The subprocess runs ~110ms on first render regardless of
+                    // desktop — acceptable since it only happens once per Settings open on
+                    // non-Windows platforms.
                     let mut status = use_signal(|| crate::install::gnome_extension::status());
 
-                    let current = status();
-                    let (label, action): (String, Option<&str>) = match current {
-                        crate::install::gnome_extension::Status::Enabled =>
-                            ("GNOME focus helper: Active".into(), Some("Remove")),
-                        crate::install::gnome_extension::Status::Disabled =>
-                            ("GNOME focus helper: Installed but disabled — log out and back in".into(), Some("Remove")),
-                        crate::install::gnome_extension::Status::NotInstalled =>
-                            ("Install GNOME focus helper for app-aware pasting".into(), Some("Install")),
-                    };
+                    if is_gnome_wayland {
+                        let current = status();
+                        let (label, action): (String, Option<&str>) = match current {
+                            crate::install::gnome_extension::Status::Enabled =>
+                                ("GNOME focus helper: Active".into(), Some("Remove")),
+                            crate::install::gnome_extension::Status::Disabled =>
+                                ("GNOME focus helper: Installed but disabled — log out and back in".into(), Some("Remove")),
+                            crate::install::gnome_extension::Status::NotInstalled =>
+                                ("Install GNOME focus helper for app-aware pasting".into(), Some("Install")),
+                        };
 
-                    rsx! {
-                        div { class: "card-row",
-                            span { class: "card-label", "{label}" }
-                            if let Some(btn) = action {
-                                button {
-                                    class: "btn-small",
-                                    onclick: move |_| {
-                                        let result = match current {
-                                            crate::install::gnome_extension::Status::NotInstalled =>
-                                                crate::install::gnome_extension::install(),
-                                            _ => crate::install::gnome_extension::uninstall(),
-                                        };
-                                        if let Err(e) = result {
-                                            tracing::warn!("GNOME extension action failed: {}", e);
-                                        }
-                                        status.set(crate::install::gnome_extension::status());
-                                    },
-                                    "{btn}"
+                        rsx! {
+                            div { class: "card-row",
+                                span { class: "card-label", "{label}" }
+                                if let Some(btn) = action {
+                                    button {
+                                        class: "btn-small",
+                                        onclick: move |_| {
+                                            let result = match current {
+                                                crate::install::gnome_extension::Status::NotInstalled =>
+                                                    crate::install::gnome_extension::install(),
+                                                _ => crate::install::gnome_extension::uninstall(),
+                                            };
+                                            if let Err(e) = result {
+                                                tracing::warn!("GNOME extension action failed: {}", e);
+                                            }
+                                            status.set(crate::install::gnome_extension::status());
+                                        },
+                                        "{btn}"
+                                    }
                                 }
                             }
                         }
+                    } else {
+                        rsx! { }
                     }
-                } else {
-                    rsx! { }
                 }
 
                 #[cfg(target_os = "windows")]
