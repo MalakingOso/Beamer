@@ -2,6 +2,8 @@ mod audio;
 mod config;
 mod hotkey;
 mod injection;
+#[cfg(not(target_os = "windows"))]
+mod install;
 mod media;
 mod orchestrator;
 mod sounds;
