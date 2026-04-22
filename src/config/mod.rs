@@ -70,7 +70,7 @@ fn default_mode() -> String { "hold".into() }
 fn default_backend() -> String { "elevenlabs".into() }
 fn default_language() -> String { "en".into() }
 fn default_backends() -> Vec<String> { crate::injection::default_backend_names() }
-fn default_paste_shortcut() -> String { "ctrl_shift_v".into() }
+fn default_paste_shortcut() -> String { "auto".into() }
 fn default_true() -> bool { true }
 
 
