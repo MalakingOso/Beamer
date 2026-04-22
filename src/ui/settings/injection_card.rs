@@ -163,13 +163,16 @@ pub fn InjectionCard(props: InjectionCardProps) -> Element {
                     let mut status = use_signal(|| crate::install::gnome_extension::status());
 
                     if is_gnome_wayland {
+                        use crate::install::gnome_extension::Status as HelperStatus;
                         let current = status();
                         let (label, action): (String, Option<&str>) = match current {
-                            crate::install::gnome_extension::Status::Enabled =>
+                            HelperStatus::Enabled =>
                                 ("GNOME focus helper: Active".into(), Some("Remove")),
-                            crate::install::gnome_extension::Status::Disabled =>
-                                ("GNOME focus helper: Installed but not yet loaded — log out and back in".into(), None),
-                            crate::install::gnome_extension::Status::NotInstalled =>
+                            HelperStatus::Disabled =>
+                                ("GNOME focus helper: Installed, click to enable".into(), Some("Enable")),
+                            HelperStatus::PendingRestart =>
+                                ("GNOME focus helper: Installed — log out and back in to activate".into(), None),
+                            HelperStatus::NotInstalled =>
                                 ("Install GNOME focus helper for app-aware pasting".into(), Some("Install")),
                         };
 
@@ -181,9 +184,15 @@ pub fn InjectionCard(props: InjectionCardProps) -> Element {
                                         class: "btn-small",
                                         onclick: move |_| {
                                             let result = match current {
-                                                crate::install::gnome_extension::Status::NotInstalled =>
+                                                HelperStatus::NotInstalled =>
                                                     crate::install::gnome_extension::install(),
-                                                _ => crate::install::gnome_extension::uninstall(),
+                                                HelperStatus::Disabled =>
+                                                    crate::install::gnome_extension::enable_installed(),
+                                                HelperStatus::Enabled =>
+                                                    crate::install::gnome_extension::uninstall(),
+                                                // PendingRestart renders no button; match is exhaustive
+                                                // for safety if the render and click race.
+                                                HelperStatus::PendingRestart => Ok(()),
                                             };
                                             if let Err(e) = result {
                                                 tracing::warn!("GNOME extension action failed: {}", e);

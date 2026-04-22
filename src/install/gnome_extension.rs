@@ -12,11 +12,22 @@ pub const EXTENSION_UUID: &str = "beamer-focus@beamer.app";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
-    /// Extension present on disk and enabled in GNOME.
+    /// Extension is ACTIVE in GNOME Shell — the D-Bus interface is live.
     Enabled,
-    /// Present on disk but disabled.
+    /// Shell has scanned the extension but it's not currently ACTIVE — either
+    /// it's INITIALIZED (just after first login) or explicitly disabled by the
+    /// user. Activating it is a single `gnome-extensions enable` call; no
+    /// log-out required.
     Disabled,
-    /// Not installed.
+    /// Files are on disk at the expected path but GNOME Shell doesn't know
+    /// about the UUID yet. This is the expected outcome of the very first
+    /// install on Wayland — Shell only rescans `~/.local/share/gnome-shell/
+    /// extensions/` at login. The user has to log out and back in; after
+    /// that the state flips to `Disabled` and a single enable finishes the
+    /// install.
+    PendingRestart,
+    /// No files on disk, not known to GNOME Shell — never installed (or
+    /// already cleanly uninstalled).
     NotInstalled,
 }
 
@@ -107,19 +118,32 @@ fn target_dir() -> Result<PathBuf> {
         .join(EXTENSION_UUID))
 }
 
-/// Query GNOME for the extension's current state. Returns `NotInstalled`
-/// if the `gnome-extensions` tool isn't on PATH or the UUID isn't listed.
+/// Query GNOME for the extension's current state, then consult the
+/// filesystem to distinguish "never installed" from "installed but GNOME
+/// hasn't re-scanned yet" (the Wayland first-install case).
 pub fn status() -> Status {
-    let out = match Command::new("gnome-extensions")
+    // Ask GNOME first. If it knows the UUID, its answer is authoritative.
+    if let Ok(o) = Command::new("gnome-extensions")
         .arg("list")
         .arg("--details")
         .output()
     {
-        Ok(o) if o.status.success() => o,
-        _ => return Status::NotInstalled,
-    };
-    let s = String::from_utf8_lossy(&out.stdout);
-    parse_status(&s, EXTENSION_UUID).unwrap_or(Status::NotInstalled)
+        if o.status.success() {
+            let s = String::from_utf8_lossy(&o.stdout);
+            if let Some(state) = parse_status(&s, EXTENSION_UUID) {
+                return state;
+            }
+        }
+    }
+    // GNOME doesn't know the UUID. If our files are already at the target
+    // path, install() has run — Shell just hasn't re-scanned. The user has
+    // to log out and back in.
+    if let Ok(dst) = target_dir() {
+        if dst.join("metadata.json").exists() {
+            return Status::PendingRestart;
+        }
+    }
+    Status::NotInstalled
 }
 
 /// Copy the bundled extension into the user's GNOME extensions dir and
@@ -141,6 +165,36 @@ pub fn install() -> Result<()> {
             std::fs::copy(entry.path(), dst.join(entry.file_name()))?;
         }
     }
+    let out = Command::new("gnome-extensions")
+        .arg("enable")
+        .arg(EXTENSION_UUID)
+        .output()?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        // On Wayland, GNOME Shell only scans `~/.local/share/gnome-shell/
+        // extensions/` at login. The first install of a never-before-seen
+        // UUID will ALWAYS hit this: files are in place, but enable reports
+        // "Extension ... does not exist". That's not a failure — it's the
+        // architectural predicate of Wayland hot-loading. Swallow the
+        // specific error so install() returns Ok(); the caller's subsequent
+        // status() call will report PendingRestart and the UI prompts the
+        // user to log out and back in.
+        let looks_like_pending_restart = err.to_ascii_lowercase().contains("does not exist");
+        if !looks_like_pending_restart {
+            anyhow::bail!("gnome-extensions enable failed: {}", err.trim());
+        }
+        tracing::info!(
+            "install: enable reported UUID unknown — Wayland hot-load limit, user must log out and back in to activate"
+        );
+    }
+    Ok(())
+}
+
+/// Activate an already-installed extension that GNOME has scanned but not
+/// yet enabled (`Status::Disabled` — typically the INITIALIZED state right
+/// after the first post-install login). Kept separate from `install()` to
+/// avoid redundant file-copy work when the files are already in place.
+pub fn enable_installed() -> Result<()> {
     let out = Command::new("gnome-extensions")
         .arg("enable")
         .arg(EXTENSION_UUID)
