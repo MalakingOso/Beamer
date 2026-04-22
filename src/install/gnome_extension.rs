@@ -4,6 +4,10 @@
 //! Install / enable / disable helper for the bundled Beamer Focus Helper
 //! GNOME Shell extension.
 
+use std::path::PathBuf;
+use std::process::Command;
+use anyhow::Result;
+
 pub const EXTENSION_UUID: &str = "beamer-focus@beamer.app";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +65,99 @@ fn parse_status(output: &str, uuid: &str) -> Option<Status> {
         }
     }
     if in_block { Some(Status::Disabled) } else { None }
+}
+
+/// Where on disk the extension's files live, to copy from at install time.
+/// Resolution order:
+///   1. `$BEAMER_EXTENSION_DIR` env var (dev / packaging override)
+///   2. `<exe_dir>/../share/beamer/extension/beamer-focus@beamer.app/` (FHS-packaged)
+///   3. `<exe_dir>/extension/beamer-focus@beamer.app/` (portable / dev cwd)
+///   4. `./extension/beamer-focus@beamer.app/` (cargo-run from repo root)
+pub fn locate_source_dir() -> Option<PathBuf> {
+    if let Ok(env) = std::env::var("BEAMER_EXTENSION_DIR") {
+        let p = PathBuf::from(env);
+        if p.join("metadata.json").exists() {
+            return Some(p);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let fhs = dir.join("../share/beamer/extension").join(EXTENSION_UUID);
+            if fhs.join("metadata.json").exists() {
+                return Some(fhs);
+            }
+            let portable = dir.join("extension").join(EXTENSION_UUID);
+            if portable.join("metadata.json").exists() {
+                return Some(portable);
+            }
+        }
+    }
+    let cwd = PathBuf::from("extension").join(EXTENSION_UUID);
+    if cwd.join("metadata.json").exists() {
+        return Some(cwd);
+    }
+    None
+}
+
+fn target_dir() -> Result<PathBuf> {
+    let home = std::env::var("HOME")
+        .map_err(|_| anyhow::anyhow!("HOME not set"))?;
+    Ok(PathBuf::from(home)
+        .join(".local/share/gnome-shell/extensions")
+        .join(EXTENSION_UUID))
+}
+
+/// Query GNOME for the extension's current state. Returns `NotInstalled`
+/// if the `gnome-extensions` tool isn't on PATH or the UUID isn't listed.
+pub fn status() -> Status {
+    let out = match Command::new("gnome-extensions")
+        .arg("list")
+        .arg("--details")
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return Status::NotInstalled,
+    };
+    let s = String::from_utf8_lossy(&out.stdout);
+    parse_status(&s, EXTENSION_UUID).unwrap_or(Status::NotInstalled)
+}
+
+/// Copy the bundled extension into the user's GNOME extensions dir and
+/// enable it. Idempotent — re-running after a prior install updates the
+/// files.
+pub fn install() -> Result<()> {
+    let src = locate_source_dir()
+        .ok_or_else(|| anyhow::anyhow!("extension source directory not found; set BEAMER_EXTENSION_DIR"))?;
+    let dst = target_dir()?;
+    std::fs::create_dir_all(&dst)?;
+    for entry in std::fs::read_dir(&src)? {
+        let entry = entry?;
+        if entry.file_type()?.is_file() {
+            std::fs::copy(entry.path(), dst.join(entry.file_name()))?;
+        }
+    }
+    let out = Command::new("gnome-extensions")
+        .arg("enable")
+        .arg(EXTENSION_UUID)
+        .output()?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        anyhow::bail!("gnome-extensions enable failed: {}", err.trim());
+    }
+    Ok(())
+}
+
+/// Disable and remove the extension.
+pub fn uninstall() -> Result<()> {
+    let _ = Command::new("gnome-extensions")
+        .arg("disable")
+        .arg(EXTENSION_UUID)
+        .output();
+    let dst = target_dir()?;
+    if dst.exists() {
+        std::fs::remove_dir_all(&dst)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
