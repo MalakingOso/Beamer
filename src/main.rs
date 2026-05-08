@@ -11,6 +11,7 @@ mod tray;
 mod transcription;
 mod ui;
 mod update;
+mod warmup;
 
 use anyhow::Result;
 

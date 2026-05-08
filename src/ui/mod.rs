@@ -6,6 +6,7 @@ pub mod home;
 pub mod icons;
 pub mod pill;
 pub mod settings;
+pub mod splash;
 pub mod status_log;
 pub mod vocab_page;
 

@@ -1,13 +1,10 @@
 use std::rc::Rc;
 
-use dioxus::desktop::tao::dpi::PhysicalPosition;
-#[cfg(not(target_os = "linux"))]
-use dioxus::desktop::tao::dpi::PhysicalSize;
+use dioxus::desktop::tao::dpi::{PhysicalPosition, PhysicalSize};
 #[cfg(target_os = "windows")]
 use dioxus::desktop::tao::platform::windows::WindowBuilderExtWindows;
 use dioxus::desktop::trayicon::{init_tray_icon, MouseButton, MouseButtonState, TrayIconEvent};
 use dioxus::desktop::{use_muda_event_handler, use_tray_icon_event_handler, use_window};
-#[cfg(not(target_os = "linux"))]
 use dioxus::desktop::{Config as DesktopConfig, DesktopContext, WindowBuilder};
 use dioxus::prelude::*;
 
@@ -18,6 +15,8 @@ use crate::tray;
 use crate::update::{self, UpdateStatus};
 #[cfg(not(target_os = "linux"))]
 use crate::ui::pill::RecordingPill;
+use crate::ui::splash::{SplashWindow, SPLASH_CSS};
+use crate::warmup::{self, WarmupProgress, WarmupStep};
 use crate::ui::history::TranscriptionHistory;
 use crate::ui::history_page::HistoryPage;
 use crate::ui::home::HomePage;
@@ -58,6 +57,91 @@ pub fn App() -> Element {
                 let y = (monitor_size.height as i32 - win_h) / 2;
                 window.set_outer_position(PhysicalPosition::new(x, y));
             }
+        }
+    });
+
+    // Cold-start warmup splash. Runs once on first render: opens a small
+    // centered window, walks `warm_all` through keyring/audio/(mpris)/network,
+    // then closes itself. Pays the one-time costs that would otherwise stall
+    // the first recording.
+    let mut warmup_progress = use_signal(WarmupProgress::default);
+    let mut splash_ctx: Signal<Option<DesktopContext>> = use_signal(|| None);
+
+    use_hook({
+        let window = window.clone();
+        move || {
+            spawn(async move {
+                let scale = window
+                    .primary_monitor()
+                    .map(|m| m.scale_factor())
+                    .unwrap_or(1.0);
+                let monitor_size = window
+                    .primary_monitor()
+                    .map(|m| m.size())
+                    .unwrap_or(PhysicalSize::new(1920, 1080));
+
+                let splash_w = (280.0 * scale) as u32;
+                let splash_h = (280.0 * scale) as u32;
+                let x = (monitor_size.width.saturating_sub(splash_w)) / 2;
+                let y = (monitor_size.height.saturating_sub(splash_h)) / 2;
+
+                #[allow(unused_mut)]
+                let mut builder = WindowBuilder::new()
+                    .with_title("Beamer")
+                    .with_decorations(false)
+                    .with_resizable(false)
+                    .with_transparent(true)
+                    .with_always_on_top(true)
+                    .with_focusable(false)
+                    .with_inner_size(PhysicalSize::new(splash_w, splash_h))
+                    .with_position(PhysicalPosition::new(x as i32, y as i32));
+                #[cfg(target_os = "windows")]
+                let builder = builder.with_skip_taskbar(true);
+
+                let cfg = DesktopConfig::new()
+                    .with_data_directory(super::webview_data_dir())
+                    .with_window(builder)
+                    .with_background_color((0, 0, 0, 0))
+                    .with_custom_head(format!("<style>{}</style>", SPLASH_CSS))
+                    .with_exits_when_last_window_closes(false);
+
+                let dom = VirtualDom::new(SplashWindow);
+                let ctx: DesktopContext = window.new_window(dom, cfg).await;
+                splash_ctx.set(Some(ctx));
+
+                let started = std::time::Instant::now();
+                warmup::warm_all(warmup_progress).await;
+
+                // Keep the splash on screen for at least 800ms so it reads as
+                // intentional rather than a flicker on warm restarts.
+                let min_visible = std::time::Duration::from_millis(800);
+                let elapsed = started.elapsed();
+                if elapsed < min_visible {
+                    tokio::time::sleep(min_visible - elapsed).await;
+                }
+
+                // Snap the bar to 100% and let the CSS transition finish before dismissing.
+                warmup_progress.set(WarmupProgress { step: WarmupStep::Done, pct: 100 });
+                tokio::time::sleep(std::time::Duration::from_millis(180)).await;
+
+                if let Some(ctx) = splash_ctx.read().as_ref() {
+                    ctx.close();
+                }
+                splash_ctx.set(None);
+            });
+        }
+    });
+
+    // Push warmup progress into the splash DOM. Mirrors the pill's parent→child
+    // update pattern: the splash lives in a separate VirtualDom, so we can't
+    // share signals across — we evaluate JS to update the bar width.
+    use_effect(move || {
+        let p = *warmup_progress.read();
+        if let Some(ctx) = splash_ctx.read().as_ref() {
+            let _ = ctx.webview.evaluate_script(&format!(
+                "var b=document.getElementById('splash-bar-fill');if(b)b.style.width='{}%';",
+                p.pct
+            ));
         }
     });
 
