@@ -125,6 +125,12 @@ pub fn App() -> Element {
                     ctx.close();
                 }
                 splash_ctx.set(None);
+
+                // Reveal the main window on platforms where it would have
+                // shown at launch. Windows keeps it hidden until tray-click,
+                // matching the original tray-app convention.
+                #[cfg(not(target_os = "windows"))]
+                window.set_visible(true);
             });
         }
     });

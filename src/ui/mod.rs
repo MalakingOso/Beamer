@@ -43,7 +43,12 @@ pub fn launch_app() {
                 .with_window(
                     WindowBuilder::new()
                         .with_title("Beamer")
-                        .with_visible(cfg!(not(target_os = "windows")))
+                        // Always start hidden — the splash window owns the
+                        // launch moment. After the splash dismisses, app.rs
+                        // reveals the main window on platforms where it
+                        // would have been visible at launch (everything
+                        // except Windows, which waits for tray-click).
+                        .with_visible(false)
                         .with_decorations(false)
                         .with_transparent(true)
                         .with_window_icon(Some(window_icon))
