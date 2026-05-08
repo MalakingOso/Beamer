@@ -19,9 +19,9 @@ pub fn SplashWindow() -> Element {
             div { class: "splash-card",
                 img { class: "splash-icon", src: "{icon_data_url}" }
                 div { class: "splash-bar-track",
-                    div { class: "splash-bar-fill", id: "splash-bar-fill" }
+                    div { class: "splash-bar-fill" }
                 }
-                div { class: "splash-label", id: "splash-label", "Warming up…" }
+                div { class: "splash-label", "Warming up…" }
             }
         }
     }
@@ -51,9 +51,17 @@ html, body, #main { background:transparent!important; overflow:hidden;
 .splash-bar-track { width:200px; height:6px;
   background:#f1f3f9; border-radius:3px; overflow:hidden; }
 
+/* Bar fill is purely time-driven: 0 → 100% over 1500ms, matching the
+   splash's minimum-visible floor in app.rs. Decoupled from real warmup
+   progress so the user always sees a smooth fill regardless of cold/warm. */
 .splash-bar-fill { height:100%; width:0%; background:#4B0082;
   border-radius:3px;
-  transition:width 200ms cubic-bezier(0.25, 1, 0.5, 1); }
+  animation:splash-fill 1500ms cubic-bezier(0.4, 0, 0.2, 1) forwards; }
+
+@keyframes splash-fill {
+  from { width:0%; }
+  to   { width:100%; }
+}
 
 .splash-label { font-size:12px; color:#94a0b8; letter-spacing:0.01em;
   user-select:none; }

@@ -16,7 +16,7 @@ use crate::update::{self, UpdateStatus};
 #[cfg(not(target_os = "linux"))]
 use crate::ui::pill::RecordingPill;
 use crate::ui::splash::{SplashWindow, SPLASH_CSS};
-use crate::warmup::{self, WarmupProgress, WarmupStep};
+use crate::warmup::{self, WarmupProgress};
 use crate::ui::history::TranscriptionHistory;
 use crate::ui::history_page::HistoryPage;
 use crate::ui::home::HomePage;
@@ -64,7 +64,7 @@ pub fn App() -> Element {
     // centered window, walks `warm_all` through keyring/audio/(mpris)/network,
     // then closes itself. Pays the one-time costs that would otherwise stall
     // the first recording.
-    let mut warmup_progress = use_signal(WarmupProgress::default);
+    let warmup_progress = use_signal(WarmupProgress::default);
     let mut splash_ctx: Signal<Option<DesktopContext>> = use_signal(|| None);
 
     use_hook({
@@ -112,36 +112,20 @@ pub fn App() -> Element {
                 let started = std::time::Instant::now();
                 warmup::warm_all(warmup_progress).await;
 
-                // Keep the splash on screen for at least 800ms so it reads as
-                // intentional rather than a flicker on warm restarts.
-                let min_visible = std::time::Duration::from_millis(800);
+                // The splash bar fills via a CSS keyframe over 1500ms (see
+                // SPLASH_CSS), so the floor must match that duration — otherwise
+                // the splash dismisses while the fill is still animating.
+                let min_visible = std::time::Duration::from_millis(1500);
                 let elapsed = started.elapsed();
                 if elapsed < min_visible {
                     tokio::time::sleep(min_visible - elapsed).await;
                 }
-
-                // Snap the bar to 100% and let the CSS transition finish before dismissing.
-                warmup_progress.set(WarmupProgress { step: WarmupStep::Done, pct: 100 });
-                tokio::time::sleep(std::time::Duration::from_millis(180)).await;
 
                 if let Some(ctx) = splash_ctx.read().as_ref() {
                     ctx.close();
                 }
                 splash_ctx.set(None);
             });
-        }
-    });
-
-    // Push warmup progress into the splash DOM. Mirrors the pill's parent→child
-    // update pattern: the splash lives in a separate VirtualDom, so we can't
-    // share signals across — we evaluate JS to update the bar width.
-    use_effect(move || {
-        let p = *warmup_progress.read();
-        if let Some(ctx) = splash_ctx.read().as_ref() {
-            let _ = ctx.webview.evaluate_script(&format!(
-                "var b=document.getElementById('splash-bar-fill');if(b)b.style.width='{}%';",
-                p.pct
-            ));
         }
     });
 
