@@ -33,6 +33,66 @@ pub trait InjectionBackend: Send + Sync {
     fn inject(&self, text: &str) -> Result<InjectionResult>;
 }
 
+// ─── Text sanitation ──────────────────────────────────────────────────────────
+
+/// Prepare text for keystroke-based injection (gnome/wtype/ydotool backends).
+/// Transliterates the smart punctuation transcription APIs produce, and maps
+/// newlines/tabs to spaces — a typed Enter would submit chat boxes and forms
+/// mid-injection. The clipboard path keeps newlines: an atomic paste doesn't
+/// press keys.
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn sanitize_for_typing(text: &str) -> String {
+    let transliterated = text
+        .replace('\u{2018}', "'") // left single quote
+        .replace('\u{2019}', "'") // right single quote
+        .replace('\u{201C}', "\"") // left double quote
+        .replace('\u{201D}', "\"") // right double quote
+        .replace('\u{2013}', "-") // en dash
+        .replace('\u{2014}', "--") // em dash
+        .replace('\u{2026}', "...") // ellipsis
+        .replace('\u{00A0}', " "); // non-breaking space
+
+    transliterated
+        .replace("\r\n", " ")
+        .replace(['\r', '\n', '\t'], " ")
+        .trim_end()
+        .to_string()
+}
+
+#[cfg(all(test, not(target_os = "windows")))]
+mod sanitize_tests {
+    use super::sanitize_for_typing;
+
+    #[test]
+    fn smart_punctuation_becomes_ascii() {
+        assert_eq!(
+            sanitize_for_typing("\u{2018}a\u{2019} \u{201C}b\u{201D} c\u{2013}d\u{2014}e\u{2026}"),
+            "'a' \"b\" c-d--e..."
+        );
+    }
+
+    #[test]
+    fn newlines_become_spaces_never_enter() {
+        assert_eq!(sanitize_for_typing("one\ntwo"), "one two");
+        assert_eq!(sanitize_for_typing("one\ttwo"), "one two");
+    }
+
+    #[test]
+    fn crlf_is_one_space() {
+        assert_eq!(sanitize_for_typing("one\r\ntwo"), "one two");
+    }
+
+    #[test]
+    fn trailing_newline_trimmed_interior_spacing_kept() {
+        assert_eq!(sanitize_for_typing("one  two\n"), "one  two");
+    }
+
+    #[test]
+    fn unicode_passes_through() {
+        assert_eq!(sanitize_for_typing("naïve café 你好"), "naïve café 你好");
+    }
+}
+
 // ─── Registry ─────────────────────────────────────────────────────────────────
 
 /// All backends available on this platform.

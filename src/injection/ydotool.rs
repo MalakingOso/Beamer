@@ -33,9 +33,9 @@ impl InjectionBackend for YdotoolBackend {
     }
 
     fn inject(&self, text: &str) -> Result<InjectionResult> {
-        // ydotool type only handles ASCII keycodes — transliterate common
-        // Unicode punctuation (smart quotes, dashes) that transcription APIs produce
-        let ascii_text = transliterate_to_ascii(text);
+        // ydotool type only handles ASCII keycodes — the shared sanitizer
+        // transliterates smart punctuation and strips newlines/tabs.
+        let ascii_text = super::sanitize_for_typing(text);
 
         if !ascii_text.is_ascii() {
             anyhow::bail!("Text contains characters outside ydotool's ASCII range");
@@ -68,18 +68,6 @@ impl InjectionBackend for YdotoolBackend {
             anyhow::bail!("ydotool failed: {}", stderr.trim())
         }
     }
-}
-
-/// Replace common Unicode punctuation from transcription APIs with ASCII equivalents.
-fn transliterate_to_ascii(text: &str) -> String {
-    text.replace('\u{2018}', "'")  // left single quote
-        .replace('\u{2019}', "'")  // right single quote
-        .replace('\u{201C}', "\"") // left double quote
-        .replace('\u{201D}', "\"") // right double quote
-        .replace('\u{2013}', "-")  // en dash
-        .replace('\u{2014}', "--") // em dash
-        .replace('\u{2026}', "...") // ellipsis
-        .replace('\u{00A0}', " ")  // non-breaking space
 }
 
 fn find_ydotool_socket() -> Option<PathBuf> {
