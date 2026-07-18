@@ -41,6 +41,18 @@ fn chunk_rms(samples: &[f32]) -> f32 {
     (sum / samples.len() as f32).sqrt()
 }
 
+/// Convert f32 samples in [-1.0, 1.0] to i16 little-endian PCM bytes.
+/// Out-of-range values are clamped before scaling.
+pub(crate) fn f32_to_i16_bytes(samples: &[f32]) -> Vec<u8> {
+    samples
+        .iter()
+        .flat_map(|&s| {
+            let clamped = s.clamp(-1.0, 1.0);
+            ((clamped * 32767.0) as i16).to_le_bytes()
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod level_tests {
     use super::{chunk_rms, normalize_rms};
@@ -63,6 +75,53 @@ mod level_tests {
     fn loud_input_clamps_to_one() {
         let samples = [0.9_f32; 64];
         assert_eq!(normalize_rms(chunk_rms(&samples)), 1.0);
+    }
+}
+
+#[cfg(test)]
+mod f32_to_i16_bytes_tests {
+    use super::f32_to_i16_bytes;
+
+    #[test]
+    fn zero_is_zero_bytes() {
+        assert_eq!(f32_to_i16_bytes(&[0.0]), vec![0x00, 0x00]);
+    }
+
+    #[test]
+    fn positive_full_scale() {
+        // 1.0 * 32767.0 = 32767 (i16::MAX), LE bytes FF 7F
+        assert_eq!(f32_to_i16_bytes(&[1.0]), vec![0xFF, 0x7F]);
+    }
+
+    #[test]
+    fn negative_full_scale() {
+        // -1.0 * 32767.0 = -32767, LE bytes 01 80
+        assert_eq!(f32_to_i16_bytes(&[-1.0]), vec![0x01, 0x80]);
+    }
+
+    #[test]
+    fn out_of_range_positive_clamps_to_positive_full_scale() {
+        assert_eq!(f32_to_i16_bytes(&[2.0]), vec![0xFF, 0x7F]);
+    }
+
+    #[test]
+    fn out_of_range_negative_clamps_to_negative_full_scale() {
+        assert_eq!(f32_to_i16_bytes(&[-5.0]), vec![0x01, 0x80]);
+    }
+
+    #[test]
+    fn multiple_samples_are_concatenated_in_order_little_endian() {
+        let bytes = f32_to_i16_bytes(&[0.0, 1.0, -1.0]);
+        assert_eq!(
+            bytes,
+            vec![0x00, 0x00, 0xFF, 0x7F, 0x01, 0x80],
+            "expected LE byte pairs concatenated in input order"
+        );
+    }
+
+    #[test]
+    fn empty_input_produces_empty_output() {
+        assert_eq!(f32_to_i16_bytes(&[]), Vec::<u8>::new());
     }
 }
 
@@ -103,13 +162,7 @@ impl AudioPipeline {
                 publish_level(normalize_rms(chunk_rms(&samples)));
 
                 // f32 [-1.0, 1.0] → i16 little-endian PCM bytes
-                let bytes: Vec<u8> = samples
-                    .iter()
-                    .flat_map(|&s| {
-                        let clamped = s.clamp(-1.0, 1.0);
-                        ((clamped * 32767.0) as i16).to_le_bytes()
-                    })
-                    .collect();
+                let bytes = f32_to_i16_bytes(&samples);
                 let _ = tx.send(bytes);
             }
         });
