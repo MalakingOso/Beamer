@@ -195,7 +195,7 @@ pub fn App() -> Element {
                     .with_data_directory(super::webview_data_dir())
                     .with_window(builder)
                     .with_background_color((0, 0, 0, 0))
-                    .with_custom_head(format!(r#"<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&display=swap" rel="stylesheet"><style>body{{opacity:0;transition:opacity 0.15s ease;}}{}</style>"#, PILL_CSS))
+                    .with_custom_head(format!(r#"<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&display=swap" rel="stylesheet"><style>body{{opacity:0;transition:opacity 0.15s ease;}}{}</style><script>{}</script>"#, PILL_CSS, PILL_JS))
                     .with_exits_when_last_window_closes(false);
 
                 let dom = VirtualDom::new(RecordingPill);
@@ -223,13 +223,9 @@ pub fn App() -> Element {
         if let Some(ctx) = pill_ctx.read().as_ref() {
             let should_show = state != RecordingState::Idle && pill_enabled;
             if should_show {
-                let (label, dot_class, bars_class) = match state {
-                    RecordingState::Recording => {
-                        ("Recording", "pill-dot", "pill-bars")
-                    }
-                    RecordingState::Processing => {
-                        ("Processing", "pill-dot processing", "pill-bars processing")
-                    }
+                let js_state = match state {
+                    RecordingState::Recording => "recording",
+                    RecordingState::Processing => "processing",
                     _ => unreachable!(),
                 };
 
@@ -243,17 +239,11 @@ pub fn App() -> Element {
                     }
                 }
 
-                // Set content first, then fade in
-                let _ = ctx.webview.evaluate_script(&format!(
-                    r#"var d=document.querySelector('[class^="pill-dot"]');if(d)d.className='{dot_class}';
-                       var b=document.querySelector('[class^="pill-bars"]');if(b)b.className='{bars_class}';
-                       var l=document.querySelector('.pill-label');if(l)l.textContent='{label}';
-                       document.body.style.opacity='1';"#,
-                ));
+                let _ = ctx
+                    .webview
+                    .evaluate_script(&format!("beamerSetState('{js_state}');"));
             } else {
-                let _ = ctx.webview.evaluate_script(
-                    "document.body.style.opacity='0';",
-                );
+                let _ = ctx.webview.evaluate_script("beamerSetState('idle');");
                 #[cfg(not(target_os = "windows"))]
                 {
                     let ctx_clone = ctx.clone();
@@ -581,34 +571,31 @@ pub fn App() -> Element {
     }
 }
 
+// VibeTyper-style dark glass capsule: purple-gradient waveform, white
+// tabular timer, fully rounded, hairline ring, soft shadow.
 #[cfg(not(target_os = "linux"))]
 const PILL_CSS: &str = r#"
 *, *::before, *::after { margin:0; padding:0; }
 html, body, #main { background:transparent!important; overflow:hidden;
   font-family: "DM Mono","Segoe UI Variable","Segoe UI",monospace,system-ui,sans-serif; }
 
-.pill { display:flex; align-items:center; gap:10px; padding:0 16px;
+.pill { display:flex; align-items:center; gap:12px; padding:0 18px;
   height:44px; margin:4px auto; width:fit-content;
-  background:rgba(255,255,255,0.92); border-radius:6px;
-  border:2px solid rgba(75,0,130,0.12);
-  box-shadow:2px 4px 0 0 rgba(75,0,130,0.12); }
+  background:linear-gradient(180deg,#17171a,#101012); border-radius:9999px;
+  border:1px solid rgba(255,255,255,0.14);
+  box-shadow:0 6px 18px rgba(0,0,0,0.45); }
 
-.pill-dot { width:8px; height:8px; border-radius:50%; background:#DC2626;
-  flex-shrink:0; animation:dot-pulse 1.5s ease-in-out infinite; }
-.pill-dot.processing { display:none; }
-@keyframes dot-pulse { 0%,100%{opacity:1} 50%{opacity:0.35} }
-
-.pill-bars { display:flex; align-items:center; gap:3px; height:24px; }
-.bar { width:3px; border-radius:1.5px; background:#4B0082;
+.pill-bars { display:flex; align-items:center; gap:3px; height:26px; }
+.bar { width:3px; border-radius:2px;
   animation:wave 1.2s ease-in-out infinite; }
-.bar-1{height:8px;  animation-delay:0s}
-.bar-2{height:16px; animation-delay:.15s}
-.bar-3{height:24px; animation-delay:.3s}
-.bar-4{height:16px; animation-delay:.45s}
-.bar-5{height:8px;  animation-delay:.6s}
+.bar-1{height:8px;  background:#4B0082; animation-delay:0s}
+.bar-2{height:16px; background:#6B21A8; animation-delay:.15s}
+.bar-3{height:24px; background:#8921E4; animation-delay:.3s}
+.bar-4{height:16px; background:#9747F0; animation-delay:.45s}
+.bar-5{height:8px;  background:#A561EC; animation-delay:.6s}
 @keyframes wave { 0%,100%{transform:scaleY(.4)} 50%{transform:scaleY(1)} }
 
-.pill-bars.processing { gap:5px; align-items:center; }
+.pill-bars.processing { gap:5px; }
 .pill-bars.processing .bar {
   width:6px; height:6px; border-radius:50%;
   animation:bounce-dot 1.2s ease-in-out infinite; }
@@ -621,7 +608,51 @@ html, body, #main { background:transparent!important; overflow:hidden;
   0%,80%,100%{transform:translateY(0)}
   40%{transform:translateY(-8px)} }
 
-.pill-label { font-size:13px; font-weight:500;
-  color:#64708b; letter-spacing:.01em; user-select:none;
+.pill-timer { font-size:13px; font-weight:500; color:#ffffff;
+  font-variant-numeric:tabular-nums; user-select:none;
   font-family:"DM Mono",monospace; }
+
+.pill-label { font-size:13px; font-weight:500;
+  color:rgba(255,255,255,0.85); letter-spacing:.01em; user-select:none;
+  font-family:"DM Mono",monospace; display:none; }
+"#;
+
+// State transitions for the pill window, injected as a head script so app.rs
+// only ever calls `beamerSetState('recording'|'processing'|'idle')`.
+#[cfg(not(target_os = "linux"))]
+const PILL_JS: &str = r#"
+window.beamerSetState = function(state) {
+  var bars = document.querySelector('.pill-bars');
+  var label = document.querySelector('.pill-label');
+  var timer = document.querySelector('.pill-timer');
+  if (!bars || !label || !timer) return;
+  var stopTimer = function() {
+    if (window.__beamerTimer) { clearInterval(window.__beamerTimer); window.__beamerTimer = null; }
+  };
+  if (state === 'recording') {
+    bars.className = 'pill-bars';
+    label.style.display = 'none';
+    timer.style.display = '';
+    window.__beamerSecs = 0;
+    timer.textContent = '0:00';
+    stopTimer();
+    window.__beamerTimer = setInterval(function() {
+      window.__beamerSecs++;
+      var m = Math.floor(window.__beamerSecs / 60);
+      var s = ('' + (window.__beamerSecs % 60)).padStart(2, '0');
+      var t = document.querySelector('.pill-timer');
+      if (t) t.textContent = m + ':' + s;
+    }, 1000);
+    document.body.style.opacity = '1';
+  } else if (state === 'processing') {
+    bars.className = 'pill-bars processing';
+    label.style.display = '';
+    timer.style.display = 'none';
+    stopTimer();
+    document.body.style.opacity = '1';
+  } else {
+    stopTimer();
+    document.body.style.opacity = '0';
+  }
+};
 "#;
