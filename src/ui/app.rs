@@ -269,6 +269,9 @@ pub fn App() -> Element {
     // Linux: swap the tray icon to reflect recording state (mirrors Handy's behavior).
     // GNOME's AppIndicator extension renders the tray icon in the top bar; tray-icon
     // wraps libappindicator and `set_icon` writes a PNG to /tmp and signals a reload.
+    // On GNOME the helper extension additionally shows a shell-native recording
+    // pill (waveform + timer) — a regular Wayland window can't be positioned or
+    // kept always-on-top, so the pill lives inside GNOME Shell instead.
     #[cfg(target_os = "linux")]
     {
         use dioxus::desktop::trayicon::use_tray_icon;
@@ -284,6 +287,35 @@ pub fn App() -> Element {
                 };
                 let _ = tray.set_icon(Some(icon));
             }
+
+            let pill_enabled = config.peek().appearance.pill_enabled;
+            match state {
+                RecordingState::Recording if pill_enabled => {
+                    crate::ui::shell_indicator::show("recording")
+                }
+                RecordingState::Processing if pill_enabled => {
+                    crate::ui::shell_indicator::show("processing")
+                }
+                _ => crate::ui::shell_indicator::hide(),
+            }
+        });
+
+        // Pump live mic levels into the shell pill's waveform (~15 Hz).
+        // The worker thread no-ops when the helper extension isn't active.
+        use_hook(move || {
+            spawn(async move {
+                let mut level_rx = crate::audio::subscribe_levels();
+                loop {
+                    if level_rx.changed().await.is_err() {
+                        break;
+                    }
+                    let level = *level_rx.borrow_and_update();
+                    if *rec_state.peek() == RecordingState::Recording {
+                        crate::ui::shell_indicator::update_level(level);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(66)).await;
+                }
+            });
         });
     }
 
