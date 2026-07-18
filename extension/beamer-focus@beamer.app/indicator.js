@@ -5,10 +5,12 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 // VibeTyper-style recording pill: dark glass capsule at bottom-center of the
 // primary monitor with a purple-gradient waveform, an elapsed timer while
-// recording, and a "Transcribing…" label while processing. Added as top
-// chrome with affectsInputRegion:false so it is click-through and can never
-// take focus (which would break text injection into the previously focused
-// window).
+// recording, and a "Transcribing…" label while processing. Added directly to
+// uiGroup (layout.js documents this as the supported way to place actors
+// above all windows) rather than via addTopChrome: GNOME 50 removed the
+// affectsInputRegion chrome param, and an untracked non-reactive actor is
+// click-through on every shell version — so the pill can never take focus
+// (which would break text injection into the previously focused window).
 
 const BAR_COUNT = 12;
 const BAR_WIDTH = 3;
@@ -62,7 +64,7 @@ export class BeamerIndicator {
         this._pill.add_child(this._barsBox);
         this._pill.add_child(this._timerLabel);
         this._pill.add_child(this._statusLabel);
-        Main.layoutManager.addTopChrome(this._pill, { affectsInputRegion: false });
+        Main.layoutManager.uiGroup.add_child(this._pill);
 
         this._state = null;
         this._level = 0;
@@ -161,7 +163,7 @@ export class BeamerIndicator {
             this._pill.disconnect(this._widthChangedId);
             this._widthChangedId = 0;
         }
-        Main.layoutManager.removeChrome(this._pill);
+        Main.layoutManager.uiGroup.remove_child(this._pill);
         this._pill.destroy();
         this._pill = null;
     }
