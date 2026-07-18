@@ -9,6 +9,10 @@ pub mod uia;
 pub mod ydotool;
 #[cfg(not(target_os = "windows"))]
 pub mod focus;
+#[cfg(not(target_os = "windows"))]
+pub mod gnome;
+#[cfg(not(target_os = "windows"))]
+pub mod wtype;
 
 use anyhow::Result;
 
@@ -108,6 +112,8 @@ pub fn all_backends() -> Vec<Box<dyn InjectionBackend>> {
 
     #[cfg(not(target_os = "windows"))]
     {
+        backends.push(Box::new(gnome::GnomeBackend));
+        backends.push(Box::new(wtype::WtypeBackend));
         backends.push(Box::new(ydotool::YdotoolBackend));
         backends.push(Box::new(clipboard::ClipboardBackend));
     }
@@ -132,7 +138,12 @@ pub fn default_backend_names() -> Vec<String> {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        vec!["ydotool".into(), "clipboard".into()]
+        vec![
+            "gnome".into(),
+            "wtype".into(),
+            "ydotool".into(),
+            "clipboard".into(),
+        ]
     }
 }
 

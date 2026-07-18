@@ -29,18 +29,25 @@ pub fn is_terminal(app_id: &str) -> bool {
     TERMINAL_APP_IDS.iter().any(|id| app_id.eq_ignore_ascii_case(id))
 }
 
-fn call_extension() -> Result<String, zbus::Error> {
+/// Blocking proxy to the Beamer Shell-extension helper interface. Shared by
+/// the focus query, the `gnome` typing backend, and the shell indicator.
+pub(crate) fn helper_proxy(
+    timeout_ms: u64,
+) -> Result<zbus::blocking::Proxy<'static>, zbus::Error> {
     use std::time::Duration;
     let conn = zbus::blocking::connection::Builder::session()?
-        .method_timeout(Duration::from_millis(100))
+        .method_timeout(Duration::from_millis(timeout_ms))
         .build()?;
-    let proxy = zbus::blocking::Proxy::new(
+    zbus::blocking::Proxy::new(
         &conn,
         "org.gnome.Shell",
         "/app/beamer/FocusProvider",
         "app.beamer.FocusProvider",
-    )?;
-    proxy.call("GetFocusedAppId", &())
+    )
+}
+
+fn call_extension() -> Result<String, zbus::Error> {
+    helper_proxy(100)?.call("GetFocusedAppId", &())
 }
 
 /// Returns the focused window's app id, lowercased. Returns `None` if the
