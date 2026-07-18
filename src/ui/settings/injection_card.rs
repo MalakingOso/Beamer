@@ -167,13 +167,17 @@ pub fn InjectionCard(props: InjectionCardProps) -> Element {
                         let current = status();
                         let (label, action): (String, Option<&str>) = match current {
                             HelperStatus::Enabled =>
-                                ("GNOME focus helper: Active".into(), Some("Remove")),
+                                ("GNOME helper: Active (direct typing)".into(), Some("Remove")),
                             HelperStatus::Disabled =>
-                                ("GNOME focus helper: Installed, click to enable".into(), Some("Enable")),
+                                ("GNOME helper: Installed, click to enable".into(), Some("Enable")),
                             HelperStatus::PendingRestart =>
-                                ("GNOME focus helper: Installed — log out and back in to activate".into(), None),
+                                ("GNOME helper: Installed — log out and back in to activate".into(), None),
                             HelperStatus::NotInstalled =>
-                                ("Install GNOME focus helper for app-aware pasting".into(), Some("Install")),
+                                ("Install GNOME helper for reliable typing + recording pill".into(), Some("Install")),
+                            HelperStatus::UpdateAvailable =>
+                                ("GNOME helper: update available (adds direct typing + pill)".into(), Some("Update")),
+                            HelperStatus::UpdatePendingRestart =>
+                                ("GNOME helper: updated — log out and back in to activate".into(), None),
                         };
 
                         rsx! {
@@ -184,15 +188,17 @@ pub fn InjectionCard(props: InjectionCardProps) -> Element {
                                         class: "btn-small",
                                         onclick: move |_| {
                                             let result = match current {
-                                                HelperStatus::NotInstalled =>
+                                                HelperStatus::NotInstalled
+                                                | HelperStatus::UpdateAvailable =>
                                                     crate::install::gnome_extension::install(),
                                                 HelperStatus::Disabled =>
                                                     crate::install::gnome_extension::enable_installed(),
                                                 HelperStatus::Enabled =>
                                                     crate::install::gnome_extension::uninstall(),
-                                                // PendingRestart renders no button; match is exhaustive
+                                                // These render no button; match is exhaustive
                                                 // for safety if the render and click race.
-                                                HelperStatus::PendingRestart => Ok(()),
+                                                HelperStatus::PendingRestart
+                                                | HelperStatus::UpdatePendingRestart => Ok(()),
                                             };
                                             if let Err(e) = result {
                                                 tracing::warn!("GNOME extension action failed: {}", e);

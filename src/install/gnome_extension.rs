@@ -29,6 +29,13 @@ pub enum Status {
     /// No files on disk, not known to GNOME Shell — never installed (or
     /// already cleanly uninstalled).
     NotInstalled,
+    /// Extension is ACTIVE but the running (or installed) version is older
+    /// than the bundled one — reinstalling picks up new capabilities
+    /// (v2 added direct typing + the recording pill).
+    UpdateAvailable,
+    /// Files on disk are current but GNOME Shell is still running the old
+    /// code — Shell only reloads extension code at login.
+    UpdatePendingRestart,
 }
 
 /// Parses a line from `gnome-extensions list --details`. Output is
@@ -118,6 +125,42 @@ fn target_dir() -> Result<PathBuf> {
         .join(EXTENSION_UUID))
 }
 
+/// Extract `"version": N` from an extension metadata.json.
+fn parse_metadata_version(json: &str) -> Option<u32> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    value.get("version")?.as_u64().map(|v| v as u32)
+}
+
+/// Version of the extension bundled with this Beamer build.
+pub fn bundled_version() -> Option<u32> {
+    let src = locate_source_dir()?;
+    let json = std::fs::read_to_string(src.join("metadata.json")).ok()?;
+    parse_metadata_version(&json)
+}
+
+/// Version of the extension files installed in the user's GNOME dir.
+fn installed_version() -> Option<u32> {
+    let dst = target_dir().ok()?;
+    let json = std::fs::read_to_string(dst.join("metadata.json")).ok()?;
+    parse_metadata_version(&json)
+}
+
+/// Refine an ACTIVE extension's status with version information. `live` is
+/// what the running Shell reports (v1 has no GetVersion method, so a D-Bus
+/// error maps to 1); `installed`/`bundled` come from the metadata files.
+fn resolve_enabled_status(live: u32, installed: Option<u32>, bundled: Option<u32>) -> Status {
+    let Some(bundled) = bundled else {
+        return Status::Enabled; // can't compare without the bundled files
+    };
+    if live >= bundled {
+        return Status::Enabled;
+    }
+    match installed {
+        Some(v) if v >= bundled => Status::UpdatePendingRestart,
+        _ => Status::UpdateAvailable,
+    }
+}
+
 /// Query GNOME for the extension's current state, then consult the
 /// filesystem to distinguish "never installed" from "installed but GNOME
 /// hasn't re-scanned yet" (the Wayland first-install case).
@@ -131,6 +174,10 @@ pub fn status() -> Status {
         if o.status.success() {
             let s = String::from_utf8_lossy(&o.stdout);
             if let Some(state) = parse_status(&s, EXTENSION_UUID) {
+                if state == Status::Enabled {
+                    let live = crate::injection::gnome::helper_version().unwrap_or(1);
+                    return resolve_enabled_status(live, installed_version(), bundled_version());
+                }
                 return state;
             }
         }
@@ -222,6 +269,39 @@ pub fn uninstall() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metadata_version_parses() {
+        assert_eq!(parse_metadata_version(r#"{"uuid":"x","version":2}"#), Some(2));
+        assert_eq!(parse_metadata_version(r#"{"uuid":"x"}"#), None);
+        assert_eq!(parse_metadata_version("not json"), None);
+    }
+
+    #[test]
+    fn enabled_current_version_stays_enabled() {
+        assert_eq!(resolve_enabled_status(2, Some(2), Some(2)), Status::Enabled);
+    }
+
+    #[test]
+    fn old_live_and_old_files_needs_update() {
+        assert_eq!(
+            resolve_enabled_status(1, Some(1), Some(2)),
+            Status::UpdateAvailable
+        );
+    }
+
+    #[test]
+    fn old_live_but_current_files_needs_relogin() {
+        assert_eq!(
+            resolve_enabled_status(1, Some(2), Some(2)),
+            Status::UpdatePendingRestart
+        );
+    }
+
+    #[test]
+    fn unknown_bundled_version_stays_enabled() {
+        assert_eq!(resolve_enabled_status(1, Some(1), None), Status::Enabled);
+    }
 
     #[test]
     fn parse_status_finds_active() {
