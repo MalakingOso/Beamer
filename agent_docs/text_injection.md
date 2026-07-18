@@ -76,69 +76,131 @@ Use `IUIAutomationElement::CurrentControlType` to identify the focused control:
 
 ## Linux Fallback Chain
 
-Linux uses a different chain. Target: GNOME 50 / Wayland on Ubuntu 26.04+.
+Linux uses a different chain. Target: GNOME 50 / Wayland on Ubuntu 26.04+,
+with wlroots compositors (Sway/Hyprland/niri/COSMIC) and X11 covered by the
+same chain's fallthrough behavior.
 
-Chain (in order): **ydotool → clipboard**
+Chain (in order): **gnome → wtype → ydotool → clipboard**
 
-### 1. ydotool (keystroke synthesis via uinput)
-- `ydotool type` for direct character injection. The clipboard backend also uses `ydotool key 29:1 47:1 47:0 29:0` for Ctrl+V or `29:1 42:1 47:1 47:0 42:0 29:0` for Ctrl+Shift+V.
-- Writes directly to `/dev/uinput`, which is **kernel-level input injection**. This bypasses Xwayland and its `-enable-ei-portal` XTEST-forwarding entirely — no Remote Desktop prompt.
-- Synthesizes the transcript character-by-character via uinput, so it works regardless of the app's paste shortcut convention or accessibility support (terminals, canvas apps, custom widgets — all fine).
-- Requires the `ydotoold` daemon to be running and the user to be in the `input` group (same group the evdev hotkey listener already needs).
-- Only handles ASCII — the backend transliterates common smart punctuation (`' ' " " – — …` → ASCII) but non-ASCII falls through to clipboard.
+All keystroke backends run the transcript through
+`injection::sanitize_for_typing()` first: smart punctuation is
+transliterated and newlines/tabs become spaces, so a typed Enter can never
+submit a chat box or form mid-injection. The clipboard path keeps newlines
+(an atomic paste doesn't press keys).
 
-### 2. Clipboard (fallback)
-- Sets the system clipboard via `arboard`, with `wl-copy` as a fallback writer and `wl-paste --no-newline` as a verifier (catches cases where arboard silently no-ops on Wayland).
-- After setting, sends Ctrl+Shift+V (or Ctrl+V if `injection.paste_shortcut = "ctrl_v"`) via ydotool. The default is Ctrl+Shift+V because it covers every terminal and pastes-as-plain-text in most other apps — which is what you want for a transcript. If ydotool is unavailable, logs a hint and leaves the text on the clipboard for the user to paste manually.
-- The previous clipboard is only restored when the paste actually fires — otherwise the transcript would get clobbered before the user could paste it.
-- Mainly used for transcripts too long to type comfortably or containing non-ASCII text that ydotool-type can't handle.
+### 1. gnome (direct typing via the bundled Shell extension — preferred)
+- The extension (v2) owns a `Clutter.VirtualInputDevice` inside GNOME Shell —
+  the same mechanism as GNOME's on-screen keyboard — and exposes
+  `TypeText(s) -> b` on `app.beamer.FocusProvider`.
+- Full Unicode, layout-independent (keysym = codepoint | 0x01000000; Mutter
+  remaps the keymap on demand), no uinput permissions, no portal dialogs, no
+  clipboard involvement. This is the only first-class injection path on GNOME
+  Wayland: Mutter implements neither `zwp_virtual_keyboard_v1` nor
+  `ext-data-control-v1` nor `zwp_input_method_v2` (all explicitly refused
+  upstream).
+- Types ~8 chars per 16 ms Shell tick; the D-Bus reply arrives when typing
+  finishes. Availability = `GetVersion() >= 2` (a v1 extension has no such
+  method and maps to "unavailable").
+
+### 2. wtype (Wayland virtual keyboard — wlroots compositors)
+- `wtype -d 8 -- <text>` uses `zwp_virtual_keyboard_v1`: full Unicode via
+  keymap upload, zero setup. The `-d 8` inter-key delay works around
+  Chromium/Electron dropping full-speed events (known upstream bug).
+- Availability probe: `wtype ""` binds the protocol without pressing keys —
+  exits 0 on Sway/Hyprland/river/niri/labwc/COSMIC, exits 1 with "Compositor
+  does not support the virtual keyboard protocol" on GNOME and KDE (both
+  refuse the protocol intentionally, so this backend cleanly falls through).
+- wtype was removed in April 2026 and reinstated in July 2026: the removal
+  rationale was GNOME-specific, and the availability probe now prevents it
+  from ever being tried there. The config migration no longer strips it.
+
+### 3. ydotool (keystroke synthesis via uinput)
+- `ydotool type --key-delay 25 --key-hold 20` for direct character injection.
+- Writes to `/dev/uinput` — kernel-level, works on any compositor and X11.
+- Requires the `ydotoold` daemon and `input`-group membership. Note: Ubuntu's
+  `ydotool` package does not ship `ydotoold` units — users often need manual
+  setup, which is why this backend is no longer first.
+- ASCII only (post-sanitization non-ASCII bails to the next backend) and
+  assumes a US layout — non-US layouts produce wrong characters, another
+  reason `gnome`/`wtype` outrank it.
+
+### 4. Clipboard (last resort)
+- Sets the clipboard via `arboard` (falls back to X11/XWayland bridging on
+  GNOME, where wl-copy needs a focus-hack), with `wl-copy` as a fallback
+  writer and `wl-paste --no-newline` as a verifier. The verifier runs under a
+  500 ms hard timeout — on GNOME wl-paste can hang in its transient-surface
+  focus hack.
+- Waits 150 ms for the compositor to advertise the offer, then sends the
+  paste chord through the first working mechanism:
+  **GNOME helper `SendPasteChord` → ydotool `key` → wtype `-M ctrl -k v`**.
+- Chord choice (Ctrl+V vs Ctrl+Shift+V) via `resolve_use_shift_v`:
+  `BEAMER_PASTE_SHORTCUT` env → `injection.paste_shortcut` config → "auto"
+  (focus-helper terminal detection, defaulting to Ctrl+Shift+V when unknown).
+- The previous clipboard is restored 500 ms after a successful chord — never
+  earlier (apps read the offer lazily; restoring too soon pastes the OLD
+  content), and never when the chord failed (that would clobber the
+  transcript before the user could paste it).
+- **When every chord mechanism fails, the text stays on the clipboard and a
+  desktop notification tells the user to paste manually.** No silent no-ops.
 
 ### Focus-aware paste-shortcut detection (GNOME)
 
 On GNOME Wayland, the compositor does not expose focused-window metadata to
-unprivileged clients. To pick Ctrl+V vs Ctrl+Shift+V per-app, Beamer bundles
-a minimal GNOME Shell extension (`extension/beamer-focus@beamer.app/`) that
-exports `app.beamer.FocusProvider.GetFocusedAppId() -> s` on the session bus
-via the `org.gnome.Shell` name.
+unprivileged clients. To pick Ctrl+V vs Ctrl+Shift+V per-app, the bundled
+extension exports `app.beamer.FocusProvider.GetFocusedAppId() -> s` on the
+session bus via the `org.gnome.Shell` name.
 
 The Rust side (`src/injection/focus.rs`) queries this method on each paste
 via zbus and classifies the returned app id against a curated terminal
 list. Terminals → Ctrl+Shift+V; anything else → Ctrl+V. Any failure
 (extension missing, disabled, D-Bus timeout, unknown app) falls back to
-Ctrl+Shift+V — the current pre-feature default — so users who never
-install the extension see no regression.
-
-**Install:** Settings → Text Injection → "Install GNOME focus helper".
-Button copies the extension files to
-`~/.local/share/gnome-shell/extensions/beamer-focus@beamer.app/` and runs
-`gnome-extensions enable`. GNOME renders its own native "enable extension?"
-dialog — that's the privilege-grant moment.
-
-**After install on Wayland**, the user must log out and back in once.
-GNOME Shell does not hot-load new extensions on Wayland. The Settings card
-hints at this when it detects the extension installed-but-not-yet-loaded
-state.
+Ctrl+Shift+V.
 
 **Terminal list** lives at `src/injection/focus.rs::TERMINAL_APP_IDS`.
 To add a terminal, PR-append the app id (lowercase, exact match — no
 substring heuristic).
 
-**Supported GNOME versions:** 48, 49, 50. Older versions fall through the
-feature-detection guard (`XDG_CURRENT_DESKTOP` + `XDG_SESSION_TYPE`) and
-get the pre-feature default Ctrl+Shift+V. Non-GNOME desktops (KDE, wlroots)
-same treatment — adding support per-compositor is a future item.
+### GNOME Shell extension v2 (`extension/beamer-focus@beamer.app/`)
+
+D-Bus interface on `org.gnome.Shell` / `/app/beamer/FocusProvider`:
+
+| Method | Purpose |
+|---|---|
+| `GetFocusedAppId() -> s` | focused app id (v1) |
+| `GetVersion() -> u` | capability probe (returns 2) |
+| `TypeText(s) -> b` | type Unicode text via virtual keyboard |
+| `SendPasteChord(b) -> b` | Ctrl(+Shift)+V for the clipboard backend |
+| `ShowIndicator(s)` / `UpdateLevel(d)` / `HideIndicator()` | shell-native recording pill (waveform + timer, bottom-center, click-through top chrome) |
+
+Rust clients: `src/injection/focus.rs` (focus), `src/injection/gnome.rs`
+(typing + chord), `src/ui/shell_indicator.rs` (pill, dedicated worker
+thread with coalesced level updates at ~15 Hz from `audio::subscribe_levels`).
+
+**Install/update:** Settings → Text Injection. The card compares the live
+version (`GetVersion`), installed metadata, and bundled metadata to offer
+Install / Enable / Update, and tells the user to log out and back in when
+Shell is still running old code (Wayland never hot-reloads extension JS).
+
+**Supported GNOME versions:** 48, 49, 50. Non-GNOME desktops skip the
+`gnome` backend via its availability probe.
 
 ### What was removed and why
 
-Earlier versions tried `dotool`, `wtype`, `enigo`, and an AT-SPI accessibility backend. All four are gone:
+Earlier versions tried `dotool`, `enigo`, and an AT-SPI accessibility backend. All are gone (wtype was also removed then, but is back — see above):
 - `dotool` — niche, duplicates ydotool's uinput path.
-- `wtype` — relies on the wlroots `zwp_virtual_keyboard_manager_v1` protocol, which GNOME Mutter does not implement. Always fails on GNOME.
 - `enigo` — on Wayland the x11rb/XTEST backend is what Xwayland's `-enable-ei-portal` flag was specifically added to mediate. Using enigo reliably triggers the "Enable remote interaction" Remote Desktop dialog on Ubuntu 26.04+.
-- `atspi` — D-Bus call into `org.a11y.atspi.EditableText.InsertText`. In principle it offered a semantic insert (correct cursor/undo behaviour) but in practice the registry walk broke against current `at-spi2-core` with a `Signature mismatch: got 'a(so)', expected 'a(sv)'` on `Registry.GetChildren`, and the wayland terminals we care about (Warp, Kitty, Alacritty, foot) don't register with AT-SPI at all. ydotool-type covers every app without the complexity.
+- `atspi` — D-Bus call into `org.a11y.atspi.EditableText.InsertText`. In principle it offered a semantic insert (correct cursor/undo behaviour) but in practice the registry walk broke against current `at-spi2-core` with a `Signature mismatch: got 'a(so)', expected 'a(sv)'` on `Registry.GetChildren`, and the wayland terminals we care about (Warp, Kitty, Alacritty, foot) don't register with AT-SPI at all.
+
+Deliberately not (yet) added: the XDG RemoteDesktop portal / libei backend
+(the sanctioned path for KDE and extension-less GNOME). It needs an async
+portal session, an authorization dialog, and restore-token persistence that
+is still flaky in the wild; the copy+notify degradation covers those setups
+meanwhile. See docs/superpowers/specs/2026-07-18-linux-injection-v2-design.md.
 
 ### System setup
 
-- `sudo usermod -aG input $USER` (required anyway for the evdev hotkey listener)
-- `sudo apt install ydotool wl-clipboard` (or distro equivalent)
-- Enable + start `ydotoold` as a user service (`systemctl --user enable --now ydotoold`) or system service
-- No portal permissions, no accessibility toggles, no desktop files required.
+- **GNOME (recommended path):** install the helper extension from Settings,
+  log out/in once. Nothing else — no groups, no daemons, no portals.
+- **wlroots compositors:** `apt install wtype` (or distro equivalent). Nothing else.
+- **Fallback/legacy:** `sudo usermod -aG input $USER`, `apt install ydotool
+  wl-clipboard`, enable `ydotoold` as a user or system service.

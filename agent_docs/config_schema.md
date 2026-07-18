@@ -16,8 +16,16 @@ backend = "elevenlabs_batch" # elevenlabs_batch | elevenlabs_realtime | mistral_
 language = "en"              # ISO 639-1 language code
 
 [injection]
-preferred_method = "auto"    # auto | uia | sendinput | clipboard
+# Ordered fallback chain. Defaults:
+#   Windows: ["sendinput", "clipboard", "uia"]
+#   Linux:   ["gnome", "wtype", "ydotool", "clipboard"]
+# (legacy ["ydotool", "clipboard"] chains auto-migrate to the Linux default;
+#  removed backends dotool/enigo/atspi are stripped on load)
+backends = ["gnome", "wtype", "ydotool", "clipboard"]
 debug_logging = false        # Log injection method + target app
+paste_shortcut = "auto"      # Linux clipboard backend: auto | ctrl_v | ctrl_shift_v
+                             # ("auto" asks the GNOME helper which app is focused;
+                             #  BEAMER_PASTE_SHORTCUT env var overrides)
 
 [appearance]
 glow_color = "#4B0082"       # Screen edge glow color (hex)
