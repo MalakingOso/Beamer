@@ -142,3 +142,81 @@ fn resample_linear(
 
     output
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn new_state() -> Arc<std::sync::Mutex<ResampleState>> {
+        Arc::new(std::sync::Mutex::new(ResampleState {
+            accumulator: 0.0,
+            last_sample: 0.0,
+        }))
+    }
+
+    /// At 48000Hz -> 16000Hz the ratio is exactly 1/3, so the accumulator
+    /// crosses 1.0 with a ~0 fractional remainder every time. This makes the
+    /// "interpolation" degenerate into picking every 3rd input sample
+    /// (a known bug — later tasks fix this). This test pins that CURRENT
+    /// behavior so a future refactor doesn't silently change it.
+    #[test]
+    fn resample_48k_to_16k_is_pure_decimation() {
+        let ratio = 16000.0 / 48000.0;
+        let input: Vec<f32> = (0..9).map(|i| i as f32).collect();
+        let state = new_state();
+
+        let output = resample_linear(&input, ratio, &state);
+
+        assert_eq!(output, vec![2.0, 5.0, 8.0]);
+    }
+
+    /// 44100Hz -> 16000Hz golden vector, captured from the function's actual
+    /// current output (methodology: ran this test with a placeholder
+    /// expectation, printed the real output, then pasted it back in as the
+    /// pinned golden value).
+    #[test]
+    fn resample_44100_to_16000_ramp_golden() {
+        let ratio = 16000.0 / 44100.0;
+        let input: Vec<f32> = (0..100).map(|i| i as f32 / 100.0).collect();
+        let state = new_state();
+
+        let output = resample_linear(&input, ratio, &state);
+
+        // Captured from actual output on 2026-07-18 (see task-T0.1-report.md
+        // for the capture methodology).
+        let expected: Vec<f32> = vec![
+            0.019115647, 0.048231293, 0.077346936, 0.10646258, 0.12920634, 0.158322,
+            0.18743765, 0.21655329, 0.23929705, 0.2684127, 0.29752836, 0.326644,
+            0.34938776, 0.37850338, 0.40761906, 0.4367347, 0.45947847, 0.4885941,
+            0.51770973, 0.5468254, 0.5695692, 0.59868485, 0.62780046, 0.6569161,
+            0.67965984, 0.70877546, 0.73789114, 0.76700675, 0.78975064, 0.8188662,
+            0.8479819, 0.8770975, 0.89984125, 0.9289569, 0.95807254, 0.9871882,
+        ];
+        assert_eq!(output, expected);
+    }
+
+    /// State must persist across calls: feeding 100 samples in one call must
+    /// produce the same output as feeding the same 100 samples split across
+    /// two 50-sample calls sharing the same state.
+    #[test]
+    fn resample_state_continuity_across_calls() {
+        let ratio = 16000.0 / 44100.0;
+        let input: Vec<f32> = (0..100).map(|i| i as f32 / 100.0).collect();
+
+        let state_split = new_state();
+        let mut split_output = resample_linear(&input[..50], ratio, &state_split);
+        split_output.extend(resample_linear(&input[50..], ratio, &state_split));
+
+        let state_whole = new_state();
+        let whole_output = resample_linear(&input, ratio, &state_whole);
+
+        assert_eq!(split_output, whole_output);
+    }
+
+    #[test]
+    fn resample_empty_input_returns_empty_output() {
+        let state = new_state();
+        let output = resample_linear(&[], 16000.0 / 48000.0, &state);
+        assert!(output.is_empty());
+    }
+}
