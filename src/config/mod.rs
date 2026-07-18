@@ -154,22 +154,7 @@ impl Config {
                 dirty = true;
             }
 
-            // Migrate: drop backends that no longer exist in this build.
-            // dotool/wtype/enigo were removed because XTEST under Ubuntu 26.04+
-            // Xwayland forwards to the Remote Desktop portal and none of them
-            // worked around it on GNOME Mutter. atspi was removed because its
-            // registry deserialization broke against current at-spi2-core, and
-            // ydotool-type covers every app we care about anyway.
-            const REMOVED: &[&str] = &["dotool", "wtype", "enigo", "atspi"];
-            let before = config.injection.backends.len();
-            config.injection.backends.retain(|b| !REMOVED.contains(&b.as_str()));
-            if config.injection.backends.len() != before {
-                dirty = true;
-            }
-
-            // Safety net: never leave the user with an empty backend chain.
-            if config.injection.backends.is_empty() {
-                config.injection.backends = default_backends();
+            if migrate_injection_backends(&mut config.injection.backends) {
                 dirty = true;
             }
 
@@ -191,6 +176,86 @@ impl Config {
         let contents = toml::to_string_pretty(self)?;
         std::fs::write(Self::config_path(), contents)?;
         Ok(())
+    }
+}
+
+/// Normalize a stored injection backend chain against the current build.
+/// Returns `true` if the list changed (caller should re-save).
+fn migrate_injection_backends(backends: &mut Vec<String>) -> bool {
+        let mut dirty = false;
+
+        // Drop backends that no longer exist in this build. dotool/enigo were
+        // removed because XTEST under Ubuntu 26.04+ Xwayland forwards to the
+        // Remote Desktop portal and neither worked around it on GNOME Mutter;
+        // atspi because its registry deserialization broke against current
+        // at-spi2-core. wtype is NOT in this list anymore: it returned in
+        // 2026-07 as a first-class backend for wlroots compositors, behind an
+        // availability probe that fails fast on GNOME/KDE.
+        const REMOVED: &[&str] = &["dotool", "enigo", "atspi"];
+        let before = backends.len();
+        backends.retain(|b| !REMOVED.contains(&b.as_str()));
+        if backends.len() != before {
+            dirty = true;
+        }
+
+        // Chains saved by builds whose default was ["ydotool", "clipboard"]
+        // upgrade to the current default so existing users pick up the gnome
+        // and wtype backends. Custom orderings are left alone.
+        if backends.as_slice() == ["ydotool".to_string(), "clipboard".to_string()] {
+            *backends = default_backends();
+            dirty = true;
+        }
+
+        // Safety net: never leave the user with an empty backend chain.
+        if backends.is_empty() {
+            *backends = default_backends();
+            dirty = true;
+        }
+
+    dirty
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    fn chain(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn legacy_default_upgrades_to_new_default() {
+        let mut backends = chain(&["ydotool", "clipboard"]);
+        assert!(migrate_injection_backends(&mut backends));
+        assert_eq!(backends, default_backends());
+    }
+
+    #[test]
+    fn custom_chain_is_untouched() {
+        let mut backends = chain(&["clipboard", "ydotool"]);
+        assert!(!migrate_injection_backends(&mut backends));
+        assert_eq!(backends, chain(&["clipboard", "ydotool"]));
+    }
+
+    #[test]
+    fn wtype_is_no_longer_stripped() {
+        let mut backends = chain(&["wtype", "clipboard"]);
+        assert!(!migrate_injection_backends(&mut backends));
+        assert_eq!(backends, chain(&["wtype", "clipboard"]));
+    }
+
+    #[test]
+    fn dead_backends_are_stripped() {
+        let mut backends = chain(&["dotool", "enigo", "clipboard"]);
+        assert!(migrate_injection_backends(&mut backends));
+        assert_eq!(backends, chain(&["clipboard"]));
+    }
+
+    #[test]
+    fn empty_chain_falls_back_to_default() {
+        let mut backends = chain(&["atspi"]);
+        assert!(migrate_injection_backends(&mut backends));
+        assert_eq!(backends, default_backends());
     }
 }
 
