@@ -80,62 +80,55 @@ fn normalize_key(key: &str) -> String {
 }
 
 /// Dropdown options for the key selector.
-fn key_options() -> Vec<(String, String)> {
-    let mut opts = Vec::new();
-
+/// Fixed content — built once as a static slice rather than reconstructed on every render.
+static KEY_OPTIONS: &[(&str, &str)] = &[
     // Common keys
-    for k in ["Space", "Enter", "Tab", "Backspace", "Delete", "Insert", "Home", "End", "PageUp", "PageDown"] {
-        opts.push((k.to_string(), k.to_string()));
-    }
-
+    ("Space", "Space"),
+    ("Enter", "Enter"),
+    ("Tab", "Tab"),
+    ("Backspace", "Backspace"),
+    ("Delete", "Delete"),
+    ("Insert", "Insert"),
+    ("Home", "Home"),
+    ("End", "End"),
+    ("PageUp", "PageUp"),
+    ("PageDown", "PageDown"),
     // Letters A-Z
-    for c in 'A'..='Z' {
-        let s = c.to_string();
-        opts.push((s.clone(), s));
-    }
-
+    ("A", "A"), ("B", "B"), ("C", "C"), ("D", "D"), ("E", "E"),
+    ("F", "F"), ("G", "G"), ("H", "H"), ("I", "I"), ("J", "J"),
+    ("K", "K"), ("L", "L"), ("M", "M"), ("N", "N"), ("O", "O"),
+    ("P", "P"), ("Q", "Q"), ("R", "R"), ("S", "S"), ("T", "T"),
+    ("U", "U"), ("V", "V"), ("W", "W"), ("X", "X"), ("Y", "Y"),
+    ("Z", "Z"),
     // Digits 0-9
-    for d in '0'..='9' {
-        let s = d.to_string();
-        opts.push((s.clone(), s));
-    }
-
+    ("0", "0"), ("1", "1"), ("2", "2"), ("3", "3"), ("4", "4"),
+    ("5", "5"), ("6", "6"), ("7", "7"), ("8", "8"), ("9", "9"),
     // F-keys
-    for n in 1..=12 {
-        let s = format!("F{n}");
-        opts.push((s.clone(), s));
-    }
-
+    ("F1", "F1"), ("F2", "F2"), ("F3", "F3"), ("F4", "F4"),
+    ("F5", "F5"), ("F6", "F6"), ("F7", "F7"), ("F8", "F8"),
+    ("F9", "F9"), ("F10", "F10"), ("F11", "F11"), ("F12", "F12"),
     // Arrows
-    for k in ["Up", "Down", "Left", "Right"] {
-        opts.push((k.to_string(), k.to_string()));
-    }
-
+    ("Up", "Up"),
+    ("Down", "Down"),
+    ("Left", "Left"),
+    ("Right", "Right"),
     // Punctuation / symbols
-    for (val, label) in [
-        ("-", "Minus (-)"),
-        ("=", "Equal (=)"),
-        ("[", "Left Bracket ([)"),
-        ("]", "Right Bracket (])"),
-        ("\\", "Backslash (\\)"),
-        (";", "Semicolon (;)"),
-        ("'", "Quote (')"),
-        (",", "Comma (,)"),
-        (".", "Period (.)"),
-        ("/", "Slash (/)"),
-        ("`", "Backtick (`)"),
-    ] {
-        opts.push((val.to_string(), label.to_string()));
-    }
-
-    opts
-}
+    ("-", "Minus (-)"),
+    ("=", "Equal (=)"),
+    ("[", "Left Bracket ([)"),
+    ("]", "Right Bracket (])"),
+    ("\\", "Backslash (\\)"),
+    (";", "Semicolon (;)"),
+    ("'", "Quote (')"),
+    (",", "Comma (,)"),
+    (".", "Period (.)"),
+    ("/", "Slash (/)"),
+    ("`", "Backtick (`)"),
+];
 
 #[component]
 pub fn RecordingCard(props: RecordingCardProps) -> Element {
     let (ctrl, alt, shift, win, key) = parse_hotkey_parts(&props.hotkey);
-
-    let opts = key_options();
 
     rsx! {
         Card { title: "Recording".to_string(),
@@ -175,7 +168,7 @@ pub fn RecordingCard(props: RecordingCardProps) -> Element {
                     if !win {
                         Select {
                             value: key.clone(),
-                            options: opts,
+                            options: KEY_OPTIONS.iter().map(|(v, l)| (v.to_string(), l.to_string())).collect::<Vec<_>>(),
                             onchange: move |new_key: String| {
                                 props.on_hotkey_change.call(format_hotkey(ctrl, alt, shift, win, &new_key));
                             },

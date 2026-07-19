@@ -6,6 +6,20 @@ use crate::ui::components::{Card, Select};
 use crate::ui::history::TranscriptionHistory;
 use crate::ui::icons::{IconCheck, IconCopy};
 
+/// Fixed content — built once as a static slice rather than reconstructed on every render.
+static LANGUAGE_OPTIONS: &[(&str, &str)] = &[
+    ("en", "English"),
+    ("es", "Spanish"),
+    ("fr", "French"),
+    ("de", "German"),
+    ("ja", "Japanese"),
+];
+
+static MODE_OPTIONS: &[(&str, &str)] = &[
+    ("hold", "Push to Talk"),
+    ("toggle", "Toggle"),
+];
+
 #[derive(Props, Clone, PartialEq)]
 pub struct HomePageProps {
     pub rec_state: Signal<RecordingState>,
@@ -55,13 +69,7 @@ pub fn HomePage(props: HomePageProps) -> Element {
                     span { class: "card-label", "Language" }
                     Select {
                         value: props.config.read().transcription.language.clone(),
-                        options: vec![
-                            ("en".to_string(), "English".to_string()),
-                            ("es".to_string(), "Spanish".to_string()),
-                            ("fr".to_string(), "French".to_string()),
-                            ("de".to_string(), "German".to_string()),
-                            ("ja".to_string(), "Japanese".to_string()),
-                        ],
+                        options: LANGUAGE_OPTIONS.iter().map(|(v, l)| (v.to_string(), l.to_string())).collect::<Vec<_>>(),
                         onchange: {
                             let mut config = props.config;
                             move |lang: String| {
@@ -75,10 +83,7 @@ pub fn HomePage(props: HomePageProps) -> Element {
                     span { class: "card-label", "Mode" }
                     Select {
                         value: props.config.read().recording.mode.clone(),
-                        options: vec![
-                            ("hold".to_string(), "Push to Talk".to_string()),
-                            ("toggle".to_string(), "Toggle".to_string()),
-                        ],
+                        options: MODE_OPTIONS.iter().map(|(v, l)| (v.to_string(), l.to_string())).collect::<Vec<_>>(),
                         onchange: {
                             let mut config = props.config;
                             move |mode: String| {

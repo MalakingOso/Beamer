@@ -15,18 +15,19 @@ pub fn VocabPage() -> Element {
     let mut editing: Signal<Option<usize>> = use_signal(|| None);
     let mut edit_value = use_signal(|| String::new());
 
-    let filtered: Vec<(usize, String)> = {
+    let filtered = use_memo(move || {
         let query = filter.read().to_lowercase();
-        let terms = vocab_terms.read().clone();
-        terms
-            .into_iter()
+        vocab_terms
+            .read()
+            .iter()
             .enumerate()
             .filter(|(_, t)| query.is_empty() || t.to_lowercase().contains(&query))
-            .collect()
-    };
+            .map(|(i, t)| (i, t.clone()))
+            .collect::<Vec<(usize, String)>>()
+    });
 
     let total_count = vocab_terms.read().len();
-    let shown_count = filtered.len();
+    let shown_count = filtered.read().len();
 
     let mut add_term = move || {
         let term = new_term.read().trim().to_string();
@@ -135,17 +136,17 @@ pub fn VocabPage() -> Element {
             }
 
             // Term list
-            if filtered.is_empty() && total_count > 0 {
+            if filtered.read().is_empty() && total_count > 0 {
                 div { class: "empty-state",
                     span { class: "empty-state-text", "No matching terms" }
                 }
-            } else if filtered.is_empty() {
+            } else if filtered.read().is_empty() {
                 div { class: "empty-state",
                     span { class: "empty-state-text", "No vocabulary terms yet" }
                     span { class: "empty-state-hint", "Add terms above to improve transcription accuracy." }
                 }
             } else {
-                for (idx, term) in &filtered {
+                for (idx, term) in filtered.read().iter() {
                     {
                         let idx = *idx;
                         let term = term.clone();
