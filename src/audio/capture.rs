@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleRate, Stream, StreamConfig};
-use std::sync::Arc;
 use tokio::sync::mpsc;
 
 /// Wraps cpal device setup and provides a mono 16 kHz f32 sample stream.
@@ -79,27 +78,36 @@ impl AudioCapture {
             1.0
         };
 
-        let resample_state = Arc::new(std::sync::Mutex::new(ResampleState {
+        let mut resample_state = ResampleState {
             accumulator: 0.0,
             last_sample: 0.0,
-        }));
+        };
+        let mut mono_buf: Vec<f32> = Vec::new();
+        let mut out_buf: Vec<f32> = Vec::new();
 
         let stream = self.device.build_input_stream(
             &config,
             move |data: &[f32], _info: &cpal::InputCallbackInfo| {
-                let mut samples: Vec<f32> = if needs_downmix {
-                    data.chunks(native_channels)
-                        .map(|frame| frame.iter().sum::<f32>() / native_channels as f32)
-                        .collect()
+                let samples: &[f32] = if needs_downmix {
+                    mono_buf.clear();
+                    mono_buf.extend(
+                        data.chunks(native_channels)
+                            .map(|frame| frame.iter().sum::<f32>() / native_channels as f32),
+                    );
+                    &mono_buf
                 } else {
-                    data.to_vec()
+                    data
                 };
 
-                if needs_resample {
-                    samples = resample_linear(&samples, resample_ratio, &resample_state);
-                }
+                let out: &[f32] = if needs_resample {
+                    out_buf.clear();
+                    resample_linear(samples, resample_ratio, &mut resample_state, &mut out_buf);
+                    &out_buf
+                } else {
+                    samples
+                };
 
-                let _ = tx.send(samples);
+                let _ = tx.send(out.to_vec());
             },
             move |err| {
                 tracing::error!("Audio capture error: {}", err);
@@ -124,11 +132,9 @@ struct ResampleState {
 fn resample_linear(
     input: &[f32],
     ratio: f64,
-    state: &Arc<std::sync::Mutex<ResampleState>>,
-) -> Vec<f32> {
-    let mut state = state.lock().unwrap();
-    let mut output = Vec::with_capacity((input.len() as f64 * ratio) as usize + 1);
-
+    state: &mut ResampleState,
+    output: &mut Vec<f32>,
+) {
     for &sample in input {
         state.accumulator += ratio;
         while state.accumulator >= 1.0 {
@@ -139,19 +145,17 @@ fn resample_linear(
         }
         state.last_sample = sample;
     }
-
-    output
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn new_state() -> Arc<std::sync::Mutex<ResampleState>> {
-        Arc::new(std::sync::Mutex::new(ResampleState {
+    fn new_state() -> ResampleState {
+        ResampleState {
             accumulator: 0.0,
             last_sample: 0.0,
-        }))
+        }
     }
 
     /// At 48000Hz -> 16000Hz the ratio is exactly 1/3, so the accumulator
@@ -163,9 +167,10 @@ mod tests {
     fn resample_48k_to_16k_is_pure_decimation() {
         let ratio = 16000.0 / 48000.0;
         let input: Vec<f32> = (0..9).map(|i| i as f32).collect();
-        let state = new_state();
+        let mut state = new_state();
+        let mut output = Vec::new();
 
-        let output = resample_linear(&input, ratio, &state);
+        resample_linear(&input, ratio, &mut state, &mut output);
 
         assert_eq!(output, vec![2.0, 5.0, 8.0]);
     }
@@ -178,9 +183,10 @@ mod tests {
     fn resample_44100_to_16000_ramp_golden() {
         let ratio = 16000.0 / 44100.0;
         let input: Vec<f32> = (0..100).map(|i| i as f32 / 100.0).collect();
-        let state = new_state();
+        let mut state = new_state();
+        let mut output = Vec::new();
 
-        let output = resample_linear(&input, ratio, &state);
+        resample_linear(&input, ratio, &mut state, &mut output);
 
         // Captured from actual output on 2026-07-18 (see task-T0.1-report.md
         // for the capture methodology).
@@ -203,20 +209,23 @@ mod tests {
         let ratio = 16000.0 / 44100.0;
         let input: Vec<f32> = (0..100).map(|i| i as f32 / 100.0).collect();
 
-        let state_split = new_state();
-        let mut split_output = resample_linear(&input[..50], ratio, &state_split);
-        split_output.extend(resample_linear(&input[50..], ratio, &state_split));
+        let mut state_split = new_state();
+        let mut split_output = Vec::new();
+        resample_linear(&input[..50], ratio, &mut state_split, &mut split_output);
+        resample_linear(&input[50..], ratio, &mut state_split, &mut split_output);
 
-        let state_whole = new_state();
-        let whole_output = resample_linear(&input, ratio, &state_whole);
+        let mut state_whole = new_state();
+        let mut whole_output = Vec::new();
+        resample_linear(&input, ratio, &mut state_whole, &mut whole_output);
 
         assert_eq!(split_output, whole_output);
     }
 
     #[test]
     fn resample_empty_input_returns_empty_output() {
-        let state = new_state();
-        let output = resample_linear(&[], 16000.0 / 48000.0, &state);
+        let mut state = new_state();
+        let mut output = Vec::new();
+        resample_linear(&[], 16000.0 / 48000.0, &mut state, &mut output);
         assert!(output.is_empty());
     }
 }
