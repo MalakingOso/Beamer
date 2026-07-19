@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use reqwest::multipart;
 
 use super::{http_client, wav::pcm_to_wav};
+use bytes::Bytes;
 
 /// Minimum similarity ratio (0.0–1.0) between raw and corrected text.
 /// Below this threshold the LLM likely hallucinated a conversational reply
@@ -121,6 +122,7 @@ async fn correct_with_vocab(api_key: &str, text: &str, vocab: &[String]) -> Stri
 /// correct domain-specific terms.
 pub async fn transcribe_batch(api_key: &str, audio_pcm: Vec<u8>, vocab: &[String]) -> Result<String> {
     let wav = pcm_to_wav(&audio_pcm);
+    let wav_bytes = Bytes::from(wav);
 
     let client = http_client();
     let mut backoff = 1u64;
@@ -130,7 +132,7 @@ pub async fn transcribe_batch(api_key: &str, audio_pcm: Vec<u8>, vocab: &[String
             .text("model", "voxtral-mini-latest")
             .part(
                 "file",
-                multipart::Part::bytes(wav.clone())
+                multipart::Part::stream(reqwest::Body::from(wav_bytes.clone()))
                     .file_name("audio.wav")
                     .mime_str("application/octet-stream")?,
             );

@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use reqwest::multipart;
 
 use super::{http_client, wav::pcm_to_wav};
+use bytes::Bytes;
 
 /// Transcribe audio using the ElevenLabs Scribe v2 batch (REST) API.
 ///
@@ -15,6 +16,7 @@ pub async fn transcribe_batch(
     vocab: &[String],
 ) -> Result<String> {
     let wav = pcm_to_wav(&audio_pcm);
+    let wav_bytes = Bytes::from(wav);
 
     let client = http_client();
     let mut backoff = 1u64;
@@ -26,7 +28,7 @@ pub async fn transcribe_batch(
             .text("tag_audio_events", "false")
             .part(
                 "file",
-                multipart::Part::bytes(wav.clone())
+                multipart::Part::stream(reqwest::Body::from(wav_bytes.clone()))
                     .file_name("audio.wav")
                     .mime_str("application/octet-stream")?,
             );
