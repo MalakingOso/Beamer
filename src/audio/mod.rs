@@ -144,10 +144,9 @@ impl AudioPipeline {
 
         // Conversion runs on a dedicated thread because cpal callbacks are
         // real-time sensitive and must not block on async channel operations
-        let rt = tokio::runtime::Handle::current();
         std::thread::spawn(move || {
             loop {
-                let samples = match rt.block_on(sample_rx.recv()) {
+                let samples = match sample_rx.blocking_recv() {
                     Some(s) => s,
                     None => {
                         publish_level(0.0); // stream ended — settle indicators
