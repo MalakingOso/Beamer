@@ -260,7 +260,8 @@ mod migration_tests {
 }
 
 /// In-memory cache of API keys read from (or written to) the OS keyring
-/// (Windows Credential Manager / Secret Service), keyed by credential name.
+/// (Credential Manager on Windows / Secret Service on Linux), keyed by
+/// credential name.
 ///
 /// Only *confirmed* state is ever cached: successful reads, and writes/deletes
 /// that the keyring itself confirmed. A miss or error never populates the
