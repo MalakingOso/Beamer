@@ -38,8 +38,6 @@ rodio = { version = "0.20", default-features = false, features = ["mp3"] }
 reqwest = { version = "0.12", default-features = false, features = ["multipart", "native-tls", "json"] }
 self_update = { version = "0.42", features = ["archive-zip"] }
 
-libc = "0.2"
-
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13"
 notify-rust = "4"
@@ -47,6 +45,7 @@ mpris = "2"
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 zbus = "5"
+libc = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 winrt-notification = "0.5"
