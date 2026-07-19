@@ -28,9 +28,19 @@ pub struct SettingsPageProps {
     pub update_status: Signal<UpdateStatus>,
 }
 
+/// Apply a mutation to the config signal, then synchronously persist it.
+///
+/// This mirrors the `config.write().<field> = v; config.read().save();`
+/// pattern repeated across the handlers below. The save stays synchronous
+/// (no spawn/async deferral) so a write is never lost on quit.
+fn save_config(mut config: Signal<Config>, mutate: impl FnOnce(&mut Config)) {
+    mutate(&mut config.write());
+    let _ = config.read().save();
+}
+
 #[component]
 pub fn SettingsPage(props: SettingsPageProps) -> Element {
-    let mut config = props.config;
+    let config = props.config;
     let last_injection = props.last_injection;
     let mut elevenlabs_key = use_signal(|| crate::config::load_api_key("elevenlabs_api_key"));
     let mut mistral_key = use_signal(|| crate::config::load_api_key("mistral_api_key"));
@@ -42,42 +52,35 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                 mode: config.read().recording.mode.clone(),
                 pause_media: config.read().recording.pause_media,
                 on_hotkey_change: move |hotkey: String| {
-                    config.write().recording.hotkey = hotkey;
-                    let _ = config.read().save();
+                    save_config(config, |c| c.recording.hotkey = hotkey);
                 },
                 on_mode_change: move |mode: String| {
-                    config.write().recording.mode = mode;
-                    let _ = config.read().save();
+                    save_config(config, |c| c.recording.mode = mode);
                 },
                 on_pause_media_change: move |v: bool| {
-                    config.write().recording.pause_media = v;
-                    let _ = config.read().save();
+                    save_config(config, |c| c.recording.pause_media = v);
                 },
             }
 
             TranscriptionCard {
                 backend: config.read().transcription.backend.clone(),
                 on_backend_change: move |b: String| {
-                    config.write().transcription.backend = b;
-                    let _ = config.read().save();
+                    save_config(config, |c| c.transcription.backend = b);
                 },
                 language: config.read().transcription.language.clone(),
                 on_language_change: move |lang: String| {
-                    config.write().transcription.language = lang;
-                    let _ = config.read().save();
+                    save_config(config, |c| c.transcription.language = lang);
                 },
             }
 
             InjectionCard {
                 backends: config.read().injection.backends.clone(),
                 on_backends_change: move |backends: Vec<String>| {
-                    config.write().injection.backends = backends;
-                    let _ = config.read().save();
+                    save_config(config, |c| c.injection.backends = backends);
                 },
                 paste_shortcut: config.read().injection.paste_shortcut.clone(),
                 on_paste_shortcut_change: move |v: String| {
-                    config.write().injection.paste_shortcut = v;
-                    let _ = config.read().save();
+                    save_config(config, |c| c.injection.paste_shortcut = v);
                 },
             }
 
@@ -95,13 +98,11 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
             AppearanceCard {
                 pill_enabled: config.read().appearance.pill_enabled,
                 on_pill_toggle: move |v: bool| {
-                    config.write().appearance.pill_enabled = v;
-                    let _ = config.read().save();
+                    save_config(config, |c| c.appearance.pill_enabled = v);
                 },
                 auto_start: config.read().appearance.auto_start,
                 on_auto_start_toggle: move |v: bool| {
-                    config.write().appearance.auto_start = v;
-                    let _ = config.read().save();
+                    save_config(config, |c| c.appearance.auto_start = v);
                     spawn(async move {
                         let result = tokio::task::spawn_blocking(move || {
                             crate::set_auto_start(v)
@@ -119,8 +120,7 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                 update_status: props.update_status,
                 auto_check_updates: config.read().appearance.auto_check_updates,
                 on_auto_check_toggle: move |v: bool| {
-                    config.write().appearance.auto_check_updates = v;
-                    let _ = config.read().save();
+                    save_config(config, |c| c.appearance.auto_check_updates = v);
                 },
             }
 
@@ -128,8 +128,7 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                 last_injection: last_injection.read().clone(),
                 debug_logging: config.read().injection.debug_logging,
                 on_debug_toggle: move |v: bool| {
-                    config.write().injection.debug_logging = v;
-                    let _ = config.read().save();
+                    save_config(config, |c| c.injection.debug_logging = v);
                 },
                 status_log: props.status_log,
             }
