@@ -50,8 +50,13 @@ pub(super) fn setup_linux_integration(rec_state: Signal<RecordingState>, config:
     // fixed 66ms tick and reading whatever the watch channel currently
     // holds (`borrow_and_update`) decouples our wakeup rate from the
     // audio callback rate while keeping the same visible cadence.
-    // `has_changed()` still detects sender drop (audio stream torn
-    // down) so this loop doesn't spin forever afterward.
+    //
+    // The `level_rx.has_changed().is_err()` break below is belt-and-braces
+    // only: the `watch::Sender` this subscribes to lives in a `static
+    // OnceLock` (see `level_channel()` in `src/audio/mod.rs`) and is never
+    // dropped for the life of the process, so this branch is unreachable in
+    // practice — the loop actually runs for as long as this Dioxus coroutine
+    // does. Kept as a defensive exit in case that invariant ever changes.
     use_hook(move || {
         spawn(async move {
             let mut level_rx = crate::audio::subscribe_levels();

@@ -20,6 +20,14 @@ use std::time::Duration;
 /// connections are cheap `Arc`-backed handles; cloning is not a new
 /// handshake). `Mutex<Option<_>>` rather than `OnceLock` because a dead
 /// connection (closed socket) must be replaceable, not permanent.
+///
+/// `src/ui/shell_indicator.rs` keeps a second, separate connection/proxy
+/// cache for its own D-Bus calls (`ShowIndicator`/`UpdateLevel`/
+/// `HideIndicator`). The two are deliberately not unified: that one lives on
+/// a dedicated worker thread, coalesces queued level updates, and bakes in
+/// a fixed 200ms method timeout tuned for a 15Hz level-update cadence —
+/// requirements that don't apply to this module's on-demand, multi-caller,
+/// per-call-timeout usage (see `with_timeout` below).
 static CONN: Mutex<Option<zbus::blocking::Connection>> = Mutex::new(None);
 
 /// Get the cached connection, building one if this is the first call (or

@@ -43,6 +43,18 @@ fn sender() -> &'static Sender<Cmd> {
 }
 
 struct Worker {
+    /// This worker's own cached D-Bus proxy/connection, built lazily in
+    /// `proxy()` below with a fixed 200ms method timeout sized for the
+    /// ~15Hz level-update cadence this worker drives.
+    ///
+    /// `src/injection/focus.rs` keeps a separate cached session-bus
+    /// connection (`CONN`) for its own D-Bus calls (focus lookup,
+    /// TypeText/SendPasteChord). The two caches are deliberately not
+    /// unified: this one lives on a single dedicated worker thread with a
+    /// baked-in timeout tuned for coalesced level updates, while
+    /// `focus.rs`'s is shared across arbitrary callers each wanting their
+    /// own per-call timeout — different enough usage patterns that sharing
+    /// one cache would mean compromising both.
     proxy: Option<zbus::blocking::Proxy<'static>>,
     /// Whether the helper answered a v2 GetVersion at the last Show. Gates
     /// Level/Hide so a missing extension costs one probe per recording, not

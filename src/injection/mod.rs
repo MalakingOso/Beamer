@@ -127,9 +127,10 @@ mod sanitize_tests {
 
     #[test]
     fn crlf_collapses_to_exactly_one_space_not_two() {
-        // "\r\n" is consumed whole by the first replace("\r\n", " ") pass;
-        // if it were double-processed by the later per-char replace of
-        // ['\r','\n','\t'] each crlf would produce two spaces instead of one.
+        // The '\r' arm pushes a space and sets `last_was_cr`; the following
+        // '\n' is then swallowed by the `last_was_cr` check at the top of
+        // the loop instead of falling through to its own '\n' => push(' ')
+        // arm, so a "\r\n" pair produces exactly one space, not two.
         assert_eq!(sanitize_for_typing("a\r\nb"), "a b");
         assert_eq!(sanitize_for_typing("a\r\nb\r\nc"), "a b c");
         // A bare "\r\n" becomes a single space, then trim_end() removes it.

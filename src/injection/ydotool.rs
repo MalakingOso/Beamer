@@ -131,7 +131,10 @@ mod tests {
     fn test_path_walk_finds_executable() {
         use std::os::unix::fs::PermissionsExt;
 
-        let temp_dir = std::env::temp_dir().join("beamer_test_ydotool");
+        // Scoped by PID (rather than a fixed name) so concurrent test runs
+        // (e.g. two `cargo test` invocations, parallel CI jobs) don't race
+        // on the same directory in /tmp.
+        let temp_dir = std::env::temp_dir().join(format!("beamer_test_ydotool_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
 
@@ -149,7 +152,8 @@ mod tests {
     fn test_path_walk_skips_non_executable() {
         use std::os::unix::fs::PermissionsExt;
 
-        let temp_dir = std::env::temp_dir().join("beamer_test_ydotool_nonexec");
+        // Scoped by PID — see comment in test_path_walk_finds_executable.
+        let temp_dir = std::env::temp_dir().join(format!("beamer_test_ydotool_nonexec_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
 

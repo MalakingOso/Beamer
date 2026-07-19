@@ -43,7 +43,12 @@ The callback never blocks: it hands samples off via `try_send_reserving`
 real-time audio thread (WASAPI/CoreAudio/PulseAudio/PipeWire callback).
 
 On a capture error, cpal's error callback sends an **empty `Vec<f32>`** as a
-sentinel — the consumer treats an empty chunk as a device-error signal.
+sentinel. It is delivered to the chunker thread, but that consumer currently
+just skips empty batches and continues (see below) — it doesn't otherwise
+act on the error today. This preserves the pre-branch drop-and-continue
+behavior rather than being unused plumbing; a future consumer could still
+read the empty batch as an explicit device-error signal instead of treating
+it as a plain empty chunk.
 
 ## Chunker Thread (`src/audio/mod.rs`)
 
@@ -83,12 +88,16 @@ Unbounded channels were replaced with these bounded ones so a stalled
 consumer drops audio instead of growing memory without limit. Two helpers in
 `src/audio/mod.rs` are shared across the audio *and* transcription channels:
 
-- `try_send_reserving(tx, reserve, payload)` — a `try_send` gated on a cheap
-  atomic `tx.capacity()` read (safe to call from the real-time callback).
-  It refuses to touch the last `reserve` slots, so a **sentinel** sent later
-  with a plain `tx.try_send(..)` always has room even if the data path has
-  saturated everything else. `capture.rs` reserves `SENTINEL_RESERVE = 4`
-  slots for its device-error sentinel (an empty `Vec<f32>`).
+- `try_send_reserving(tx, reserve, payload)` — a `try_send` gated on cheap
+  atomic `tx.capacity()`/`tx.is_closed()` reads (safe to call from the
+  real-time callback). It refuses to touch the last `reserve` slots, so a
+  **sentinel** sent later with a plain `tx.try_send(..)` always has room
+  even if the data path has saturated everything else. `capture.rs`
+  reserves `SENTINEL_RESERVE = 4` slots for its device-error sentinel (an
+  empty `Vec<f32>`). Returns a `SendOutcome` (`Sent`/`Full`/`Closed`) rather
+  than a plain bool, so callers can warn on a genuinely full channel while
+  silently dropping sends on a closed one (normal teardown, not
+  backpressure).
 - `warn_channel_full(&mut count, what)` — rate-limited drop logging: warns
   on the first drop, then every 200th, so a sustained stall produces one log
   line plus periodic reminders instead of flooding the log.

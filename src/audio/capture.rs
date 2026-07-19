@@ -24,7 +24,10 @@ pub(crate) const SAMPLE_CHANNEL_CAPACITY: usize = 12_000;
 /// device-error sentinel (an empty `Vec` sent from the cpal error callback)
 /// always has room to `try_send`, even when a stalled consumer has let the
 /// data path saturate the rest of the channel. Device errors are
-/// exceedingly rare (not per-callback), so a small reserve is ample.
+/// exceedingly rare (not per-callback), so a small reserve is ample. Note
+/// that the sentinel is currently just skipped by its consumer once
+/// delivered (see the error-callback comment below) — the reserve still
+/// matters because it's what guarantees delivery isn't lost to backpressure.
 const SENTINEL_RESERVE: usize = 4;
 
 /// Wraps cpal device setup and provides a mono 16 kHz f32 sample stream.
@@ -150,8 +153,16 @@ impl AudioCapture {
             },
             move |err| {
                 tracing::error!("Audio capture error: {}", err);
-                // Sentinel convention: an empty Vec tells the consumer a
-                // capture error occurred. `SENTINEL_RESERVE` slots are never
+                // Sentinel convention: an empty Vec is delivered to the
+                // consumer to mark that a capture error occurred. The only
+                // consumer today (`AudioPipeline::start`'s chunker thread in
+                // `src/audio/mod.rs`) currently just skips empty batches
+                // (`if samples.is_empty() { continue; }`) without acting on
+                // the error — this delivery preserves pre-branch behavior
+                // (silent drop-and-continue) rather than being unused
+                // plumbing; a future consumer could still read it as an
+                // explicit error signal instead of a plain empty batch.
+                // `SENTINEL_RESERVE` slots are never
                 // touched by the data-callback path above, so this
                 // `try_send` should always succeed while a consumer is
                 // still attached. If it fails with `Full`, something has
@@ -226,8 +237,8 @@ mod tests {
     /// blending — the sample boundary lands exactly on an input sample, so
     /// there is nothing to interpolate between. This is the correct result
     /// for this integer-ratio edge case, not a bug: it pins the same values
-    /// as before the /ratio fix, verified analytically (see
-    /// task-TB.4-report.md for the accumulator walk-through).
+    /// as before the /ratio fix (verified by hand-walking the accumulator:
+    /// 1/3, 2/3, 1.0→0 remainder, repeating exactly every 3 input samples).
     #[test]
     fn resample_48k_to_16k_exact_ratio_picks_current_sample() {
         let ratio = 16000.0 / 48000.0;
@@ -244,9 +255,9 @@ mod tests {
     /// output after the /ratio interpolation-weight fix (methodology: ran
     /// this test with a placeholder expectation, printed the real output,
     /// then pasted it back in as the pinned golden value). Each output was
-    /// independently verified to be a properly weighted blend of its two
-    /// adjacent input samples — see task-TB.4-report.md for the
-    /// hand-derivation and spot checks.
+    /// independently spot-checked by hand as a properly weighted blend of
+    /// its two adjacent input samples (`last_sample * t + sample * (1 - t)`
+    /// for the accumulator's fractional position `t` at that crossing).
     #[test]
     fn resample_44100_to_16000_ramp_golden() {
         let ratio = 16000.0 / 44100.0;
@@ -257,7 +268,7 @@ mod tests {
         resample_linear(&input, ratio, &mut state, &mut output);
 
         // Captured from actual output on 2026-07-18, after the /ratio fix
-        // (see task-TB.4-report.md for the capture methodology).
+        // (see the doc comment above for the capture methodology).
         let expected: Vec<f32> = vec![
             0.0175625, 0.045125, 0.0726875, 0.10025, 0.1278125, 0.155375, 0.1829375,
             0.2105, 0.2380625, 0.265625, 0.2931875, 0.32075, 0.34831253, 0.375875,
