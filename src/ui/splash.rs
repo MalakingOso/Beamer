@@ -1,7 +1,4 @@
-use base64::Engine;
 use dioxus::prelude::*;
-
-const ICON_BYTES: &[u8] = include_bytes!("../../assets/icon.png");
 
 /// Loading splash shown while `warmup::warm_all` runs on app startup.
 /// Lives in its own transparent, always-on-top window. Progress updates are
@@ -9,10 +6,7 @@ const ICON_BYTES: &[u8] = include_bytes!("../../assets/icon.png");
 /// as the recording pill — see `src/ui/app.rs`).
 #[component]
 pub fn SplashWindow() -> Element {
-    let icon_data_url = use_hook(|| {
-        let b64 = base64::engine::general_purpose::STANDARD.encode(ICON_BYTES);
-        format!("data:image/png;base64,{}", b64)
-    });
+    let icon_data_url = crate::assets::icon_png_data_url();
 
     rsx! {
         div { class: "splash-root",

@@ -59,7 +59,7 @@ pub fn build_tray_menu() -> (Menu, TrayMenuItems) {
 pub fn load_icon() -> Icon {
     let (rgba_data, width, height) = IDLE_ICON_RGBA
         .get_or_init(|| {
-            let icon_bytes = include_bytes!("../../assets/icon.png");
+            let icon_bytes = crate::assets::ICON_PNG;
             let img = image::load_from_memory(icon_bytes).expect("Failed to load icon");
             let rgba = img.to_rgba8();
             let (w, h) = rgba.dimensions();

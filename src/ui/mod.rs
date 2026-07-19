@@ -30,7 +30,7 @@ pub fn webview_data_dir() -> PathBuf {
 /// thread for the lifetime of the application — the tray icon keeps the process
 /// alive even when the window is hidden (`WindowCloseBehaviour::WindowHides`).
 pub fn launch_app() {
-    let icon_bytes = include_bytes!("../../assets/icon.png");
+    let icon_bytes = crate::assets::ICON_PNG;
     let icon_image = image::load_from_memory(icon_bytes)
         .expect("Failed to load icon.png")
         .to_rgba8();

@@ -1,3 +1,4 @@
+mod assets;
 mod audio;
 mod config;
 mod hotkey;
@@ -204,7 +205,7 @@ fn install_linux_desktop_entry() -> Result<()> {
     let icon_path = icon_dir.join("beamer.png");
     std::fs::create_dir_all(&icon_dir)?;
 
-    let icon_bytes: &[u8] = include_bytes!("../assets/icon.png");
+    let icon_bytes: &[u8] = assets::ICON_PNG;
     let needs_write = std::fs::metadata(&icon_path)
         .map(|m| m.len() as usize != icon_bytes.len())
         .unwrap_or(true);
