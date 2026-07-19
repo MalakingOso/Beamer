@@ -16,7 +16,7 @@ name = "voxtral_test"
 path = "src/bin/voxtral_test.rs"
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 cpal = "0.15"
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 serde = { version = "1", features = ["derive"] }
