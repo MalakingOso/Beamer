@@ -66,3 +66,8 @@ windows = { version = "0.58", features = [
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource = "0.1"
 
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
