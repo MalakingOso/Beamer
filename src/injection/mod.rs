@@ -95,6 +95,54 @@ mod sanitize_tests {
     fn unicode_passes_through() {
         assert_eq!(sanitize_for_typing("naïve café 你好"), "naïve café 你好");
     }
+
+    #[test]
+    fn mixed_smart_quotes_and_em_dash_adjacency() {
+        // Quote and dash transliterations abut with no separating text —
+        // pins that each replace() only touches its own code point and
+        // doesn't get confused by neighboring ASCII output from another.
+        assert_eq!(sanitize_for_typing("\u{201C}\u{2014}\u{201D}"), "\"--\"");
+        assert_eq!(
+            sanitize_for_typing("\u{2018}\u{2014}\u{2019}word"),
+            "'--'word"
+        );
+    }
+
+    #[test]
+    fn crlf_collapses_to_exactly_one_space_not_two() {
+        // "\r\n" is consumed whole by the first replace("\r\n", " ") pass;
+        // if it were double-processed by the later per-char replace of
+        // ['\r','\n','\t'] each crlf would produce two spaces instead of one.
+        assert_eq!(sanitize_for_typing("a\r\nb"), "a b");
+        assert_eq!(sanitize_for_typing("a\r\nb\r\nc"), "a b c");
+        // A bare "\r\n" becomes a single space, then trim_end() removes it.
+        assert_eq!(sanitize_for_typing("\r\n"), "");
+    }
+
+    #[test]
+    fn lone_cr_without_lf_becomes_space() {
+        assert_eq!(sanitize_for_typing("one\rtwo"), "one two");
+        assert_eq!(sanitize_for_typing("\r"), "");
+    }
+
+    #[test]
+    fn non_bmp_emoji_passes_through() {
+        assert_eq!(
+            sanitize_for_typing("hi \u{1F600} there"),
+            "hi \u{1F600} there"
+        );
+    }
+
+    #[test]
+    fn ellipsis_char_becomes_three_dots() {
+        assert_eq!(sanitize_for_typing("Wait\u{2026}"), "Wait...");
+    }
+
+    #[test]
+    fn trailing_whitespace_only_input_becomes_empty() {
+        assert_eq!(sanitize_for_typing("   "), "");
+        assert_eq!(sanitize_for_typing("text \n  "), "text");
+    }
 }
 
 // ─── Registry ─────────────────────────────────────────────────────────────────
