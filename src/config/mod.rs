@@ -259,20 +259,90 @@ mod migration_tests {
     }
 }
 
-/// Read an API key from Windows Credential Manager (keyring crate, service "beamer").
+/// In-memory cache of API keys read from (or written to) the OS keyring
+/// (Windows Credential Manager / Secret Service), keyed by credential name.
+///
+/// Only *confirmed* state is ever cached: successful reads, and writes/deletes
+/// that the keyring itself confirmed. A miss or error never populates the
+/// cache — see `load_api_key` and `save_api_key` below. This keeps a
+/// transiently locked/unavailable keyring at startup from permanently
+/// masking a key that's actually present.
+static KEY_CACHE: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Read an API key from the OS keyring (keyring crate, service "beamer"),
+/// serving from an in-memory cache after the first successful read.
+///
+/// Negative results (no entry, or a keyring error such as a locked
+/// Secret Service collection) are intentionally NOT cached, so a transient
+/// keyring failure can't permanently hide a key that's really there —
+/// the next call will simply retry the keyring.
 pub fn load_api_key(name: &str) -> String {
-    keyring::Entry::new("beamer", name)
-        .and_then(|e| e.get_password())
-        .unwrap_or_default()
+    if let Some(cached) = KEY_CACHE.lock().unwrap().get(name) {
+        return cached.clone();
+    }
+
+    match keyring::Entry::new("beamer", name).and_then(|e| e.get_password()) {
+        Ok(password) => {
+            KEY_CACHE
+                .lock()
+                .unwrap()
+                .insert(name.to_string(), password.clone());
+            password
+        }
+        Err(_) => String::new(),
+    }
 }
 
-/// Write or delete an API key in Windows Credential Manager.
+/// Write or delete an API key in the OS keyring. An empty `value` deletes
+/// the credential.
+///
+/// The keyring is always written first; the in-memory cache is only updated
+/// once the keyring operation is confirmed, so the cache can never claim a
+/// key that isn't (or is no longer) durably stored. If a write/delete fails
+/// (e.g. keyring locked), the cache is left untouched rather than guessed at.
 pub fn save_api_key(name: &str, value: &str) {
     if value.is_empty() {
-        if let Ok(entry) = keyring::Entry::new("beamer", name) {
-            let _ = entry.delete_credential();
+        let result = keyring::Entry::new("beamer", name).and_then(|e| e.delete_credential());
+        match result {
+            // Deleted, or already absent: either way the keyring holds no
+            // value for this name, so the cache shouldn't either.
+            Ok(()) | Err(keyring::Error::NoEntry) => {
+                KEY_CACHE.lock().unwrap().remove(name);
+            }
+            Err(_) => {}
         }
-    } else if let Ok(entry) = keyring::Entry::new("beamer", name) {
-        let _ = entry.set_password(value);
+    } else if keyring::Entry::new("beamer", name)
+        .and_then(|e| e.set_password(value))
+        .is_ok()
+    {
+        KEY_CACHE
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), value.to_string());
+    }
+}
+
+#[cfg(test)]
+mod key_cache_tests {
+    use super::*;
+
+    /// Exercises the cache layer in isolation, without touching the real OS
+    /// keyring: pre-populate the static cache directly and confirm
+    /// `load_api_key` serves the cached value rather than hitting the
+    /// keyring backend at all (which would fail/hang in a headless test
+    /// environment).
+    #[test]
+    fn load_api_key_serves_from_cache_without_touching_keyring() {
+        let name = "tb12_test_cache_only_key_never_written_to_real_keyring";
+        KEY_CACHE
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), "cached-value".to_string());
+
+        assert_eq!(load_api_key(name), "cached-value");
+
+        // Clean up so this test doesn't leak state into others.
+        KEY_CACHE.lock().unwrap().remove(name);
     }
 }
