@@ -66,22 +66,37 @@ impl InjectionBackend for YdotoolBackend {
     }
 }
 
-fn is_ydotool_in_path() -> bool {
+/// Walks `path_str` (a `PATH`-style, `:`-separated list of directories) looking
+/// for an executable file named `name`. Parameterized over the path string so
+/// tests can exercise this exact function with a synthetic PATH instead of a
+/// duplicated copy of the logic.
+fn find_executable_in(name: &str, path_str: &std::ffi::OsStr) -> bool {
     use std::os::unix::fs::PermissionsExt;
 
-    if let Some(paths) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&paths) {
-            let ydotool_path = dir.join("ydotool");
-            if ydotool_path.exists() {
-                if let Ok(metadata) = std::fs::metadata(&ydotool_path) {
-                    if metadata.permissions().mode() & 0o111 != 0 {
-                        return true;
-                    }
-                }
+    for dir in std::env::split_paths(path_str) {
+        let candidate = dir.join(name);
+        // A single metadata() call folds the existence check and the
+        // executable-bit check together; Err (e.g. NotFound) means absent.
+        if let Ok(metadata) = std::fs::metadata(&candidate) {
+            // `mode & 0o111` is a deliberate simplification of `which`'s
+            // access(X_OK): it treats owner/group/other-executable bits as
+            // sufficient, even for a bit the current user technically can't
+            // exercise. That's fine for real package installs — a false
+            // positive here just means `available()` reports true and the
+            // subsequent `ydotool` invocation fails with a clearer error.
+            if metadata.permissions().mode() & 0o111 != 0 {
+                return true;
             }
         }
     }
     false
+}
+
+fn is_ydotool_in_path() -> bool {
+    match std::env::var_os("PATH") {
+        Some(paths) => find_executable_in("ydotool", &paths),
+        None => false,
+    }
 }
 
 fn find_ydotool_socket() -> Option<PathBuf> {
@@ -110,22 +125,7 @@ fn find_ydotool_socket() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    /// Helper to test PATH walk logic with a custom path string.
-    fn check_executable_in_paths(name: &str, path_str: &str) -> bool {
-        use std::os::unix::fs::PermissionsExt;
-
-        for dir in std::env::split_paths(path_str) {
-            let exe_path = dir.join(name);
-            if exe_path.exists() {
-                if let Ok(metadata) = std::fs::metadata(&exe_path) {
-                    if metadata.permissions().mode() & 0o111 != 0 {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
-    }
+    use super::find_executable_in;
 
     #[test]
     fn test_path_walk_finds_executable() {
@@ -138,13 +138,9 @@ mod tests {
         // Create an executable file
         let executable_path = temp_dir.join("ydotool");
         std::fs::write(&executable_path, "#!/bin/sh\necho test").unwrap();
-        std::fs::set_permissions(&executable_path, std::fs::Permissions::from_mode(0o755))
-            .unwrap();
+        std::fs::set_permissions(&executable_path, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        assert!(check_executable_in_paths(
-            "ydotool",
-            &temp_dir.to_string_lossy()
-        ));
+        assert!(find_executable_in("ydotool", temp_dir.as_os_str()));
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
@@ -160,19 +156,18 @@ mod tests {
         // Create a non-executable file
         let non_exec_path = temp_dir.join("ydotool");
         std::fs::write(&non_exec_path, "#!/bin/sh\necho test").unwrap();
-        std::fs::set_permissions(&non_exec_path, std::fs::Permissions::from_mode(0o644))
-            .unwrap();
+        std::fs::set_permissions(&non_exec_path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-        assert!(!check_executable_in_paths(
-            "ydotool",
-            &temp_dir.to_string_lossy()
-        ));
+        assert!(!find_executable_in("ydotool", temp_dir.as_os_str()));
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn test_path_walk_nonexistent_path() {
-        assert!(!check_executable_in_paths("ydotool", "/nonexistent/path"));
+        assert!(!find_executable_in(
+            "ydotool",
+            std::ffi::OsStr::new("/nonexistent/path")
+        ));
     }
 }
