@@ -7,7 +7,12 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite;
 use tungstenite::Message;
 
-use super::{RealtimeSession, TranscriptEvent, TranscriptKind};
+use crate::audio::warn_channel_full;
+
+use super::{
+    RealtimeSession, TranscriptEvent, TranscriptKind, AUDIO_CHANNEL_CAPACITY,
+    TRANSCRIPT_CHANNEL_CAPACITY,
+};
 
 /// Build an `input_audio_chunk` frame into `out`, reusing its allocation
 /// instead of building a fresh `serde_json::Value` + `String` per frame.
@@ -62,8 +67,9 @@ pub async fn start_realtime_session(
 
     let (mut write, mut read) = ws_stream.split();
 
-    let (audio_tx, mut audio_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let (transcript_tx, transcript_rx) = mpsc::unbounded_channel::<TranscriptEvent>();
+    let (audio_tx, mut audio_rx) = mpsc::channel::<Vec<u8>>(AUDIO_CHANNEL_CAPACITY);
+    let (transcript_tx, transcript_rx) =
+        mpsc::channel::<TranscriptEvent>(TRANSCRIPT_CHANNEL_CAPACITY);
 
     // Audio sender: encodes PCM → base64 JSON and streams to the WebSocket
     tokio::spawn(async move {
@@ -92,6 +98,16 @@ pub async fn start_realtime_session(
 
     // Transcript receiver: parses JSON messages into TranscriptEvents
     tokio::spawn(async move {
+        // No sentinel convention on this channel — every event is ordinary
+        // data, so a plain rate-limited `try_send` (no reserved headroom)
+        // is sufficient.
+        let mut dropped_transcripts: u64 = 0;
+        let mut send_event = |ev: TranscriptEvent| {
+            if transcript_tx.try_send(ev).is_err() {
+                warn_channel_full(&mut dropped_transcripts, "ElevenLabs transcript");
+            }
+        };
+
         while let Some(Ok(msg)) = read.next().await {
             if let Message::Text(text) = msg {
                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
@@ -102,21 +118,21 @@ pub async fn start_realtime_session(
                                 .unwrap_or("?")
                                 .to_string();
                             tracing::info!("ElevenLabs session started: {}", sid);
-                            let _ = transcript_tx.send(TranscriptEvent {
+                            send_event(TranscriptEvent {
                                 text: String::new(),
                                 kind: TranscriptKind::SessionStarted(sid),
                             });
                         }
                         Some("partial_transcript") => {
                             let t = parsed["text"].as_str().unwrap_or("").to_string();
-                            let _ = transcript_tx.send(TranscriptEvent {
+                            send_event(TranscriptEvent {
                                 text: t,
                                 kind: TranscriptKind::Partial,
                             });
                         }
                         Some("committed_transcript") => {
                             let t = parsed["text"].as_str().unwrap_or("").to_string();
-                            let _ = transcript_tx.send(TranscriptEvent {
+                            send_event(TranscriptEvent {
                                 text: t,
                                 kind: TranscriptKind::Final,
                             });
@@ -126,7 +142,7 @@ pub async fn start_realtime_session(
                             let message = parsed["message"].as_str().unwrap_or("");
                             let err = format!("{} - {}", code, message);
                             tracing::error!("ElevenLabs input error: {}", err);
-                            let _ = transcript_tx.send(TranscriptEvent {
+                            send_event(TranscriptEvent {
                                 text: String::new(),
                                 kind: TranscriptKind::Error(err),
                             });
@@ -138,7 +154,7 @@ pub async fn start_realtime_session(
                 }
             }
         }
-        let _ = transcript_tx.send(TranscriptEvent {
+        send_event(TranscriptEvent {
             text: String::new(),
             kind: TranscriptKind::Info("WebSocket closed".to_string()),
         });

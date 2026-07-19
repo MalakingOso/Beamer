@@ -7,6 +7,48 @@ use tokio::sync::{mpsc, watch};
 
 use self::capture::AudioCapture;
 
+// ─── Bounded channel helpers ──────────────────────────────────────────────────
+// Shared by the mic-capture path (`capture.rs`, this file) and the
+// transcription-side channels (`transcription/mod.rs` + backends,
+// `orchestrator.rs`) — all of them replaced unbounded mpsc channels with
+// bounded ones sized for >=60s of buffering (TB.10). See each channel's
+// construction site for its capacity math.
+
+/// Attempt to send `payload` on `tx`, but only if doing so leaves at least
+/// `reserve` slots free. This is how sentinel-carrying channels guarantee a
+/// rare, must-not-drop sentinel (e.g. an end-of-audio marker) always has
+/// room to `try_send`, even when a stalled consumer has let the data path
+/// saturate the rest of the channel: the data path calls this function
+/// (which refuses to touch the last `reserve` slots), while the sentinel is
+/// sent with a plain `tx.try_send(..)` that only ever competes for the
+/// untouched reserved slots.
+///
+/// `Sender::capacity()` is a cheap atomic read (not a lock), so this never
+/// blocks or spins — safe to call from a real-time audio callback.
+pub(crate) fn try_send_reserving<T>(tx: &mpsc::Sender<T>, reserve: usize, payload: T) -> bool {
+    if tx.capacity() <= reserve {
+        return false;
+    }
+    tx.try_send(payload).is_ok()
+}
+
+/// Rate-limited warning for a message dropped because a bounded channel was
+/// full (consumer stalled). Logs the first drop immediately, then every
+/// 200th thereafter, so a sustained stall produces one log line up front
+/// and periodic reminders rather than flooding the log. Only increments a
+/// plain counter and occasionally calls `tracing::warn!` — no allocation,
+/// locking, or blocking beyond what `tracing::warn!` itself does.
+pub(crate) fn warn_channel_full(count: &mut u64, what: &str) {
+    *count += 1;
+    if *count == 1 || *count % 200 == 0 {
+        tracing::warn!(
+            "{} channel full — dropped {} message(s) so far (consumer stalled?)",
+            what,
+            count
+        );
+    }
+}
+
 // ─── Live mic level ───────────────────────────────────────────────────────────
 // Per-chunk RMS published for recording indicators (the GNOME shell pill's
 // waveform). 0.0 = silence, 1.0 = loud speech.
@@ -79,6 +121,83 @@ mod level_tests {
 }
 
 #[cfg(test)]
+mod channel_backpressure_tests {
+    use super::{try_send_reserving, warn_channel_full};
+    use tokio::sync::mpsc;
+
+    /// Core guarantee behind TB.10's sentinel-safety design: a "stalled
+    /// consumer" (nobody draining) that saturates the data path via
+    /// `try_send_reserving` can never consume the reserved headroom, so a
+    /// sentinel sent afterwards with a plain `try_send` always has room —
+    /// proving end-of-audio (and the capture-error sentinel) delivery under
+    /// a full buffer.
+    #[test]
+    fn sentinel_survives_full_buffer_via_reserved_headroom() {
+        let capacity = 8;
+        let reserve = 2;
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(capacity);
+
+        // Simulate a stalled consumer: nothing ever calls rx.recv(), so the
+        // data path below will fill the channel until only the reserved
+        // slots are left, then start dropping.
+        let mut sent = 0u32;
+        let mut dropped = 0u32;
+        let mut dropped_counter: u64 = 0;
+        for i in 0..20u8 {
+            if try_send_reserving(&tx, reserve, vec![i]) {
+                sent += 1;
+            } else {
+                dropped += 1;
+                warn_channel_full(&mut dropped_counter, "test");
+            }
+        }
+
+        // Data fills exactly `capacity - reserve` slots, then every further
+        // attempt is refused before it ever touches the reserved headroom.
+        assert_eq!(sent, (capacity - reserve) as u32, "data should stop at the reserve boundary");
+        assert_eq!(dropped, 20 - sent, "everything past the reserve boundary should be dropped");
+        assert_eq!(dropped_counter, dropped as u64);
+
+        // The end-of-audio sentinel must still get through: the reserved
+        // slots were never touched by the data path above.
+        let sentinel_result = tx.try_send(Vec::new());
+        assert!(
+            sentinel_result.is_ok(),
+            "sentinel must have room via the untouched reserved headroom, even though the channel is saturated with data"
+        );
+
+        // Drain and confirm the sentinel (an empty Vec) was actually
+        // delivered, not silently dropped.
+        let mut received = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            received.push(msg);
+        }
+        assert_eq!(received.len(), sent as usize + 1, "all sent data plus the sentinel should be present");
+        assert!(
+            received.iter().any(|m| m.is_empty()),
+            "sentinel (empty Vec) must be present among delivered messages"
+        );
+        // Sentinel was sent last, after all data, so it must be the last
+        // message a consumer would observe.
+        assert!(received.last().unwrap().is_empty(), "sentinel should be the last delivered message");
+    }
+
+    /// Without the reserve, a fully-saturated channel would also refuse the
+    /// sentinel — this is the negative control proving the reserve (not
+    /// just "the channel wasn't literally full yet") is what saves it.
+    #[test]
+    fn without_reserve_a_saturated_channel_drops_the_sentinel_too() {
+        let capacity = 4;
+        let (tx, _rx) = mpsc::channel::<Vec<u8>>(capacity);
+        for i in 0..capacity {
+            assert!(try_send_reserving(&tx, 0, vec![i as u8]));
+        }
+        // Channel is now completely full (reserve = 0 reserved no slots).
+        assert!(tx.try_send(Vec::new()).is_err(), "sentinel has nowhere to go without reserved headroom");
+    }
+}
+
+#[cfg(test)]
 mod f32_to_i16_bytes_tests {
     use super::f32_to_i16_bytes;
 
@@ -125,6 +244,18 @@ mod f32_to_i16_bytes_tests {
     }
 }
 
+/// Bounded capacity for the converted-PCM chunk channel. Each message here
+/// is produced 1:1 from an incoming raw-sample chunk off `capture.rs`'s
+/// sample channel (converted synchronously on the dedicated thread below —
+/// see that loop), so it shares the same worst-case cadence: 60s * 200
+/// msgs/sec (5ms cpal callback floor) = 12_000. See
+/// `capture::SAMPLE_CHANNEL_CAPACITY` for the full derivation.
+///
+/// No sentinel travels on this channel — the upstream error-callback empty
+/// Vec is filtered out by `if samples.is_empty() { continue; }` below before
+/// it would ever reach `tx`, so no reserved headroom is needed here.
+const CHUNK_CHANNEL_CAPACITY: usize = 12_000;
+
 pub struct AudioPipeline {
     capture: AudioCapture,
 }
@@ -138,13 +269,14 @@ impl AudioPipeline {
 
     /// Start capturing audio. Returns 16-bit LE PCM byte chunks suitable for
     /// streaming directly to transcription WebSocket backends.
-    pub fn start(&self) -> Result<(Stream, mpsc::UnboundedReceiver<Vec<u8>>)> {
+    pub fn start(&self) -> Result<(Stream, mpsc::Receiver<Vec<u8>>)> {
         let (stream, mut sample_rx) = self.capture.start()?;
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(CHUNK_CHANNEL_CAPACITY);
 
         // Conversion runs on a dedicated thread because cpal callbacks are
         // real-time sensitive and must not block on async channel operations
         std::thread::spawn(move || {
+            let mut dropped_chunks: u64 = 0;
             loop {
                 let samples = match sample_rx.blocking_recv() {
                     Some(s) => s,
@@ -162,7 +294,9 @@ impl AudioPipeline {
 
                 // f32 [-1.0, 1.0] → i16 little-endian PCM bytes
                 let bytes = f32_to_i16_bytes(&samples);
-                let _ = tx.send(bytes);
+                if tx.try_send(bytes).is_err() {
+                    warn_channel_full(&mut dropped_chunks, "PCM chunk");
+                }
             }
         });
 

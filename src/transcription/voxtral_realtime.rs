@@ -7,7 +7,12 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite;
 use tungstenite::Message;
 
-use super::{RealtimeSession, TranscriptEvent, TranscriptKind};
+use crate::audio::warn_channel_full;
+
+use super::{
+    RealtimeSession, TranscriptEvent, TranscriptKind, AUDIO_CHANNEL_CAPACITY,
+    TRANSCRIPT_CHANNEL_CAPACITY,
+};
 
 /// Build the `input_audio.append` frame for a non-empty chunk into `out`,
 /// reusing its allocation instead of building a fresh `serde_json::Value` +
@@ -70,8 +75,9 @@ pub async fn start_realtime_session(api_key: &str) -> Result<RealtimeSession> {
         .await
         .context("Failed to send session config")?;
 
-    let (audio_tx, mut audio_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let (transcript_tx, transcript_rx) = mpsc::unbounded_channel::<TranscriptEvent>();
+    let (audio_tx, mut audio_rx) = mpsc::channel::<Vec<u8>>(AUDIO_CHANNEL_CAPACITY);
+    let (transcript_tx, transcript_rx) =
+        mpsc::channel::<TranscriptEvent>(TRANSCRIPT_CHANNEL_CAPACITY);
 
     // Audio sender: encodes PCM → base64 JSON and streams to the WebSocket
     tokio::spawn(async move {
@@ -101,6 +107,16 @@ pub async fn start_realtime_session(api_key: &str) -> Result<RealtimeSession> {
 
     // Transcript receiver: parses JSON messages into TranscriptEvents
     tokio::spawn(async move {
+        // No sentinel convention on this channel — every event is ordinary
+        // data, so a plain rate-limited `try_send` (no reserved headroom)
+        // is sufficient.
+        let mut dropped_transcripts: u64 = 0;
+        let mut send_event = |ev: TranscriptEvent| {
+            if transcript_tx.try_send(ev).is_err() {
+                warn_channel_full(&mut dropped_transcripts, "Voxtral transcript");
+            }
+        };
+
         while let Some(Ok(msg)) = read.next().await {
             if let Message::Text(text) = msg {
                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
@@ -111,7 +127,7 @@ pub async fn start_realtime_session(api_key: &str) -> Result<RealtimeSession> {
                                 .unwrap_or("?")
                                 .to_string();
                             tracing::info!("Voxtral session created: {}", rid);
-                            let _ = transcript_tx.send(TranscriptEvent {
+                            send_event(TranscriptEvent {
                                 text: String::new(),
                                 kind: TranscriptKind::SessionStarted(rid),
                             });
@@ -121,14 +137,14 @@ pub async fn start_realtime_session(api_key: &str) -> Result<RealtimeSession> {
                         }
                         Some("transcription.text.delta") => {
                             let t = parsed["text"].as_str().unwrap_or("").to_string();
-                            let _ = transcript_tx.send(TranscriptEvent {
+                            send_event(TranscriptEvent {
                                 text: t,
                                 kind: TranscriptKind::Partial,
                             });
                         }
                         Some("transcription.done") => {
                             let t = parsed["text"].as_str().unwrap_or("").to_string();
-                            let _ = transcript_tx.send(TranscriptEvent {
+                            send_event(TranscriptEvent {
                                 text: t,
                                 kind: TranscriptKind::Final,
                             });
@@ -136,7 +152,7 @@ pub async fn start_realtime_session(api_key: &str) -> Result<RealtimeSession> {
                         Some("transcription.language") => {
                             let lang = parsed["language"].as_str().unwrap_or("?");
                             tracing::info!("Voxtral detected language: {}", lang);
-                            let _ = transcript_tx.send(TranscriptEvent {
+                            send_event(TranscriptEvent {
                                 text: String::new(),
                                 kind: TranscriptKind::Info(format!("Language: {}", lang)),
                             });
@@ -150,7 +166,7 @@ pub async fn start_realtime_session(api_key: &str) -> Result<RealtimeSession> {
                                 .as_str()
                                 .unwrap_or(&fallback);
                             tracing::error!("Voxtral error: {}", message);
-                            let _ = transcript_tx.send(TranscriptEvent {
+                            send_event(TranscriptEvent {
                                 text: String::new(),
                                 kind: TranscriptKind::Error(message.to_string()),
                             });
@@ -162,7 +178,7 @@ pub async fn start_realtime_session(api_key: &str) -> Result<RealtimeSession> {
                 }
             }
         }
-        let _ = transcript_tx.send(TranscriptEvent {
+        send_event(TranscriptEvent {
             text: String::new(),
             kind: TranscriptKind::Info("WebSocket closed".to_string()),
         });

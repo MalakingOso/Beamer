@@ -3,6 +3,30 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleRate, Stream, StreamConfig};
 use tokio::sync::mpsc;
 
+use super::{try_send_reserving, warn_channel_full};
+
+/// Bounded capacity for the raw-sample channel from the cpal callback.
+///
+/// cpal's `BufferSize::Default` hands buffer-size (and therefore callback
+/// cadence) selection to the host audio API. Measured/typical callback
+/// periods across WASAPI (Windows), CoreAudio (macOS) and PulseAudio/
+/// PipeWire (Linux) commonly fall in the 5-20ms range depending on the
+/// device and host. We size the channel for the fastest realistic cadence
+/// (5ms per callback -> 200 callbacks/sec) so it holds >=60s of audio even
+/// on the device with the shortest observed callback period; on a device
+/// with a longer period this buffers correspondingly *more* than 60s of
+/// audio, which is still bounded and therefore fine.
+///
+///   60s * (1000ms/s / 5ms per callback) = 60 * 200 = 12_000
+pub(crate) const SAMPLE_CHANNEL_CAPACITY: usize = 12_000;
+
+/// Slots permanently withheld from ordinary sample data so the rare
+/// device-error sentinel (an empty `Vec` sent from the cpal error callback)
+/// always has room to `try_send`, even when a stalled consumer has let the
+/// data path saturate the rest of the channel. Device errors are
+/// exceedingly rare (not per-callback), so a small reserve is ample.
+const SENTINEL_RESERVE: usize = 4;
+
 /// Wraps cpal device setup and provides a mono 16 kHz f32 sample stream.
 /// Resamples from the device's native rate when it differs from 16 kHz.
 pub struct AudioCapture {
@@ -44,8 +68,8 @@ impl AudioCapture {
 
     /// Start capturing audio. The returned `Stream` must be kept alive for the
     /// duration of capture — dropping it stops the audio device.
-    pub fn start(&self) -> Result<(Stream, mpsc::UnboundedReceiver<Vec<f32>>)> {
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<f32>>();
+    pub fn start(&self) -> Result<(Stream, mpsc::Receiver<Vec<f32>>)> {
+        let (tx, rx) = mpsc::channel::<Vec<f32>>(SAMPLE_CHANNEL_CAPACITY);
         let err_tx = tx.clone();
 
         let native_rate = self.device_sample_rate();
@@ -84,6 +108,7 @@ impl AudioCapture {
         };
         let mut mono_buf: Vec<f32> = Vec::new();
         let mut out_buf: Vec<f32> = Vec::new();
+        let mut dropped_chunks: u64 = 0;
 
         let stream = self.device.build_input_stream(
             &config,
@@ -107,11 +132,31 @@ impl AudioCapture {
                     samples
                 };
 
-                let _ = tx.send(out.to_vec());
+                // Never blocks/spins: `try_send_reserving` is a `try_send`
+                // gated on a cheap atomic capacity() read. On a stalled
+                // consumer this drops the chunk instead of growing memory
+                // without bound, and leaves `SENTINEL_RESERVE` slots
+                // untouched so the error-callback sentinel below can never
+                // be starved out by ordinary audio data.
+                if !try_send_reserving(&tx, SENTINEL_RESERVE, out.to_vec()) {
+                    warn_channel_full(&mut dropped_chunks, "Audio sample");
+                }
             },
             move |err| {
                 tracing::error!("Audio capture error: {}", err);
-                let _ = err_tx.send(Vec::new());
+                // Sentinel convention: an empty Vec tells the consumer a
+                // capture error occurred. `SENTINEL_RESERVE` slots are never
+                // touched by the data-callback path above, so this
+                // `try_send` should always succeed. If it doesn't, something
+                // has gone very wrong (e.g. concurrent error callbacks
+                // racing each other for reserved slots) — that's rare and
+                // important enough to always log, not rate-limit.
+                if err_tx.try_send(Vec::new()).is_err() {
+                    tracing::error!(
+                        "Audio capture error sentinel dropped — channel full despite {} reserved slots",
+                        SENTINEL_RESERVE
+                    );
+                }
             },
             None,
         )?;

@@ -2,7 +2,7 @@ use anyhow::Result;
 use dioxus::prelude::*;
 use futures_util::StreamExt;
 
-use crate::audio::AudioPipeline;
+use crate::audio::{try_send_reserving, warn_channel_full, AudioPipeline};
 use crate::config::Config;
 use crate::hotkey::HotkeyEvent;
 use crate::injection;
@@ -122,6 +122,7 @@ async fn handle_recording(
         }
     };
     let (_stream, mut audio_rx) = pipeline.start()?;
+    let mut audio_drop_count: u64 = 0;
 
     rec_state.set(RecordingState::Recording);
     overlay_text.set("Listening...".to_string());
@@ -151,8 +152,10 @@ async fn handle_recording(
                             tokio::select! {
                                 chunk = audio_rx.recv() => {
                                     if let Some(bytes) = chunk {
-                                        if !bytes.is_empty() {
-                                            let _ = session.audio_tx.send(bytes);
+                                        if !bytes.is_empty()
+                                            && !try_send_reserving(&session.audio_tx, transcription::AUDIO_SENTINEL_RESERVE, bytes)
+                                        {
+                                            warn_channel_full(&mut audio_drop_count, "Realtime audio_tx");
                                         }
                                     }
                                 }
@@ -160,8 +163,18 @@ async fn handle_recording(
                             }
                         }
 
-                        // Empty Vec signals the backend to commit/finalize
-                        let _ = session.audio_tx.send(Vec::new());
+                        // Empty Vec signals the backend to commit/finalize.
+                        // `AUDIO_SENTINEL_RESERVE` slots are never touched by
+                        // the data path above (see try_send_reserving calls),
+                        // so this should always succeed even if the channel
+                        // was saturated with audio data moments ago.
+                        if session.audio_tx.try_send(Vec::new()).is_err() {
+                            tracing::error!(
+                                "End-of-audio sentinel dropped — audio_tx channel full despite {} reserved slots; backend will not receive a finalize signal",
+                                transcription::AUDIO_SENTINEL_RESERVE
+                            );
+                            log_status(status_log, LogLevel::Error, "Failed to send end-of-audio signal — transcript may be incomplete");
+                        }
                         log_status(status_log, LogLevel::Info, "Sent commit, waiting for final transcript...");
 
                         // Drain any remaining final transcripts before closing
@@ -197,7 +210,9 @@ async fn handle_recording(
             chunk = audio_rx.recv() => {
                 match chunk {
                     Some(bytes) if !bytes.is_empty() => {
-                        let _ = session.audio_tx.send(bytes);
+                        if !try_send_reserving(&session.audio_tx, transcription::AUDIO_SENTINEL_RESERVE, bytes) {
+                            warn_channel_full(&mut audio_drop_count, "Realtime audio_tx");
+                        }
                     }
                     _ => {
                         log_status(status_log, LogLevel::Warn, "Audio channel closed");
