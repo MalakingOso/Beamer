@@ -1,9 +1,11 @@
 pub mod app;
+mod app_setup;
 pub mod components;
 pub mod history;
 pub mod history_page;
 pub mod home;
 pub mod icons;
+mod linux_integration;
 pub mod pill;
 pub mod settings;
 pub mod shell_indicator;

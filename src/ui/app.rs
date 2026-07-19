@@ -1,22 +1,15 @@
 use std::rc::Rc;
 
-use dioxus::desktop::tao::dpi::{PhysicalPosition, PhysicalSize};
-#[cfg(target_os = "windows")]
-use dioxus::desktop::tao::platform::windows::WindowBuilderExtWindows;
-use dioxus::desktop::trayicon::{init_tray_icon, MouseButton, MouseButtonState, TrayIconEvent};
-use dioxus::desktop::{use_muda_event_handler, use_tray_icon_event_handler, use_window};
-use dioxus::desktop::{Config as DesktopConfig, DesktopContext, WindowBuilder};
+use dioxus::desktop::use_window;
 use dioxus::prelude::*;
 
 use crate::config::Config;
 use crate::hotkey::{start_ll_hook, HotkeyConfig, HotkeyEvent};
 use crate::orchestrator::{self, RecordingState};
-use crate::tray;
-use crate::update::{self, UpdateStatus};
-#[cfg(not(target_os = "linux"))]
-use crate::ui::pill::RecordingPill;
-use crate::ui::splash::{SplashWindow, SPLASH_CSS};
-use crate::warmup::{self, WarmupProgress};
+use crate::update::UpdateStatus;
+use crate::ui::app_setup;
+#[cfg(target_os = "linux")]
+use crate::ui::linux_integration;
 use crate::ui::history::TranscriptionHistory;
 use crate::ui::history_page::HistoryPage;
 use crate::ui::home::HomePage;
@@ -26,7 +19,7 @@ use crate::ui::settings::SettingsPage;
 use crate::ui::status_log::StatusLog;
 
 #[derive(Clone, Copy, PartialEq)]
-enum Page {
+pub(super) enum Page {
     Home,
     History,
     Vocab,
@@ -35,105 +28,18 @@ enum Page {
 
 #[component]
 pub fn App() -> Element {
-    let items = use_hook(|| {
-        let (menu, items) = tray::build_tray_menu();
-        let icon = tray::load_icon();
-        init_tray_icon(menu, Some(icon));
-        items
-    });
+    let items = app_setup::setup_tray_menu();
 
     let window = use_window();
 
     // Center the window on the primary monitor (runs once on first render)
-    use_hook({
-        let window = window.clone();
-        move || {
-            if let Some(monitor) = window.primary_monitor() {
-                let monitor_size = monitor.size();
-                let scale = monitor.scale_factor();
-                let win_w = (500.0 * scale) as i32;
-                let win_h = (600.0 * scale) as i32;
-                let x = (monitor_size.width as i32 - win_w) / 2;
-                let y = (monitor_size.height as i32 - win_h) / 2;
-                window.set_outer_position(PhysicalPosition::new(x, y));
-            }
-        }
-    });
+    app_setup::setup_window_centering(window.clone());
 
     // Cold-start warmup splash. Runs once on first render: opens a small
     // centered window, walks `warm_all` through keyring/audio/(mpris)/network,
     // then closes itself. Pays the one-time costs that would otherwise stall
     // the first recording.
-    let warmup_progress = use_signal(WarmupProgress::default);
-    let mut splash_ctx: Signal<Option<DesktopContext>> = use_signal(|| None);
-
-    use_hook({
-        let window = window.clone();
-        move || {
-            spawn(async move {
-                let scale = window
-                    .primary_monitor()
-                    .map(|m| m.scale_factor())
-                    .unwrap_or(1.0);
-                let monitor_size = window
-                    .primary_monitor()
-                    .map(|m| m.size())
-                    .unwrap_or(PhysicalSize::new(1920, 1080));
-
-                let splash_w = (280.0 * scale) as u32;
-                let splash_h = (280.0 * scale) as u32;
-                let x = (monitor_size.width.saturating_sub(splash_w)) / 2;
-                let y = (monitor_size.height.saturating_sub(splash_h)) / 2;
-
-                #[allow(unused_mut)]
-                let mut builder = WindowBuilder::new()
-                    .with_title("Beamer")
-                    .with_decorations(false)
-                    .with_resizable(false)
-                    .with_transparent(true)
-                    .with_always_on_top(true)
-                    .with_focusable(false)
-                    .with_inner_size(PhysicalSize::new(splash_w, splash_h))
-                    .with_position(PhysicalPosition::new(x as i32, y as i32));
-                #[cfg(target_os = "windows")]
-                let builder = builder.with_skip_taskbar(true);
-
-                let cfg = DesktopConfig::new()
-                    .with_data_directory(super::webview_data_dir())
-                    .with_window(builder)
-                    .with_background_color((0, 0, 0, 0))
-                    .with_custom_head(format!("<style>{}</style>", SPLASH_CSS))
-                    .with_exits_when_last_window_closes(false);
-
-                let dom = VirtualDom::new(SplashWindow);
-                let ctx: DesktopContext = window.new_window(dom, cfg).await;
-                splash_ctx.set(Some(ctx));
-
-                let started = std::time::Instant::now();
-                warmup::warm_all(warmup_progress).await;
-
-                // The splash bar fills via a CSS keyframe over 1500ms (see
-                // SPLASH_CSS), so the floor must match that duration — otherwise
-                // the splash dismisses while the fill is still animating.
-                let min_visible = std::time::Duration::from_millis(1500);
-                let elapsed = started.elapsed();
-                if elapsed < min_visible {
-                    tokio::time::sleep(min_visible - elapsed).await;
-                }
-
-                if let Some(ctx) = splash_ctx.read().as_ref() {
-                    ctx.close();
-                }
-                splash_ctx.set(None);
-
-                // Reveal the main window on platforms where it would have
-                // shown at launch. Windows keeps it hidden until tray-click,
-                // matching the original tray-app convention.
-                #[cfg(not(target_os = "windows"))]
-                window.set_visible(true);
-            });
-        }
-    });
+    app_setup::setup_splash(window.clone());
 
     let mut current_page = use_signal(|| Page::Home);
     let rec_state = use_signal(RecordingState::default);
@@ -141,175 +47,20 @@ pub fn App() -> Element {
     let history = use_signal(TranscriptionHistory::load);
     let config = use_signal(|| Config::load().unwrap_or_default());
     let status_log = use_signal(StatusLog::new);
-    let mut update_status = use_signal(UpdateStatus::default);
+    let update_status = use_signal(UpdateStatus::default);
 
     // Recording pill window — small, transparent, click-through, always-on-top.
-    // Linux: the pill is replaced by an AppIndicator tray-icon swap (see below).
-    // GNOME Shell doesn't accept in-tray GTK widgets from standalone apps, and the
-    // floating-pill approach has compositor/transparency quirks under Wayland.
+    // Linux: the pill is replaced by an AppIndicator tray-icon swap (see
+    // `linux_integration`). GNOME Shell doesn't accept in-tray GTK widgets
+    // from standalone apps, and the floating-pill approach has
+    // compositor/transparency quirks under Wayland.
     #[cfg(not(target_os = "linux"))]
-    let mut pill_ctx: Signal<Option<DesktopContext>> = use_signal(|| None);
-    #[cfg(not(target_os = "linux"))]
-    let mut pill_click_through_set: Signal<bool> = use_signal(|| false);
+    app_setup::setup_recording_pill(window.clone(), rec_state, config);
 
-    #[cfg(not(target_os = "linux"))]
-    use_hook({
-        let window = window.clone();
-        move || {
-            spawn(async move {
-                let scale = window
-                    .primary_monitor()
-                    .map(|m| m.scale_factor())
-                    .unwrap_or(1.0);
-                let monitor_size = window
-                    .primary_monitor()
-                    .map(|m| m.size())
-                    .unwrap_or(PhysicalSize::new(1920, 1080));
-
-                let pill_w = (220.0 * scale) as u32;
-                let pill_h = (52.0 * scale) as u32;
-                let x = (monitor_size.width.saturating_sub(pill_w)) / 2;
-                let y = monitor_size.height.saturating_sub(pill_h + (60.0 * scale) as u32);
-
-                #[allow(unused_mut)]
-                let mut builder = WindowBuilder::new()
-                    .with_title("Beamer Recording")
-                    .with_decorations(false)
-                    .with_transparent(true)
-                    .with_always_on_top(true)
-                    .with_visible(false)
-                    .with_focusable(false)
-                    .with_inner_size(PhysicalSize::new(pill_w, pill_h))
-                    .with_position(PhysicalPosition::new(x as i32, y as i32));
-                #[cfg(target_os = "windows")]
-                let builder = builder.with_skip_taskbar(true);
-
-                let cfg = DesktopConfig::new()
-                    .with_data_directory(super::webview_data_dir())
-                    .with_window(builder)
-                    .with_background_color((0, 0, 0, 0))
-                    .with_custom_head(format!(r#"<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&display=swap" rel="stylesheet"><style>body{{opacity:0;transition:opacity 0.15s ease;}}{}</style><script>{}</script>"#, PILL_CSS, PILL_JS))
-                    .with_exits_when_last_window_closes(false);
-
-                let dom = VirtualDom::new(RecordingPill);
-                let ctx: DesktopContext = window.new_window(dom, cfg).await;
-
-                // On Windows, realize the window immediately so
-                // set_ignore_cursor_events works.
-                #[cfg(target_os = "windows")]
-                {
-                    ctx.set_visible(true);
-                    let _ = ctx.set_ignore_cursor_events(true);
-                    pill_click_through_set.set(true);
-                }
-
-                pill_ctx.set(Some(ctx));
-            });
-        }
-    });
-
-    // Update pill appearance when recording state changes (Windows/macOS only).
-    #[cfg(not(target_os = "linux"))]
-    use_effect(move || {
-        let state = *rec_state.read();
-        let pill_enabled = config.read().appearance.pill_enabled;
-        if let Some(ctx) = pill_ctx.read().as_ref() {
-            let should_show = state != RecordingState::Idle && pill_enabled;
-            if should_show {
-                let js_state = match state {
-                    RecordingState::Recording => "recording",
-                    RecordingState::Processing => "processing",
-                    _ => unreachable!(),
-                };
-
-                // On macOS, realize the window and set click-through on first show.
-                #[cfg(not(target_os = "windows"))]
-                {
-                    ctx.set_visible(true);
-                    if !*pill_click_through_set.read() {
-                        let _ = ctx.set_ignore_cursor_events(true);
-                        pill_click_through_set.set(true);
-                    }
-                }
-
-                let _ = ctx
-                    .webview
-                    .evaluate_script(&format!("beamerSetState('{js_state}');"));
-            } else {
-                let _ = ctx.webview.evaluate_script("beamerSetState('idle');");
-                #[cfg(not(target_os = "windows"))]
-                {
-                    let ctx_clone = ctx.clone();
-                    spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                        ctx_clone.set_visible(false);
-                    });
-                }
-            }
-        }
-    });
-
-    // Linux: swap the tray icon to reflect recording state (mirrors Handy's behavior).
-    // GNOME's AppIndicator extension renders the tray icon in the top bar; tray-icon
-    // wraps libappindicator and `set_icon` writes a PNG to /tmp and signals a reload.
-    // On GNOME the helper extension additionally shows a shell-native recording
-    // pill (waveform + timer) — a regular Wayland window can't be positioned or
-    // kept always-on-top, so the pill lives inside GNOME Shell instead.
+    // Linux: swap the tray icon to reflect recording state and pump levels
+    // into the shell pill (mirrors Handy's behavior).
     #[cfg(target_os = "linux")]
-    {
-        use dioxus::desktop::trayicon::use_tray_icon;
-        let tray_handle = use_tray_icon();
-        use_effect(move || {
-            let state = *rec_state.read();
-            if let Some(tray) = tray_handle.as_ref() {
-                let icon = match state {
-                    RecordingState::Idle => tray::load_icon(),
-                    RecordingState::Recording | RecordingState::Processing => {
-                        tray::load_recording_icon()
-                    }
-                };
-                let _ = tray.set_icon(Some(icon));
-            }
-
-            let pill_enabled = config.peek().appearance.pill_enabled;
-            match state {
-                RecordingState::Recording if pill_enabled => {
-                    crate::ui::shell_indicator::show("recording")
-                }
-                RecordingState::Processing if pill_enabled => {
-                    crate::ui::shell_indicator::show("processing")
-                }
-                _ => crate::ui::shell_indicator::hide(),
-            }
-        });
-
-        // Pump live mic levels into the shell pill's waveform (~15 Hz).
-        // The worker thread no-ops when the helper extension isn't active.
-        //
-        // Interval-driven rather than `changed().await`-driven: the audio
-        // callback publishes levels at 100+ Hz, and waking on every update
-        // just to throttle back down to 15 Hz wastes wakeups. Polling on a
-        // fixed 66ms tick and reading whatever the watch channel currently
-        // holds (`borrow_and_update`) decouples our wakeup rate from the
-        // audio callback rate while keeping the same visible cadence.
-        // `has_changed()` still detects sender drop (audio stream torn
-        // down) so this loop doesn't spin forever afterward.
-        use_hook(move || {
-            spawn(async move {
-                let mut level_rx = crate::audio::subscribe_levels();
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_millis(66)).await;
-                    if level_rx.has_changed().is_err() {
-                        break;
-                    }
-                    let level = *level_rx.borrow_and_update();
-                    if *rec_state.peek() == RecordingState::Recording {
-                        crate::ui::shell_indicator::update_level(level);
-                    }
-                }
-            });
-        });
-    }
+    linux_integration::setup_linux_integration(rec_state, config);
 
     let coroutine = use_coroutine(move |rx: UnboundedReceiver<HotkeyEvent>| {
         orchestrator::run(
@@ -354,125 +105,11 @@ pub fn App() -> Element {
     });
 
     // Background update check on startup (3s delay to keep launch snappy)
-    use_hook({
-        let auto_check = config.peek().appearance.auto_check_updates;
-        move || {
-            if auto_check {
-                spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                    update_status.set(UpdateStatus::Checking);
-                    let result = tokio::task::spawn_blocking(update::check_for_update_blocking).await;
-                    match result {
-                        Ok(Ok(Some(info))) => {
-                            tracing::info!("Update available: v{}", info.version);
-                            update_status.set(UpdateStatus::Available { version: info.version });
-                        }
-                        Ok(Ok(None)) => {
-                            tracing::debug!("No update available");
-                            update_status.set(UpdateStatus::Idle);
-                        }
-                        Ok(Err(e)) => {
-                            tracing::warn!("Update check failed: {}", e);
-                            update_status.set(UpdateStatus::Idle);
-                        }
-                        Err(e) => {
-                            tracing::warn!("Update check task panicked: {}", e);
-                            update_status.set(UpdateStatus::Idle);
-                        }
-                    }
-                });
-            }
-        }
-    });
+    app_setup::setup_update_check(config, update_status);
 
-    // NOTE: use_muda_event_handler instead of use_tray_menu_event_handler because
-    // dioxus-desktop 0.7.3 has a bug: set_menubar_receiver() claims the muda OnceCell
-    // before set_tray_icon_receiver(), so tray menu clicks arrive as MudaMenuEvent,
-    // never as TrayMenuEvent.
-    use_muda_event_handler({
-        let home_id = items.home.id().clone();
-        let history_id = items.history.id().clone();
-        let vocab_id = items.vocab.id().clone();
-        let settings_id = items.settings.id().clone();
-        let paste_last_id = items.paste_last.id().clone();
-        let check_updates_id = items.check_updates.id().clone();
-        let quit_id = items.quit.id().clone();
-        let window = window.clone();
-        move |event| {
-            if event.id == quit_id {
-                tracing::info!("Quit menu item clicked — exiting");
-                std::process::exit(0);
-            } else if event.id == home_id {
-                current_page.set(Page::Home);
-                window.set_visible(true);
-                window.set_focus();
-            } else if event.id == history_id {
-                current_page.set(Page::History);
-                window.set_visible(true);
-                window.set_focus();
-            } else if event.id == vocab_id {
-                current_page.set(Page::Vocab);
-                window.set_visible(true);
-                window.set_focus();
-            } else if event.id == settings_id {
-                current_page.set(Page::Settings);
-                window.set_visible(true);
-                window.set_focus();
-            } else if event.id == paste_last_id {
-                let text = last_injection.read().clone();
-                if text != "No injection yet" && !text.is_empty() {
-                    let backends = config.read().injection.backends.clone();
-                    let paste_shortcut = config.read().injection.paste_shortcut.clone();
-                    spawn(async move {
-                        if let Err(e) = crate::injection::inject_text(&text, &backends, &paste_shortcut).await {
-                            tracing::error!("Paste last transcript failed: {e}");
-                        }
-                    });
-                }
-            } else if event.id == check_updates_id {
-                spawn(async move {
-                    update_status.set(UpdateStatus::Checking);
-                    let result = tokio::task::spawn_blocking(update::check_for_update_blocking).await;
-                    match result {
-                        Ok(Ok(Some(info))) => {
-                            update_status.set(UpdateStatus::Available { version: info.version });
-                        }
-                        Ok(Ok(None)) => {
-                            update_status.set(UpdateStatus::Idle);
-                        }
-                        Ok(Err(e)) => {
-                            update_status.set(UpdateStatus::Error(e.to_string()));
-                        }
-                        Err(e) => {
-                            update_status.set(UpdateStatus::Error(format!("Task panicked: {e}")));
-                        }
-                    }
-                });
-                current_page.set(Page::Settings);
-                window.set_visible(true);
-                window.set_focus();
-            }
-        }
-    });
-
-    use_tray_icon_event_handler({
-        let window = window.clone();
-        move |event| {
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } = event
-            {
-                if window.is_visible() {
-                    window.set_visible(false);
-                } else {
-                    window.set_visible(true);
-                    window.set_focus();
-                }
-            }
-        }
-    });
+    // Tray menu clicks + tray icon left-click (toggle window visibility).
+    app_setup::setup_menu_handlers(&items, window.clone(), current_page, last_injection, config, update_status);
+    app_setup::setup_tray_click_handler(window.clone());
 
     let page = *current_page.read();
 
@@ -572,89 +209,3 @@ pub fn App() -> Element {
         }
     }
 }
-
-// VibeTyper-style dark glass capsule: purple-gradient waveform, white
-// tabular timer, fully rounded, hairline ring, soft shadow.
-#[cfg(not(target_os = "linux"))]
-const PILL_CSS: &str = r#"
-*, *::before, *::after { margin:0; padding:0; }
-html, body, #main { background:transparent!important; overflow:hidden;
-  font-family: "DM Mono","Segoe UI Variable","Segoe UI",monospace,system-ui,sans-serif; }
-
-.pill { display:flex; align-items:center; gap:12px; padding:0 18px;
-  height:44px; margin:4px auto; width:fit-content;
-  background:linear-gradient(180deg,#17171a,#101012); border-radius:9999px;
-  border:1px solid rgba(255,255,255,0.14);
-  box-shadow:0 6px 18px rgba(0,0,0,0.45); }
-
-.pill-bars { display:flex; align-items:center; gap:3px; height:26px; }
-.bar { width:3px; border-radius:2px;
-  animation:wave 1.2s ease-in-out infinite; }
-.bar-1{height:8px;  background:#4B0082; animation-delay:0s}
-.bar-2{height:16px; background:#6B21A8; animation-delay:.15s}
-.bar-3{height:24px; background:#8921E4; animation-delay:.3s}
-.bar-4{height:16px; background:#9747F0; animation-delay:.45s}
-.bar-5{height:8px;  background:#A561EC; animation-delay:.6s}
-@keyframes wave { 0%,100%{transform:scaleY(.4)} 50%{transform:scaleY(1)} }
-
-.pill-bars.processing { gap:5px; }
-.pill-bars.processing .bar {
-  width:6px; height:6px; border-radius:50%;
-  animation:bounce-dot 1.2s ease-in-out infinite; }
-.pill-bars.processing .bar-1{animation-delay:0s}
-.pill-bars.processing .bar-2{animation-delay:.15s}
-.pill-bars.processing .bar-3{animation-delay:.3s}
-.pill-bars.processing .bar-4,
-.pill-bars.processing .bar-5{display:none}
-@keyframes bounce-dot {
-  0%,80%,100%{transform:translateY(0)}
-  40%{transform:translateY(-8px)} }
-
-.pill-timer { font-size:13px; font-weight:500; color:#ffffff;
-  font-variant-numeric:tabular-nums; user-select:none;
-  font-family:"DM Mono",monospace; }
-
-.pill-label { font-size:13px; font-weight:500;
-  color:rgba(255,255,255,0.85); letter-spacing:.01em; user-select:none;
-  font-family:"DM Mono",monospace; display:none; }
-"#;
-
-// State transitions for the pill window, injected as a head script so app.rs
-// only ever calls `beamerSetState('recording'|'processing'|'idle')`.
-#[cfg(not(target_os = "linux"))]
-const PILL_JS: &str = r#"
-window.beamerSetState = function(state) {
-  var bars = document.querySelector('.pill-bars');
-  var label = document.querySelector('.pill-label');
-  var timer = document.querySelector('.pill-timer');
-  if (!bars || !label || !timer) return;
-  var stopTimer = function() {
-    if (window.__beamerTimer) { clearInterval(window.__beamerTimer); window.__beamerTimer = null; }
-  };
-  if (state === 'recording') {
-    bars.className = 'pill-bars';
-    label.style.display = 'none';
-    timer.style.display = '';
-    window.__beamerSecs = 0;
-    timer.textContent = '0:00';
-    stopTimer();
-    window.__beamerTimer = setInterval(function() {
-      window.__beamerSecs++;
-      var m = Math.floor(window.__beamerSecs / 60);
-      var s = ('' + (window.__beamerSecs % 60)).padStart(2, '0');
-      var t = document.querySelector('.pill-timer');
-      if (t) t.textContent = m + ':' + s;
-    }, 1000);
-    document.body.style.opacity = '1';
-  } else if (state === 'processing') {
-    bars.className = 'pill-bars processing';
-    label.style.display = '';
-    timer.style.display = 'none';
-    stopTimer();
-    document.body.style.opacity = '1';
-  } else {
-    stopTimer();
-    document.body.style.opacity = '0';
-  }
-};
-"#;
