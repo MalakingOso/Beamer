@@ -25,7 +25,6 @@ pub async fn run(
     mut hotkey_rx: UnboundedReceiver<HotkeyEvent>,
     config: Signal<Config>,
     mut rec_state: Signal<RecordingState>,
-    mut overlay_text: Signal<String>,
     mut last_injection: Signal<String>,
     mut history: Signal<TranscriptionHistory>,
     mut status_log: Signal<StatusLog>,
@@ -39,7 +38,6 @@ pub async fn run(
                 if let Err(e) = handle_recording(
                     &config,
                     &mut rec_state,
-                    &mut overlay_text,
                     &mut last_injection,
                     &mut history,
                     &mut hotkey_rx,
@@ -52,7 +50,6 @@ pub async fn run(
                     show_notification("Beamer", &format!("Recording error: {}", e));
                 }
                 rec_state.set(RecordingState::Idle);
-                overlay_text.set(String::new());
             }
             HotkeyEvent::RecordStop => {}
         }
@@ -64,7 +61,6 @@ pub async fn run(
 async fn handle_recording(
     config: &Signal<Config>,
     rec_state: &mut Signal<RecordingState>,
-    overlay_text: &mut Signal<String>,
     last_injection: &mut Signal<String>,
     history: &mut Signal<TranscriptionHistory>,
     hotkey_rx: &mut UnboundedReceiver<HotkeyEvent>,
@@ -91,7 +87,7 @@ async fn handle_recording(
     if backend == "elevenlabs_batch" || backend == "voxtral_batch" {
         return handle_batch_recording(
             backend, &api_key, language, &backends, &cfg,
-            rec_state, overlay_text, last_injection, history, hotkey_rx, status_log,
+            rec_state, last_injection, history, hotkey_rx, status_log,
         ).await;
     }
 
@@ -125,7 +121,6 @@ async fn handle_recording(
     let mut audio_drop_count: u64 = 0;
 
     rec_state.set(RecordingState::Recording);
-    overlay_text.set("Listening...".to_string());
     log_status(status_log, LogLevel::Info, "Recording started");
     let did_pause = if cfg.recording.pause_media {
         crate::media::pause_media_if_playing()
@@ -189,7 +184,7 @@ async fn handle_recording(
                                                 if !ev.text.trim().is_empty() {
                                                     tracing::info!("[final] {}", ev.text);
                                                     log_status(status_log, LogLevel::Info, format!("[final] {}", ev.text));
-                                                    do_injection(&ev.text, &backends, &paste_shortcut, last_injection, history, overlay_text, status_log).await;
+                                                    do_injection(&ev.text, &backends, &paste_shortcut, last_injection, history, status_log).await;
                                                 }
                                             }
                                         }
@@ -228,13 +223,12 @@ async fn handle_recording(
                             if !ev.text.trim().is_empty() {
                                 tracing::info!("[final] {}", ev.text);
                                 log_status(status_log, LogLevel::Info, format!("[final] {}", ev.text));
-                                do_injection(&ev.text, &backends, &paste_shortcut, last_injection, history, overlay_text, status_log).await;
+                                do_injection(&ev.text, &backends, &paste_shortcut, last_injection, history, status_log).await;
                             }
                         }
                         TranscriptKind::Partial => {
                             if !ev.text.is_empty() {
                                 tracing::debug!("[partial] {}", ev.text);
-                                overlay_text.set(ev.text);
                             }
                         }
                         TranscriptKind::SessionStarted(ref sid) => {
@@ -266,7 +260,6 @@ async fn handle_batch_recording(
     backends: &[String],
     cfg: &Config,
     rec_state: &mut Signal<RecordingState>,
-    overlay_text: &mut Signal<String>,
     last_injection: &mut Signal<String>,
     history: &mut Signal<TranscriptionHistory>,
     hotkey_rx: &mut UnboundedReceiver<HotkeyEvent>,
@@ -283,7 +276,6 @@ async fn handle_batch_recording(
     let (_stream, mut audio_rx) = pipeline.start()?;
 
     rec_state.set(RecordingState::Recording);
-    overlay_text.set("Listening...".to_string());
     log_status(status_log, LogLevel::Info, "Recording started (batch mode)");
     let did_pause = if cfg.recording.pause_media {
         crate::media::pause_media_if_playing()
@@ -365,7 +357,6 @@ async fn handle_batch_recording(
         tracing::warn!("Audio buffer is essentially silence (peak={}). Wrong input device or mic muted?", max_amplitude);
     }
 
-    overlay_text.set("Transcribing...".to_string());
     let audio_secs = pcm_buffer.len() as f64 / (16000.0 * 2.0);
     let backend_label = if backend == "voxtral_batch" { "Voxtral" } else { "ElevenLabs" };
     log_status(
@@ -390,7 +381,7 @@ async fn handle_batch_recording(
                 format!("[batch] {:.1}s round-trip: {}", elapsed.as_secs_f64(), text),
             );
             if !text.trim().is_empty() {
-                do_injection(&text, backends, &cfg.injection.paste_shortcut, last_injection, history, overlay_text, status_log).await;
+                do_injection(&text, backends, &cfg.injection.paste_shortcut, last_injection, history, status_log).await;
             }
         }
         Err(e) => {
@@ -411,11 +402,8 @@ async fn do_injection(
     paste_shortcut: &str,
     last_injection: &mut Signal<String>,
     history: &mut Signal<TranscriptionHistory>,
-    overlay_text: &mut Signal<String>,
     status_log: &mut Signal<StatusLog>,
 ) {
-    overlay_text.set(text.to_string());
-
     match injection::inject_text(text, backends, paste_shortcut).await {
         Ok(result) => {
             let status = format!("{}: {}", result.method, result.target_info);

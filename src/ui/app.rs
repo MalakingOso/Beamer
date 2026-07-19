@@ -137,18 +137,11 @@ pub fn App() -> Element {
 
     let mut current_page = use_signal(|| Page::Home);
     let rec_state = use_signal(RecordingState::default);
-    let overlay_text = use_signal(String::new);
     let last_injection = use_signal(|| "No injection yet".to_string());
     let history = use_signal(TranscriptionHistory::load);
     let config = use_signal(|| Config::load().unwrap_or_default());
     let status_log = use_signal(StatusLog::new);
     let mut update_status = use_signal(UpdateStatus::default);
-
-    // Shared signals — consumed by child components
-    use_context_provider(|| rec_state);
-    use_context_provider(|| overlay_text);
-    use_context_provider(|| last_injection);
-    use_context_provider(|| config);
 
     // Recording pill window — small, transparent, click-through, always-on-top.
     // Linux: the pill is replaced by an AppIndicator tray-icon swap (see below).
@@ -323,7 +316,6 @@ pub fn App() -> Element {
             rx,
             config,
             rec_state,
-            overlay_text,
             last_injection,
             history,
             status_log,
