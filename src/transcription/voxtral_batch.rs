@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use reqwest::multipart;
 
-use super::wav::pcm_to_wav;
+use super::{http_client, wav::pcm_to_wav};
 
 /// Minimum similarity ratio (0.0–1.0) between raw and corrected text.
 /// Below this threshold the LLM likely hallucinated a conversational reply
@@ -67,7 +67,7 @@ async fn correct_with_vocab(api_key: &str, text: &str, vocab: &[String]) -> Stri
         "temperature": 0.0
     });
 
-    let client = reqwest::Client::new();
+    let client = http_client();
     match client
         .post("https://api.mistral.ai/v1/chat/completions")
         .header("Authorization", format!("Bearer {}", api_key))
@@ -122,7 +122,7 @@ async fn correct_with_vocab(api_key: &str, text: &str, vocab: &[String]) -> Stri
 pub async fn transcribe_batch(api_key: &str, audio_pcm: Vec<u8>, vocab: &[String]) -> Result<String> {
     let wav = pcm_to_wav(&audio_pcm);
 
-    let client = reqwest::Client::new();
+    let client = http_client();
     let mut backoff = 1u64;
 
     for attempt in 0..4 {

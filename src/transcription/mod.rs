@@ -9,7 +9,15 @@ pub use elevenlabs_realtime::start_realtime_session as start_elevenlabs_session;
 pub use voxtral_batch::transcribe_batch as transcribe_voxtral_batch;
 pub use voxtral_realtime::start_realtime_session as start_voxtral_session;
 
+use std::sync::OnceLock;
 use tokio::sync::mpsc;
+
+/// Lazy-initialized shared HTTP client for all transcription backends.
+/// Avoids rebuilding connection pools and TLS contexts on every request.
+pub(crate) fn http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new)
+}
 
 /// Discriminant for transcript events. Both backends normalize their
 /// wire-format messages into this shared enum.
