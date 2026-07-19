@@ -329,21 +329,19 @@ async fn handle_batch_recording(
 
     // Check audio levels — if the buffer is all silence, the mic may not be
     // capturing or the wrong device is selected
-    let max_amplitude = pcm_buffer
-        .chunks_exact(2)
-        .map(|c| i16::from_le_bytes([c[0], c[1]]).unsigned_abs())
-        .max()
-        .unwrap_or(0);
-    let rms = {
-        let sum: f64 = pcm_buffer
-            .chunks_exact(2)
-            .map(|c| {
-                let s = i16::from_le_bytes([c[0], c[1]]) as f64;
-                s * s
-            })
-            .sum();
+    let (max_amplitude, rms) = {
+        let mut peak: u16 = 0;
+        let mut sum_sq: f64 = 0.0;
         let count = pcm_buffer.len() / 2;
-        (sum / count as f64).sqrt()
+
+        for chunk in pcm_buffer.chunks_exact(2) {
+            let s_i16 = i16::from_le_bytes([chunk[0], chunk[1]]);
+            peak = peak.max(s_i16.unsigned_abs());
+            let s = s_i16 as f64;
+            sum_sq += s * s;
+        }
+
+        (peak, (sum_sq / count as f64).sqrt())
     };
     tracing::info!("Audio stats: {:.1}s, peak={}, RMS={:.0}", pcm_buffer.len() as f64 / 32000.0, max_amplitude, rms);
     if max_amplitude < 100 {
