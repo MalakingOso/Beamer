@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use anyhow::{Context, Result};
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
@@ -6,6 +8,23 @@ use tokio_tungstenite::tungstenite;
 use tungstenite::Message;
 
 use super::{RealtimeSession, TranscriptEvent, TranscriptKind};
+
+/// Build an `input_audio_chunk` frame into `out`, reusing its allocation
+/// instead of building a fresh `serde_json::Value` + `String` per frame.
+/// `commit` should be `true` only for the end-of-audio convention (an empty
+/// chunk from the mic pipeline, which triggers a manual commit with an
+/// empty `audio_base_64`).
+///
+/// Base64 output only ever contains `[A-Za-z0-9+/=]`, none of which require
+/// JSON string escaping, so `b64` is safe to write directly into the
+/// manually built JSON text below.
+fn build_audio_chunk_frame(b64: &str, commit: bool, out: &mut String) {
+    out.clear();
+    let _ = write!(
+        out,
+        r#"{{"message_type":"input_audio_chunk","audio_base_64":"{b64}","commit":{commit},"sample_rate":16000}}"#
+    );
+}
 
 /// Open a WebSocket to the ElevenLabs Scribe v2 realtime STT endpoint.
 /// Audio is base64-encoded as JSON frames; transcripts arrive as JSON messages.
@@ -49,25 +68,19 @@ pub async fn start_realtime_session(
     // Audio sender: encodes PCM → base64 JSON and streams to the WebSocket
     tokio::spawn(async move {
         let engine = base64::engine::general_purpose::STANDARD;
+        let mut b64_buf = String::new();
+        let mut frame_buf = String::new();
         while let Some(chunk) = audio_rx.recv().await {
-            let msg = if chunk.is_empty() {
+            if chunk.is_empty() {
                 // Convention: empty Vec triggers manual commit
-                serde_json::json!({
-                    "message_type": "input_audio_chunk",
-                    "audio_base_64": "",
-                    "commit": true,
-                    "sample_rate": 16000
-                })
+                build_audio_chunk_frame("", true, &mut frame_buf);
             } else {
-                serde_json::json!({
-                    "message_type": "input_audio_chunk",
-                    "audio_base_64": engine.encode(&chunk),
-                    "commit": false,
-                    "sample_rate": 16000
-                })
-            };
+                b64_buf.clear();
+                engine.encode_string(&chunk, &mut b64_buf);
+                build_audio_chunk_frame(&b64_buf, false, &mut frame_buf);
+            }
             if write
-                .send(Message::Text(msg.to_string().into()))
+                .send(Message::Text(frame_buf.as_str().into()))
                 .await
                 .is_err()
             {
@@ -135,4 +148,67 @@ pub async fn start_realtime_session(
         audio_tx,
         transcript_rx,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The manually built `input_audio_chunk` frame must be structurally
+    /// identical to what the old `json!{...}` + `.to_string()` construction
+    /// produced, for a representative non-empty chunk.
+    #[test]
+    fn audio_chunk_frame_matches_json_macro_for_sample_chunk() {
+        let chunk: Vec<u8> = vec![0, 1, 2, 3, 250, 251, 252, 253, 254, 255];
+        let engine = base64::engine::general_purpose::STANDARD;
+        let b64 = engine.encode(&chunk);
+
+        let mut out = String::new();
+        build_audio_chunk_frame(&b64, false, &mut out);
+        let actual: serde_json::Value = serde_json::from_str(&out).expect("valid json");
+
+        let expected = serde_json::json!({
+            "message_type": "input_audio_chunk",
+            "audio_base_64": engine.encode(&chunk),
+            "commit": false,
+            "sample_rate": 16000
+        });
+
+        assert_eq!(actual, expected);
+    }
+
+    /// The end-of-audio / manual-commit frame (empty chunk convention) must
+    /// remain byte-semantically identical to the old `json!{...}` construction.
+    #[test]
+    fn audio_chunk_frame_matches_json_macro_for_empty_chunk() {
+        let mut out = String::new();
+        build_audio_chunk_frame("", true, &mut out);
+        let actual: serde_json::Value = serde_json::from_str(&out).expect("valid json");
+
+        let expected = serde_json::json!({
+            "message_type": "input_audio_chunk",
+            "audio_base_64": "",
+            "commit": true,
+            "sample_rate": 16000
+        });
+
+        assert_eq!(actual, expected);
+    }
+
+    /// The reused buffer must not leak stale content between calls.
+    #[test]
+    fn build_audio_chunk_frame_clears_stale_buffer_contents() {
+        let mut out = String::from("leftover garbage from a previous frame");
+        build_audio_chunk_frame("QQ==", false, &mut out);
+        let actual: serde_json::Value = serde_json::from_str(&out).expect("valid json");
+        assert_eq!(
+            actual,
+            serde_json::json!({
+                "message_type": "input_audio_chunk",
+                "audio_base_64": "QQ==",
+                "commit": false,
+                "sample_rate": 16000
+            })
+        );
+    }
 }
