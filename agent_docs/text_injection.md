@@ -170,7 +170,7 @@ D-Bus interface on `org.gnome.Shell` / `/app/beamer/FocusProvider`:
 | `GetVersion() -> u` | capability probe (returns 2) |
 | `TypeText(s) -> b` | type Unicode text via virtual keyboard |
 | `SendPasteChord(b) -> b` | Ctrl(+Shift)+V for the clipboard backend |
-| `ShowIndicator(s)` / `UpdateLevel(d)` / `HideIndicator()` | shell-native recording pill (waveform + timer, bottom-center, click-through top chrome) |
+| `ShowIndicator(s)` / `UpdateLevel(d)` / `HideIndicator()` | shell-native recording pill (Deploy Purple waveform, bottom-center of the focused window's monitor, click-through) |
 
 Rust clients: `src/injection/focus.rs` (focus), `src/injection/gnome.rs`
 (typing + chord), `src/ui/shell_indicator.rs` (pill, dedicated worker

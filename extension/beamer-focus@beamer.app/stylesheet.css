@@ -1,14 +1,16 @@
-/* Beamer recording pill — VibeTyper-style dark glass capsule. */
+/* Beamer recording pill — Deploy Purple: solid light surface, structural
+   2px border, hard-offset shadow, sharp 8px radius. Colors mirror the app's
+   design tokens (agent_docs/design_system.md); the surface is the solid
+   equivalent of --bg-surface since shell overlays have no acrylic. */
 
 .beamer-pill {
-  background-color: rgba(16, 16, 18, 0.92);
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 24px;
+  background-color: #fbfbfd;
+  border: 2px solid rgba(75, 0, 130, 0.25);
+  border-radius: 8px;
   min-height: 48px;
-  min-width: 160px;
   padding: 0 18px;
   spacing: 12px;
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  box-shadow: 2px 4px 0 0 rgba(75, 0, 130, 0.15);
 }
 
 .beamer-pill-bars {
@@ -16,14 +18,8 @@
   min-height: 26px;
 }
 
-.beamer-pill-timer {
-  color: #ffffff;
-  font-family: monospace;
-  font-size: 13px;
-  font-feature-settings: "tnum";
-}
-
 .beamer-pill-status {
-  color: rgba(255, 255, 255, 0.85);
+  color: #0f152a;
+  font-family: "DM Mono", monospace;
   font-size: 13px;
 }

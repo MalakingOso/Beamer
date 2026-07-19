@@ -3,9 +3,11 @@ import GLib from 'gi://GLib';
 import St from 'gi://St';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
-// VibeTyper-style recording pill: dark glass capsule at bottom-center of the
-// primary monitor with a purple-gradient waveform, an elapsed timer while
-// recording, and a "Transcribing…" label while processing. Added directly to
+// Recording pill in the app's Deploy Purple design language: light surface,
+// structural border, hard-offset shadow, at bottom-center of the active
+// monitor (the focused window's — where dictated text lands), with a
+// purple-gradient waveform while recording and a "Transcribing…" label while
+// processing. Added directly to
 // uiGroup (layout.js documents this as the supported way to place actors
 // above all windows) rather than via addTopChrome: GNOME 50 removed the
 // affectsInputRegion chrome param, and an untracked non-reactive actor is
@@ -18,8 +20,8 @@ const BAR_MIN_H = 4;
 const BAR_MAX_H = 26;
 const FRAME_MS = 33; // ~30 fps
 const BOTTOM_MARGIN = 32;
-const COLOR_FROM = [0x4b, 0x00, 0x82]; // Beamer deploy purple
-const COLOR_TO = [0xa5, 0x61, 0xec]; // bright accent
+const COLOR_FROM = [0x4b, 0x00, 0x82]; // --accent
+const COLOR_TO = [0x5c, 0x1a, 0x9e]; // --accent-hover
 
 export class BeamerIndicator {
     constructor() {
@@ -49,11 +51,6 @@ export class BeamerIndicator {
             this._barsBox.add_child(bar);
         }
 
-        this._timerLabel = new St.Label({
-            text: '0:00',
-            style_class: 'beamer-pill-timer',
-            y_align: Clutter.ActorAlign.CENTER,
-        });
         this._statusLabel = new St.Label({
             text: 'Transcribing…',
             style_class: 'beamer-pill-status',
@@ -62,7 +59,6 @@ export class BeamerIndicator {
         });
 
         this._pill.add_child(this._barsBox);
-        this._pill.add_child(this._timerLabel);
         this._pill.add_child(this._statusLabel);
         Main.layoutManager.uiGroup.add_child(this._pill);
 
@@ -70,9 +66,7 @@ export class BeamerIndicator {
         this._level = 0;
         this._smoothLevel = 0;
         this._phase = 0;
-        this._seconds = 0;
         this._animSource = 0;
-        this._timerSource = 0;
 
         this._monitorsChangedId = Main.layoutManager.connect(
             'monitors-changed', () => this._reposition());
@@ -84,26 +78,7 @@ export class BeamerIndicator {
         const wasVisible = this._pill.visible && this._state !== null;
         this._state = state;
 
-        if (state === 'recording') {
-            this._seconds = 0;
-            this._timerLabel.text = '0:00';
-            this._timerLabel.visible = true;
-            this._statusLabel.visible = false;
-            if (!this._timerSource) {
-                this._timerSource = GLib.timeout_add_seconds(
-                    GLib.PRIORITY_DEFAULT, 1, () => {
-                        this._seconds++;
-                        const m = Math.floor(this._seconds / 60);
-                        const s = `${this._seconds % 60}`.padStart(2, '0');
-                        this._timerLabel.text = `${m}:${s}`;
-                        return GLib.SOURCE_CONTINUE;
-                    });
-            }
-        } else {
-            this._stopTimer();
-            this._timerLabel.visible = false;
-            this._statusLabel.visible = true;
-        }
+        this._statusLabel.visible = state !== 'recording';
 
         if (!this._animSource) {
             this._animSource = GLib.timeout_add(
@@ -137,7 +112,6 @@ export class BeamerIndicator {
     hide() {
         if (!this._pill.visible) return;
         this._state = null;
-        this._stopTimer();
         this._pill.ease({
             opacity: 0,
             translation_y: 20,
@@ -153,7 +127,6 @@ export class BeamerIndicator {
     }
 
     destroy() {
-        this._stopTimer();
         this._stopAnimation();
         if (this._monitorsChangedId) {
             Main.layoutManager.disconnect(this._monitorsChangedId);
@@ -166,13 +139,6 @@ export class BeamerIndicator {
         Main.layoutManager.uiGroup.remove_child(this._pill);
         this._pill.destroy();
         this._pill = null;
-    }
-
-    _stopTimer() {
-        if (this._timerSource) {
-            GLib.source_remove(this._timerSource);
-            this._timerSource = 0;
-        }
     }
 
     _stopAnimation() {
@@ -200,7 +166,14 @@ export class BeamerIndicator {
     }
 
     _reposition() {
-        const mon = Main.layoutManager.primaryMonitor;
+        // Follow the focused window's monitor — that's where dictated text
+        // lands. currentMonitor (pointer) covers the no-focus case;
+        // get_monitor() can return -1 for unmanaged windows, which indexes
+        // to undefined and falls through.
+        const lm = Main.layoutManager;
+        const focusWin = global.display.focus_window;
+        const mon = (focusWin && lm.monitors[focusWin.get_monitor()]) ??
+            lm.currentMonitor ?? lm.primaryMonitor;
         if (!mon || !this._pill) return;
         this._pill.set_position(
             mon.x + Math.round((mon.width - this._pill.width) / 2),

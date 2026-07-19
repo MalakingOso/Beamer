@@ -5,7 +5,7 @@ import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
 import { BeamerIndicator } from './indicator.js';
 
-const HELPER_VERSION = 2;
+const HELPER_VERSION = 3;
 
 // Typing pace: batches keep long transcripts fast (~500 chars/s) while giving
 // slow event loops (Electron apps) time to drain between batches.
