@@ -46,21 +46,38 @@ pub trait InjectionBackend: Send + Sync {
 /// press keys.
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn sanitize_for_typing(text: &str) -> String {
-    let transliterated = text
-        .replace('\u{2018}', "'") // left single quote
-        .replace('\u{2019}', "'") // right single quote
-        .replace('\u{201C}', "\"") // left double quote
-        .replace('\u{201D}', "\"") // right double quote
-        .replace('\u{2013}', "-") // en dash
-        .replace('\u{2014}', "--") // em dash
-        .replace('\u{2026}', "...") // ellipsis
-        .replace('\u{00A0}', " "); // non-breaking space
+    let mut out = String::with_capacity(text.len());
+    // Set when the previous char emitted was a '\r' mapping, so a following
+    // '\n' (i.e. a "\r\n" pair) contributes no extra space of its own.
+    let mut last_was_cr = false;
 
-    transliterated
-        .replace("\r\n", " ")
-        .replace(['\r', '\n', '\t'], " ")
-        .trim_end()
-        .to_string()
+    for ch in text.chars() {
+        if last_was_cr {
+            last_was_cr = false;
+            if ch == '\n' {
+                continue;
+            }
+        }
+
+        match ch {
+            '\u{2018}' | '\u{2019}' => out.push('\''), // smart single quotes
+            '\u{201C}' | '\u{201D}' => out.push('"'),  // smart double quotes
+            '\u{2013}' => out.push('-'),               // en dash
+            '\u{2014}' => out.push_str("--"),          // em dash
+            '\u{2026}' => out.push_str("..."),         // ellipsis
+            '\u{00A0}' => out.push(' '),               // non-breaking space
+            '\r' => {
+                out.push(' ');
+                last_was_cr = true;
+            }
+            '\n' | '\t' => out.push(' '),
+            other => out.push(other),
+        }
+    }
+
+    let trimmed_len = out.trim_end().len();
+    out.truncate(trimmed_len);
+    out
 }
 
 #[cfg(all(test, not(target_os = "windows")))]
