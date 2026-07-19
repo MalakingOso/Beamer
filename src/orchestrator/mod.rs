@@ -11,6 +11,9 @@ use crate::transcription::{self, TranscriptKind};
 use crate::ui::history::TranscriptionHistory;
 use crate::ui::status_log::{log_status, LogLevel, StatusLog};
 
+mod notify;
+use notify::{clipboard_only_fallback, show_notification};
+
 /// Recording lifecycle state, drives both the pill overlay and home-page status dot.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum RecordingState {
@@ -451,61 +454,4 @@ async fn do_injection(
     }
 
     history.write().append(text.to_string());
-}
-
-/// Last-resort fallback: just put text on clipboard without sending Ctrl+V.
-/// User pastes manually. This avoids all compositor/keyboard protocol issues.
-async fn clipboard_only_fallback(text: &str) -> anyhow::Result<()> {
-    let text = text.to_string();
-    tokio::task::spawn_blocking(move || {
-        let mut clipboard = arboard::Clipboard::new()?;
-        clipboard.set_text(&text)?;
-
-        // On Wayland, verify with wl-paste
-        #[cfg(not(target_os = "windows"))]
-        if std::env::var("WAYLAND_DISPLAY").is_ok() {
-            // Also try wl-copy as backup
-            if let Ok(mut child) = std::process::Command::new("wl-copy")
-                .arg("--type")
-                .arg("text/plain")
-                .stdin(std::process::Stdio::piped())
-                .spawn()
-            {
-                if let Some(mut stdin) = child.stdin.take() {
-                    use std::io::Write;
-                    let _ = stdin.write_all(text.as_bytes());
-                }
-            }
-        }
-
-        Ok(())
-    })
-    .await?
-}
-
-/// Show a desktop notification. Falls back to tracing-only if the platform
-/// notification mechanism is unavailable.
-fn show_notification(title: &str, message: &str) {
-    tracing::info!("Notification: {} - {}", title, message);
-    #[cfg(target_os = "windows")]
-    {
-        if let Err(e) = winrt_notification::Toast::new(winrt_notification::Toast::POWERSHELL_APP_ID)
-            .title(title)
-            .text1(message)
-            .show()
-        {
-            tracing::warn!("Failed to show notification: {}", e);
-        }
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        if let Err(e) = notify_rust::Notification::new()
-            .appname("Beamer")
-            .summary(title)
-            .body(message)
-            .show()
-        {
-            tracing::warn!("Failed to show notification: {}", e);
-        }
-    }
 }
