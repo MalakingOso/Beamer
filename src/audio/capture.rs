@@ -139,7 +139,7 @@ fn resample_linear(
         state.accumulator += ratio;
         while state.accumulator >= 1.0 {
             state.accumulator -= 1.0;
-            let t = state.accumulator as f32;
+            let t = (state.accumulator / ratio) as f32;
             let interpolated = state.last_sample * t + sample * (1.0 - t);
             output.push(interpolated);
         }
@@ -159,12 +159,17 @@ mod tests {
     }
 
     /// At 48000Hz -> 16000Hz the ratio is exactly 1/3, so the accumulator
-    /// crosses 1.0 with a ~0 fractional remainder every time. This makes the
-    /// "interpolation" degenerate into picking every 3rd input sample
-    /// (a known bug — later tasks fix this). This test pins that CURRENT
-    /// behavior so a future refactor doesn't silently change it.
+    /// crosses 1.0 with a ~0 fractional remainder every time (the overshoot
+    /// after subtracting 1.0 is exactly 0.0 in f64). With overshoot == 0,
+    /// the correctly-weighted interpolation (overshoot / ratio) is also
+    /// exactly 0, so the output correctly picks the current sample with no
+    /// blending — the sample boundary lands exactly on an input sample, so
+    /// there is nothing to interpolate between. This is the correct result
+    /// for this integer-ratio edge case, not a bug: it pins the same values
+    /// as before the /ratio fix, verified analytically (see
+    /// task-TB.4-report.md for the accumulator walk-through).
     #[test]
-    fn resample_48k_to_16k_is_pure_decimation() {
+    fn resample_48k_to_16k_exact_ratio_picks_current_sample() {
         let ratio = 16000.0 / 48000.0;
         let input: Vec<f32> = (0..9).map(|i| i as f32).collect();
         let mut state = new_state();
@@ -176,9 +181,12 @@ mod tests {
     }
 
     /// 44100Hz -> 16000Hz golden vector, captured from the function's actual
-    /// current output (methodology: ran this test with a placeholder
-    /// expectation, printed the real output, then pasted it back in as the
-    /// pinned golden value).
+    /// output after the /ratio interpolation-weight fix (methodology: ran
+    /// this test with a placeholder expectation, printed the real output,
+    /// then pasted it back in as the pinned golden value). Each output was
+    /// independently verified to be a properly weighted blend of its two
+    /// adjacent input samples — see task-TB.4-report.md for the
+    /// hand-derivation and spot checks.
     #[test]
     fn resample_44100_to_16000_ramp_golden() {
         let ratio = 16000.0 / 44100.0;
@@ -188,15 +196,15 @@ mod tests {
 
         resample_linear(&input, ratio, &mut state, &mut output);
 
-        // Captured from actual output on 2026-07-18 (see task-T0.1-report.md
-        // for the capture methodology).
+        // Captured from actual output on 2026-07-18, after the /ratio fix
+        // (see task-TB.4-report.md for the capture methodology).
         let expected: Vec<f32> = vec![
-            0.019115647, 0.048231293, 0.077346936, 0.10646258, 0.12920634, 0.158322,
-            0.18743765, 0.21655329, 0.23929705, 0.2684127, 0.29752836, 0.326644,
-            0.34938776, 0.37850338, 0.40761906, 0.4367347, 0.45947847, 0.4885941,
-            0.51770973, 0.5468254, 0.5695692, 0.59868485, 0.62780046, 0.6569161,
-            0.67965984, 0.70877546, 0.73789114, 0.76700675, 0.78975064, 0.8188662,
-            0.8479819, 0.8770975, 0.89984125, 0.9289569, 0.95807254, 0.9871882,
+            0.0175625, 0.045125, 0.0726875, 0.10025, 0.1278125, 0.155375, 0.1829375,
+            0.2105, 0.2380625, 0.265625, 0.2931875, 0.32075, 0.34831253, 0.375875,
+            0.4034375, 0.431, 0.4585625, 0.486125, 0.5136875, 0.54125005, 0.5688125,
+            0.596375, 0.6239375, 0.6515, 0.6790625, 0.706625, 0.7341875, 0.76175,
+            0.7893125, 0.816875, 0.8444375, 0.87200004, 0.8995625, 0.927125, 0.9546875,
+            0.98225,
         ];
         assert_eq!(output, expected);
     }
