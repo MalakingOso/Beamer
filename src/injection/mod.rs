@@ -147,14 +147,19 @@ mod sanitize_tests {
 
 // ─── Registry ─────────────────────────────────────────────────────────────────
 
-/// All backends available on this platform.
-pub fn all_backends() -> Vec<Box<dyn InjectionBackend>> {
+/// All backends available on this platform. `paste_shortcut` is the
+/// already-loaded `injection.paste_shortcut` config value, threaded into the
+/// clipboard backend so it never re-reads config.toml per paste.
+pub fn all_backends(paste_shortcut: &str) -> Vec<Box<dyn InjectionBackend>> {
     let mut backends: Vec<Box<dyn InjectionBackend>> = Vec::new();
+    // Referenced unconditionally so the parameter isn't "unused" on the
+    // platform whose branch below doesn't read it.
+    let _ = paste_shortcut;
 
     #[cfg(target_os = "windows")]
     {
         backends.push(Box::new(sendinput::SendInputBackend));
-        backends.push(Box::new(clipboard::ClipboardBackend));
+        backends.push(Box::new(clipboard::ClipboardBackend {}));
         backends.push(Box::new(uia::UiaBackend));
     }
 
@@ -163,16 +168,19 @@ pub fn all_backends() -> Vec<Box<dyn InjectionBackend>> {
         backends.push(Box::new(gnome::GnomeBackend));
         backends.push(Box::new(wtype::WtypeBackend));
         backends.push(Box::new(ydotool::YdotoolBackend));
-        backends.push(Box::new(clipboard::ClipboardBackend));
+        backends.push(Box::new(clipboard::ClipboardBackend {
+            paste_shortcut: paste_shortcut.to_string(),
+        }));
     }
 
     backends
 }
 
-/// Check which backends are available (for Settings UI display).
-/// Returns (name, display_name, availability_result) for each backend.
+/// Check which backends are available (for Settings UI display). Doesn't
+/// invoke `inject()`, so the paste shortcut value passed here is irrelevant —
+/// "auto" is a harmless placeholder.
 pub fn check_availability() -> Vec<(&'static str, &'static str, Result<(), String>)> {
-    all_backends()
+    all_backends("auto")
         .iter()
         .map(|b| (b.name(), b.display_name(), b.available()))
         .collect()
@@ -198,15 +206,18 @@ pub fn default_backend_names() -> Vec<String> {
 // ─── Dispatch ─────────────────────────────────────────────────────────────────
 
 /// Inject text into the focused window using the configured backend chain.
-pub async fn inject_text(text: &str, backends: &[String]) -> Result<InjectionResult> {
+/// `paste_shortcut` is the caller's already-loaded `injection.paste_shortcut`
+/// config value (passed down instead of reloading config.toml per call).
+pub async fn inject_text(text: &str, backends: &[String], paste_shortcut: &str) -> Result<InjectionResult> {
     let text = text.to_string();
     let backends = backends.to_vec();
+    let paste_shortcut = paste_shortcut.to_string();
 
-    tokio::task::spawn_blocking(move || inject_text_blocking(&text, &backends)).await?
+    tokio::task::spawn_blocking(move || inject_text_blocking(&text, &backends, &paste_shortcut)).await?
 }
 
-fn inject_text_blocking(text: &str, backend_names: &[String]) -> Result<InjectionResult> {
-    let all = all_backends();
+fn inject_text_blocking(text: &str, backend_names: &[String], paste_shortcut: &str) -> Result<InjectionResult> {
+    let all = all_backends(paste_shortcut);
     let mut errors = Vec::new();
 
     for name in backend_names {

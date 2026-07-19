@@ -421,8 +421,9 @@ pub fn App() -> Element {
                 let text = last_injection.read().clone();
                 if text != "No injection yet" && !text.is_empty() {
                     let backends = config.read().injection.backends.clone();
+                    let paste_shortcut = config.read().injection.paste_shortcut.clone();
                     spawn(async move {
-                        if let Err(e) = crate::injection::inject_text(&text, &backends).await {
+                        if let Err(e) = crate::injection::inject_text(&text, &backends, &paste_shortcut).await {
                             tracing::error!("Paste last transcript failed: {e}");
                         }
                     });

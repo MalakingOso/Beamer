@@ -74,6 +74,7 @@ async fn handle_recording(
     let backend = &cfg.transcription.backend;
     let language = &cfg.transcription.language;
     let backends = cfg.injection.backends.clone();
+    let paste_shortcut = cfg.injection.paste_shortcut.clone();
 
     let (key_name, display_name) = match backend.as_str() {
         "voxtral" | "voxtral_batch" => ("mistral_api_key", "Voxtral"),
@@ -175,7 +176,7 @@ async fn handle_recording(
                                                 if !ev.text.trim().is_empty() {
                                                     tracing::info!("[final] {}", ev.text);
                                                     log_status(status_log, LogLevel::Info, format!("[final] {}", ev.text));
-                                                    do_injection(&ev.text, &backends, last_injection, history, overlay_text, status_log).await;
+                                                    do_injection(&ev.text, &backends, &paste_shortcut, last_injection, history, overlay_text, status_log).await;
                                                 }
                                             }
                                         }
@@ -212,7 +213,7 @@ async fn handle_recording(
                             if !ev.text.trim().is_empty() {
                                 tracing::info!("[final] {}", ev.text);
                                 log_status(status_log, LogLevel::Info, format!("[final] {}", ev.text));
-                                do_injection(&ev.text, &backends, last_injection, history, overlay_text, status_log).await;
+                                do_injection(&ev.text, &backends, &paste_shortcut, last_injection, history, overlay_text, status_log).await;
                             }
                         }
                         TranscriptKind::Partial => {
@@ -376,7 +377,7 @@ async fn handle_batch_recording(
                 format!("[batch] {:.1}s round-trip: {}", elapsed.as_secs_f64(), text),
             );
             if !text.trim().is_empty() {
-                do_injection(&text, backends, last_injection, history, overlay_text, status_log).await;
+                do_injection(&text, backends, &cfg.injection.paste_shortcut, last_injection, history, overlay_text, status_log).await;
             }
         }
         Err(e) => {
@@ -394,6 +395,7 @@ async fn handle_batch_recording(
 async fn do_injection(
     text: &str,
     backends: &[String],
+    paste_shortcut: &str,
     last_injection: &mut Signal<String>,
     history: &mut Signal<TranscriptionHistory>,
     overlay_text: &mut Signal<String>,
@@ -401,7 +403,7 @@ async fn do_injection(
 ) {
     overlay_text.set(text.to_string());
 
-    match injection::inject_text(text, backends).await {
+    match injection::inject_text(text, backends, paste_shortcut).await {
         Ok(result) => {
             let status = format!("{}: {}", result.method, result.target_info);
             tracing::info!("Injected via {}", status);

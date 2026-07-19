@@ -2,7 +2,13 @@ use super::{InjectionBackend, InjectionResult};
 use anyhow::Result;
 use arboard::Clipboard;
 
-pub struct ClipboardBackend;
+pub struct ClipboardBackend {
+    /// Configured paste shortcut ("auto" | "ctrl_v" | "ctrl_shift_v"), passed
+    /// in when backends are constructed so the paste-time hot path never
+    /// touches disk. Unused on Windows (which always sends plain Ctrl+V).
+    #[cfg(not(target_os = "windows"))]
+    pub paste_shortcut: String,
+}
 
 impl InjectionBackend for ClipboardBackend {
     fn name(&self) -> &'static str {
@@ -19,7 +25,10 @@ impl InjectionBackend for ClipboardBackend {
     }
 
     fn inject(&self, text: &str) -> Result<InjectionResult> {
+        #[cfg(target_os = "windows")]
         let auto_pasted = inject_via_clipboard(text)?;
+        #[cfg(not(target_os = "windows"))]
+        let auto_pasted = inject_via_clipboard(text, &self.paste_shortcut)?;
 
         #[cfg(target_os = "windows")]
         let target_info = "via Ctrl+V paste".to_string();
@@ -67,7 +76,7 @@ fn inject_via_clipboard(text: &str) -> Result<bool> {
 /// so, and the previous clipboard is deliberately NOT restored (that would
 /// clobber the transcript before the user could paste it).
 #[cfg(not(target_os = "windows"))]
-fn inject_via_clipboard(text: &str) -> Result<Option<&'static str>> {
+fn inject_via_clipboard(text: &str, paste_shortcut: &str) -> Result<Option<&'static str>> {
     let mut clipboard = Clipboard::new()?;
     let saved = clipboard.get_text().ok();
 
@@ -79,7 +88,7 @@ fn inject_via_clipboard(text: &str) -> Result<Option<&'static str>> {
     // espanso's 300 ms; Handy's 60 ms is known-flaky under load.
     std::thread::sleep(std::time::Duration::from_millis(150));
 
-    if let Some(mechanism) = try_paste_chord() {
+    if let Some(mechanism) = try_paste_chord(paste_shortcut) {
         std::thread::sleep(std::time::Duration::from_millis(500));
         // Only restore the previous clipboard once the target app has had
         // time to read the offer — restoring too early pastes the OLD content.
@@ -299,8 +308,8 @@ fn make_key_input(
 /// `BEAMER_PASTE_SHORTCUT` env var / focus-helper auto-detection). Returns
 /// the name of the mechanism that sent the chord, or `None` if all failed.
 #[cfg(not(target_os = "windows"))]
-fn try_paste_chord() -> Option<&'static str> {
-    let use_shift = resolve_use_shift_v();
+fn try_paste_chord(paste_shortcut: &str) -> Option<&'static str> {
+    let use_shift = resolve_use_shift_v(paste_shortcut);
     if crate::injection::gnome::send_paste_chord(use_shift) {
         tracing::info!("Clipboard: paste chord sent via GNOME helper");
         return Some("GNOME helper");
@@ -413,20 +422,26 @@ fn choose_use_shift_v(setting: &str, focused: Option<&str>) -> bool {
 
 /// Decide which paste keystroke to send. Precedence:
 ///   1. BEAMER_PASTE_SHORTCUT env var ("ctrl_v" | "ctrl_shift_v" | "auto")
-///   2. injection.paste_shortcut in config.toml
+///   2. `configured` — the caller's already-loaded `injection.paste_shortcut`
+///      (the orchestrator reads config once per session and passes it down;
+///      this function no longer touches disk on every paste)
 ///   3. Default: "auto" — queries the Beamer GNOME focus helper extension
 ///      (if installed and enabled) to pick per-app. Falls back to Ctrl+Shift+V
 ///      when the extension is absent or the call fails.
+///
+/// Note: because `configured` is loaded once at session start, hand-editing
+/// config.toml's `paste_shortcut` mid-session has no effect until restart.
 #[cfg(not(target_os = "windows"))]
-fn resolve_use_shift_v() -> bool {
+fn resolve_use_shift_v(configured: &str) -> bool {
     let setting = std::env::var("BEAMER_PASTE_SHORTCUT")
         .ok()
-        .or_else(|| {
-            crate::config::Config::load()
-                .ok()
-                .map(|c| c.injection.paste_shortcut)
-        })
-        .unwrap_or_else(|| "auto".into());
+        .unwrap_or_else(|| {
+            if configured.is_empty() {
+                "auto".to_string()
+            } else {
+                configured.to_string()
+            }
+        });
 
     let focused = crate::injection::focus::focused_app_id();
     let use_shift = choose_use_shift_v(&setting, focused.as_deref());
