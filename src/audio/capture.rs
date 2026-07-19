@@ -3,7 +3,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleRate, Stream, StreamConfig};
 use tokio::sync::mpsc;
 
-use super::{try_send_reserving, warn_channel_full};
+use super::{try_send_reserving, warn_channel_full, SendOutcome};
 
 /// Bounded capacity for the raw-sample channel from the cpal callback.
 ///
@@ -133,13 +133,19 @@ impl AudioCapture {
                 };
 
                 // Never blocks/spins: `try_send_reserving` is a `try_send`
-                // gated on a cheap atomic capacity() read. On a stalled
-                // consumer this drops the chunk instead of growing memory
-                // without bound, and leaves `SENTINEL_RESERVE` slots
+                // gated on cheap atomic capacity()/is_closed() reads. On a
+                // stalled consumer this drops the chunk instead of growing
+                // memory without bound, and leaves `SENTINEL_RESERVE` slots
                 // untouched so the error-callback sentinel below can never
-                // be starved out by ordinary audio data.
-                if !try_send_reserving(&tx, SENTINEL_RESERVE, out.to_vec()) {
-                    warn_channel_full(&mut dropped_chunks, "Audio sample");
+                // be starved out by ordinary audio data. A `Closed` result
+                // (consumer torn down — normal teardown) is dropped
+                // silently, matching pre-branch behavior; only a genuinely
+                // `Full` channel (consumer alive but stalled) is worth
+                // warning about.
+                match try_send_reserving(&tx, SENTINEL_RESERVE, out.to_vec()) {
+                    SendOutcome::Sent => {}
+                    SendOutcome::Full => warn_channel_full(&mut dropped_chunks, "Audio sample"),
+                    SendOutcome::Closed => {}
                 }
             },
             move |err| {
@@ -147,15 +153,24 @@ impl AudioCapture {
                 // Sentinel convention: an empty Vec tells the consumer a
                 // capture error occurred. `SENTINEL_RESERVE` slots are never
                 // touched by the data-callback path above, so this
-                // `try_send` should always succeed. If it doesn't, something
-                // has gone very wrong (e.g. concurrent error callbacks
-                // racing each other for reserved slots) — that's rare and
-                // important enough to always log, not rate-limit.
-                if err_tx.try_send(Vec::new()).is_err() {
-                    tracing::error!(
-                        "Audio capture error sentinel dropped — channel full despite {} reserved slots",
-                        SENTINEL_RESERVE
-                    );
+                // `try_send` should always succeed while a consumer is
+                // still attached. If it fails with `Full`, something has
+                // gone very wrong (e.g. concurrent error callbacks racing
+                // each other for reserved slots) — that's rare and
+                // important enough to always log, not rate-limit. A
+                // `Closed` failure just means the consumer already tore
+                // down (e.g. the recording session ended moments ago) —
+                // nobody is left to notify, so it's dropped silently rather
+                // than logged as an error.
+                match err_tx.try_send(Vec::new()) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        tracing::error!(
+                            "Audio capture error sentinel dropped — channel full despite {} reserved slots",
+                            SENTINEL_RESERVE
+                        );
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {}
                 }
             },
             None,

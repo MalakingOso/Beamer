@@ -103,8 +103,18 @@ pub async fn start_realtime_session(
         // is sufficient.
         let mut dropped_transcripts: u64 = 0;
         let mut send_event = |ev: TranscriptEvent| {
-            if transcript_tx.try_send(ev).is_err() {
-                warn_channel_full(&mut dropped_transcripts, "ElevenLabs transcript");
+            // Only warn on a genuinely full channel (consumer alive but
+            // stalled). A `Closed` error means the orchestrator already
+            // dropped `transcript_rx` (e.g. session teardown), which
+            // happens on every session's trailing "WebSocket closed" Info
+            // event — that's normal shutdown, not backpressure, so it's
+            // dropped silently rather than logged as a bogus stall warning.
+            match transcript_tx.try_send(ev) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    warn_channel_full(&mut dropped_transcripts, "ElevenLabs transcript");
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {}
             }
         };
 

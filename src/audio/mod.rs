@@ -14,6 +14,21 @@ use self::capture::AudioCapture;
 // bounded ones sized for >=60s of buffering (TB.10). See each channel's
 // construction site for its capacity math.
 
+/// Outcome of a bounded-channel send attempt. Callers use this to decide
+/// whether a failed send is worth a "consumer stalled?" warning: `Full`
+/// means the channel is genuinely backed up and the message was dropped as
+/// a result, while `Closed` means the receiver side has gone away (e.g.
+/// normal session teardown) and the message was dropped because there is
+/// nobody left to receive it — not because anything is stalled. Pre-branch
+/// code silently dropped sends on a closed channel (`let _ = tx.send(...)`);
+/// this preserves that behavior while still surfacing genuine backpressure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SendOutcome {
+    Sent,
+    Full,
+    Closed,
+}
+
 /// Attempt to send `payload` on `tx`, but only if doing so leaves at least
 /// `reserve` slots free. This is how sentinel-carrying channels guarantee a
 /// rare, must-not-drop sentinel (e.g. an end-of-audio marker) always has
@@ -23,13 +38,26 @@ use self::capture::AudioCapture;
 /// sent with a plain `tx.try_send(..)` that only ever competes for the
 /// untouched reserved slots.
 ///
-/// `Sender::capacity()` is a cheap atomic read (not a lock), so this never
-/// blocks or spins — safe to call from a real-time audio callback.
-pub(crate) fn try_send_reserving<T>(tx: &mpsc::Sender<T>, reserve: usize, payload: T) -> bool {
-    if tx.capacity() <= reserve {
-        return false;
+/// Returns `SendOutcome::Closed` (rather than `Full`) whenever the receiver
+/// has been dropped, even if the reserve threshold would otherwise have
+/// refused the send — a closed channel is never "stalled," so callers
+/// should not warn on it.
+///
+/// `Sender::capacity()` and `Sender::is_closed()` are both cheap atomic
+/// reads (not locks), so this never blocks or spins — safe to call from a
+/// real-time audio callback.
+pub(crate) fn try_send_reserving<T>(tx: &mpsc::Sender<T>, reserve: usize, payload: T) -> SendOutcome {
+    if tx.is_closed() {
+        return SendOutcome::Closed;
     }
-    tx.try_send(payload).is_ok()
+    if tx.capacity() <= reserve {
+        return SendOutcome::Full;
+    }
+    match tx.try_send(payload) {
+        Ok(()) => SendOutcome::Sent,
+        Err(mpsc::error::TrySendError::Full(_)) => SendOutcome::Full,
+        Err(mpsc::error::TrySendError::Closed(_)) => SendOutcome::Closed,
+    }
 }
 
 /// Rate-limited warning for a message dropped because a bounded channel was
@@ -38,6 +66,10 @@ pub(crate) fn try_send_reserving<T>(tx: &mpsc::Sender<T>, reserve: usize, payloa
 /// and periodic reminders rather than flooding the log. Only increments a
 /// plain counter and occasionally calls `tracing::warn!` — no allocation,
 /// locking, or blocking beyond what `tracing::warn!` itself does.
+///
+/// Call this ONLY for `SendOutcome::Full` / `TrySendError::Full` — a closed
+/// channel is normal teardown, not backpressure, and should be dropped
+/// silently (see `SendOutcome`).
 pub(crate) fn warn_channel_full(count: &mut u64, what: &str) {
     *count += 1;
     if *count == 1 || *count % 200 == 0 {
@@ -122,7 +154,7 @@ mod level_tests {
 
 #[cfg(test)]
 mod channel_backpressure_tests {
-    use super::{try_send_reserving, warn_channel_full};
+    use super::{try_send_reserving, warn_channel_full, SendOutcome};
     use tokio::sync::mpsc;
 
     /// Core guarantee behind TB.10's sentinel-safety design: a "stalled
@@ -144,11 +176,13 @@ mod channel_backpressure_tests {
         let mut dropped = 0u32;
         let mut dropped_counter: u64 = 0;
         for i in 0..20u8 {
-            if try_send_reserving(&tx, reserve, vec![i]) {
-                sent += 1;
-            } else {
-                dropped += 1;
-                warn_channel_full(&mut dropped_counter, "test");
+            match try_send_reserving(&tx, reserve, vec![i]) {
+                SendOutcome::Sent => sent += 1,
+                SendOutcome::Full => {
+                    dropped += 1;
+                    warn_channel_full(&mut dropped_counter, "test");
+                }
+                SendOutcome::Closed => panic!("receiver is still alive in this test"),
             }
         }
 
@@ -190,10 +224,87 @@ mod channel_backpressure_tests {
         let capacity = 4;
         let (tx, _rx) = mpsc::channel::<Vec<u8>>(capacity);
         for i in 0..capacity {
-            assert!(try_send_reserving(&tx, 0, vec![i as u8]));
+            assert_eq!(try_send_reserving(&tx, 0, vec![i as u8]), SendOutcome::Sent);
         }
         // Channel is now completely full (reserve = 0 reserved no slots).
         assert!(tx.try_send(Vec::new()).is_err(), "sentinel has nowhere to go without reserved headroom");
+    }
+
+    /// A genuinely full channel (consumer alive but stalled) must report
+    /// `Full`, so callers warn — this is the positive control for the
+    /// Full/Closed distinction below.
+    #[test]
+    fn full_channel_with_live_receiver_reports_full_and_warns() {
+        let (tx, _rx) = mpsc::channel::<Vec<u8>>(2);
+        assert_eq!(try_send_reserving(&tx, 0, vec![1]), SendOutcome::Sent);
+        assert_eq!(try_send_reserving(&tx, 0, vec![2]), SendOutcome::Sent);
+
+        let mut dropped_counter: u64 = 0;
+        match try_send_reserving(&tx, 0, vec![3]) {
+            SendOutcome::Full => warn_channel_full(&mut dropped_counter, "test"),
+            other => panic!(
+                "a genuinely full channel must be treated as Full and trigger the warn path, got {other:?}"
+            ),
+        }
+        assert_eq!(dropped_counter, 1);
+    }
+
+    /// A closed channel (receiver dropped — normal teardown, e.g. end of a
+    /// recording session) must report `Closed`, not `Full`, so callers do
+    /// NOT emit a "channel full — consumer stalled?" warning for what is
+    /// actually just normal shutdown. This is the regression test for the
+    /// bug this commit fixes.
+    #[test]
+    fn closed_channel_reports_closed_not_full_and_does_not_warn() {
+        let (tx, rx) = mpsc::channel::<Vec<u8>>(4);
+        drop(rx);
+
+        let mut dropped_counter: u64 = 0;
+        let mut warned = false;
+        match try_send_reserving(&tx, 0, vec![1]) {
+            SendOutcome::Closed => {}
+            SendOutcome::Full => {
+                warn_channel_full(&mut dropped_counter, "test");
+                warned = true;
+            }
+            SendOutcome::Sent => panic!("receiver was dropped — send must not succeed"),
+        }
+        assert!(!warned, "a closed channel must never trigger the 'full — consumer stalled?' warn path");
+        assert_eq!(dropped_counter, 0, "closed-channel sends must not be counted as drops");
+    }
+
+    /// Same distinction, but for the reserve-threshold short-circuit path:
+    /// even when `capacity() <= reserve` would normally look like `Full`,
+    /// a dropped receiver must still report `Closed` so callers don't warn.
+    #[test]
+    fn closed_channel_reports_closed_even_under_reserve_threshold() {
+        let (tx, rx) = mpsc::channel::<Vec<u8>>(4);
+        drop(rx);
+
+        // reserve >= capacity would normally hit the "Full" short-circuit
+        // for a live receiver, but a closed channel must win that check.
+        assert_eq!(try_send_reserving(&tx, 10, vec![1]), SendOutcome::Closed);
+    }
+
+    /// Plain `try_send` (used directly for sentinels, and by the realtime
+    /// transcript-forwarding `send_event` closures) must let callers
+    /// distinguish `TrySendError::Full` from `TrySendError::Closed` the
+    /// same way `try_send_reserving` does, since both call sites match on
+    /// the raw error rather than going through `try_send_reserving`.
+    #[test]
+    fn plain_try_send_error_distinguishes_full_from_closed() {
+        let (tx, rx) = mpsc::channel::<Vec<u8>>(1);
+        assert!(tx.try_send(vec![1]).is_ok());
+        match tx.try_send(vec![2]) {
+            Err(mpsc::error::TrySendError::Full(_)) => {}
+            other => panic!("expected Full, got {other:?}"),
+        }
+
+        drop(rx);
+        match tx.try_send(vec![3]) {
+            Err(mpsc::error::TrySendError::Closed(_)) => {}
+            other => panic!("expected Closed, got {other:?}"),
+        }
     }
 }
 
@@ -294,8 +405,16 @@ impl AudioPipeline {
 
                 // f32 [-1.0, 1.0] → i16 little-endian PCM bytes
                 let bytes = f32_to_i16_bytes(&samples);
-                if tx.try_send(bytes).is_err() {
-                    warn_channel_full(&mut dropped_chunks, "PCM chunk");
+                match tx.try_send(bytes) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        warn_channel_full(&mut dropped_chunks, "PCM chunk");
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        // Consumer (orchestrator) has dropped its receiver —
+                        // normal teardown, not backpressure. Silent drop
+                        // matches pre-branch `let _ = tx.send(...)` behavior.
+                    }
                 }
             }
         });
