@@ -10,19 +10,20 @@ pub struct HistoryPageProps {
 
 #[component]
 pub fn HistoryPage(props: HistoryPageProps) -> Element {
-    let history = props.history.read();
-    let groups = history.grouped_by_day();
+    let history = props.history;
+    let groups = use_memo(move || history.read().grouped_by_day());
+    let is_empty = groups.read().is_empty();
 
     rsx! {
         div { class: "content",
-            if groups.is_empty() {
+            if is_empty {
                 div { class: "empty-state",
                     div { class: "empty-state-icon", "\u{1F399}" }
                     div { class: "empty-state-text", "No transcriptions yet" }
                     div { class: "empty-state-hint", "Start recording to see your history here" }
                 }
             } else {
-                for (label, entries) in &groups {
+                for (label, entries) in groups.read().iter() {
                     div { class: "history-group",
                         div { class: "history-date-header", "{label}" }
                         for entry in entries.iter().rev() {

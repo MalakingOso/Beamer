@@ -70,16 +70,19 @@ impl TranscriptionHistory {
         self.entries.iter().rev().take(n).collect()
     }
 
-    pub fn grouped_by_day(&self) -> Vec<(String, Vec<&HistoryEntry>)> {
+    /// Groups entries by calendar day, cloning entries so the result is
+    /// independent of `self` (suitable for caching in a `use_memo`).
+    /// Each entry's timestamp is parsed exactly once per call.
+    pub fn grouped_by_day(&self) -> Vec<(String, Vec<HistoryEntry>)> {
         let today = Local::now().date_naive();
         let yesterday = today.pred_opt().unwrap_or(today);
 
-        let mut groups: BTreeMap<NaiveDate, Vec<&HistoryEntry>> = BTreeMap::new();
+        let mut groups: BTreeMap<NaiveDate, Vec<HistoryEntry>> = BTreeMap::new();
         for entry in &self.entries {
             let date = DateTime::parse_from_rfc3339(&entry.timestamp)
                 .map(|dt| dt.with_timezone(&Local).date_naive())
                 .unwrap_or(today);
-            groups.entry(date).or_default().push(entry);
+            groups.entry(date).or_default().push(entry.clone());
         }
 
         groups
