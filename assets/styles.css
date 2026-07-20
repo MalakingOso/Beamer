@@ -231,14 +231,15 @@ body {
 }
 
 .sidebar-icon {
-  width: 56px;
-  height: 44px;
+  height: 40px;
+  margin: 2px 6px;
   display: flex;
   align-items: center;
   justify-content: center;
   color: var(--fg-muted);
   cursor: pointer;
   border: none;
+  border-radius: var(--radius-md);
   background: transparent;
   position: relative;
   transition: color var(--duration-fast) var(--ease), background var(--duration-fast) var(--ease);
@@ -257,7 +258,7 @@ body {
 .sidebar-icon.active::before {
   content: "";
   position: absolute;
-  left: 0;
+  left: -6px; /* cancel the inset margin so the bar hugs the column edge */
   top: 8px;
   bottom: 8px;
   width: 2px;
@@ -674,6 +675,49 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+/* Disclosure row that reveals the fallback-chain list below it. */
+.injection-fallbacks-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  font-size: 13px;
+  color: var(--fg-secondary);
+  cursor: pointer;
+  min-height: 32px;
+}
+
+.injection-fallbacks-toggle:hover {
+  color: var(--fg);
+}
+
+.injection-fallbacks-chevron {
+  width: 12px;
+  color: var(--fg-muted);
+}
+
+/* Fallback-chain list: wraps instead of overflowing the card.
+   min-width: 0 lets flex children shrink below their content width so long
+   backend names trigger wrapping rather than spilling past the border. */
+.injection-fallbacks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  min-width: 0;
+  padding-left: 18px;
+}
+
+.injection-fallback-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--fg-secondary);
+  white-space: nowrap;
 }
 
 .injection-backend-controls {

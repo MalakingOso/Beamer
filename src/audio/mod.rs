@@ -100,11 +100,12 @@ fn publish_level(level: f32) {
     let _ = level_channel().0.send(level);
 }
 
-/// Map raw f32 sample RMS (0.0–1.0 domain) to a display level. Speech RMS
-/// rarely exceeds ~0.12 on typical mics, so an 8× gain puts normal speech
-/// near full scale.
+/// Map raw f32 sample RMS (0.0–1.0 domain) to a display level. Quiet mics
+/// produce speech RMS as low as ~0.005, so a strong gain is needed for the
+/// waveform to register at all; the square root then compresses the top of
+/// the range so louder speech doesn't just pin flat at 1.0.
 fn normalize_rms(rms: f32) -> f32 {
-    (rms * 8.0).clamp(0.0, 1.0)
+    (rms * 30.0).clamp(0.0, 1.0).sqrt()
 }
 
 fn chunk_rms(samples: &[f32]) -> f32 {
@@ -139,10 +140,19 @@ mod level_tests {
 
     #[test]
     fn speech_level_rms_lands_near_full_scale() {
-        // Constant 0.1 amplitude → RMS 0.1 → 0.8 after gain
+        // Constant 0.1 amplitude → RMS 0.1 → 3.0 after gain → clamps to 1.0
         let samples = [0.1_f32; 64];
         let level = normalize_rms(chunk_rms(&samples));
-        assert!((level - 0.8).abs() < 1e-4, "got {level}");
+        assert!((level - 1.0).abs() < 1e-4, "got {level}");
+    }
+
+    #[test]
+    fn quiet_speech_still_registers() {
+        // RMS 0.005 (very quiet mic) → 0.15 after gain → ~0.39 after sqrt,
+        // comfortably visible instead of a near-flat line
+        let level = normalize_rms(0.005);
+        assert!((level - 0.15_f32.sqrt()).abs() < 1e-4, "got {level}");
+        assert!(level > 0.3, "quiet speech should be clearly visible, got {level}");
     }
 
     #[test]

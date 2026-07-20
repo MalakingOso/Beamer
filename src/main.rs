@@ -45,6 +45,7 @@ fn main() {
         if let Err(e) = install_linux_desktop_entry() {
             tracing::warn!("Failed to install Linux desktop entry: {}", e);
         }
+        silence_ayatana_deprecation_warning();
     }
 
     // Dioxus owns the main thread and tokio runtime — nothing runs after this
@@ -183,6 +184,65 @@ fn set_auto_start_xdg(enable: bool) -> Result<()> {
 }
 
 // ─── Linux desktop integration ────────────────────────────────────────────────
+
+/// libayatana-appindicator 0.5.93+ emits a deprecation g_warning() once when the
+/// first indicator is created. tray-icon still binds the deprecated library (the
+/// -glib successor has an incompatible API), so the notice is unavoidable noise.
+/// Install a GLib log handler for that domain that drops the deprecation notice
+/// and forwards everything else to the default handler. Uses raw FFI because
+/// libglib-2.0 is already linked via gtk; depending on the glib crate would pin
+/// us to whatever gtk-rs version dioxus' tree happens to use.
+#[cfg(target_os = "linux")]
+fn silence_ayatana_deprecation_warning() {
+    use std::os::raw::{c_char, c_int, c_uint, c_void};
+
+    type GLogFunc =
+        extern "C" fn(*const c_char, c_int, *const c_char, *mut c_void);
+
+    extern "C" {
+        fn g_log_set_handler(
+            log_domain: *const c_char,
+            log_levels: c_int,
+            log_func: GLogFunc,
+            user_data: *mut c_void,
+        ) -> c_uint;
+        fn g_log_default_handler(
+            log_domain: *const c_char,
+            log_level: c_int,
+            message: *const c_char,
+            unused_data: *mut c_void,
+        );
+    }
+
+    const G_LOG_FLAG_RECURSION: c_int = 1 << 0;
+    const G_LOG_FLAG_FATAL: c_int = 1 << 1;
+    const G_LOG_LEVEL_WARNING: c_int = 1 << 4;
+
+    extern "C" fn drop_deprecation_notice(
+        domain: *const c_char,
+        level: c_int,
+        message: *const c_char,
+        data: *mut c_void,
+    ) {
+        let is_deprecation = !message.is_null()
+            && unsafe { std::ffi::CStr::from_ptr(message) }
+                .to_bytes()
+                .windows(b"deprecated".len())
+                .any(|w| w == b"deprecated");
+        if !is_deprecation {
+            unsafe { g_log_default_handler(domain, level, message, data) };
+        }
+    }
+
+    unsafe {
+        g_log_set_handler(
+            c"libayatana-appindicator".as_ptr(),
+            G_LOG_LEVEL_WARNING | G_LOG_FLAG_FATAL | G_LOG_FLAG_RECURSION,
+            drop_deprecation_notice,
+            std::ptr::null_mut(),
+        );
+    }
+}
 
 /// GNOME's dock/taskbar locates app icons by matching a window's Wayland `app_id`
 /// (or X11 `WM_CLASS`) against `StartupWMClass` in an installed `.desktop` file —

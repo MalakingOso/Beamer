@@ -73,16 +73,7 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                 },
             }
 
-            InjectionCard {
-                backends: config.read().injection.backends.clone(),
-                on_backends_change: move |backends: Vec<String>| {
-                    save_config(config, |c| c.injection.backends = backends);
-                },
-                paste_shortcut: config.read().injection.paste_shortcut.clone(),
-                on_paste_shortcut_change: move |v: String| {
-                    save_config(config, |c| c.injection.paste_shortcut = v);
-                },
-            }
+            InjectionCard {}
 
             ApiKeysCard {
                 elevenlabs_key: elevenlabs_key.read().clone(),
