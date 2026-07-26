@@ -68,10 +68,13 @@ pub fn VocabPage() -> Element {
         if idx < terms.len() {
             let old = terms[idx].clone();
             if old != new_val {
-                // Remove old, add new on disk
+                // `rename` edits in place, so the on-disk order matches what
+                // the list shows here. (remove + add would append instead,
+                // making the term jump to the bottom after a restart.)
                 if let Ok(mut vocab) = crate::config::vocabulary::Vocabulary::load() {
-                    let _ = vocab.remove(&old);
-                    let _ = vocab.add(&new_val);
+                    if let Err(e) = vocab.rename(&old, &new_val) {
+                        tracing::error!("Failed to rename vocabulary term: {}", e);
+                    }
                 }
                 terms[idx] = new_val;
                 vocab_terms.set(terms);

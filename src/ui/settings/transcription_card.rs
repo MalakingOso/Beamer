@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
 
-use crate::ui::components::{Card, Select};
+use crate::ui::components::{language_options, Card, Select};
 
 #[derive(Props, Clone, PartialEq)]
 pub struct TranscriptionCardProps {
@@ -17,18 +17,6 @@ pub fn TranscriptionCard(props: TranscriptionCardProps) -> Element {
         ("elevenlabs_batch".to_string(), "ElevenLabs (Batch)".to_string()),
         ("voxtral".to_string(), "Voxtral (Mistral)".to_string()),
         ("voxtral_batch".to_string(), "Voxtral (Batch)".to_string()),
-    ];
-
-    let language_options = vec![
-        ("en".to_string(), "English".to_string()),
-        ("es".to_string(), "Spanish".to_string()),
-        ("fr".to_string(), "French".to_string()),
-        ("de".to_string(), "German".to_string()),
-        ("it".to_string(), "Italian".to_string()),
-        ("pt".to_string(), "Portuguese".to_string()),
-        ("ja".to_string(), "Japanese".to_string()),
-        ("ko".to_string(), "Korean".to_string()),
-        ("zh".to_string(), "Chinese".to_string()),
     ];
 
     let is_voxtral = props.backend == "voxtral" || props.backend == "voxtral_batch";
@@ -48,7 +36,7 @@ pub fn TranscriptionCard(props: TranscriptionCardProps) -> Element {
                     span { class: "card-label", "Language" }
                     Select {
                         value: props.language.clone(),
-                        options: language_options,
+                        options: language_options(),
                         onchange: move |v: String| props.on_language_change.call(v),
                     }
                 }

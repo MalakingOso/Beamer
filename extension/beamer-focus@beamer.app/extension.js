@@ -5,7 +5,10 @@ import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
 import { BeamerIndicator } from './indicator.js';
 
-const HELPER_VERSION = 3;
+// Bumped to 4 so existing installs surface as "update available" and pick up
+// the disable()-during-TypeText reply fix. The capability floor Beamer
+// requires is still v2 (see REQUIRED_VERSION in src/injection/gnome.rs).
+const HELPER_VERSION = 4;
 
 // Typing pace: batches keep long transcripts fast (~500 chars/s) while giving
 // slow event loops (Electron apps) time to drain between batches.
@@ -51,6 +54,7 @@ export default class BeamerFocusExtension extends Extension {
     enable() {
         this._virtualDevice = null;
         this._typeSource = 0;
+        this._typeInvocation = null;
         this._indicator = null;
         this._dbus = Gio.DBusExportedObject.wrapJSObject(DBUS_XML, this);
         this._dbus.export(Gio.DBus.session, '/app/beamer/FocusProvider');
@@ -61,6 +65,11 @@ export default class BeamerFocusExtension extends Extension {
             GLib.source_remove(this._typeSource);
             this._typeSource = 0;
         }
+        // A TypeText in flight owes its caller a reply. Cancelling the timeout
+        // above without answering left Beamer blocked until its own client-side
+        // timeout fired (seconds, scaled to text length). Answer `false` so it
+        // falls through to the next injection backend immediately.
+        this._finishTyping(false);
         if (this._indicator) {
             this._indicator.destroy();
             this._indicator = null;
@@ -70,6 +79,14 @@ export default class BeamerFocusExtension extends Extension {
             this._dbus.unexport();
             this._dbus = null;
         }
+    }
+
+    /// Reply to the pending TypeText invocation, if any, exactly once.
+    _finishTyping(ok) {
+        const invocation = this._typeInvocation;
+        this._typeInvocation = null;
+        if (invocation)
+            invocation.return_value(new GLib.Variant('(b)', [ok]));
     }
 
     _ensureVirtualDevice() {
@@ -124,6 +141,7 @@ export default class BeamerFocusExtension extends Extension {
         }
         const device = this._ensureVirtualDevice();
         let i = 0;
+        this._typeInvocation = invocation;
         this._typeSource = GLib.timeout_add(GLib.PRIORITY_DEFAULT, TICK_MS, () => {
             const end = Math.min(i + CHARS_PER_TICK, cps.length);
             for (; i < end; i++) {
@@ -133,7 +151,7 @@ export default class BeamerFocusExtension extends Extension {
             }
             if (i >= cps.length) {
                 this._typeSource = 0;
-                invocation.return_value(new GLib.Variant('(b)', [true]));
+                this._finishTyping(true);
                 return GLib.SOURCE_REMOVE;
             }
             return GLib.SOURCE_CONTINUE;

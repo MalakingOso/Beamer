@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Device, SampleRate, Stream, StreamConfig};
+use cpal::{Device, FromSample, SampleFormat, SampleRate, SizedSample, Stream, StreamConfig};
 use tokio::sync::mpsc;
 
 use super::{try_send_reserving, warn_channel_full, SendOutcome};
@@ -31,7 +31,8 @@ pub(crate) const SAMPLE_CHANNEL_CAPACITY: usize = 12_000;
 const SENTINEL_RESERVE: usize = 4;
 
 /// Wraps cpal device setup and provides a mono 16 kHz f32 sample stream.
-/// Resamples from the device's native rate when it differs from 16 kHz.
+/// Resamples from the device's native rate when it differs from 16 kHz, and
+/// converts from the device's native sample format when it isn't `f32`.
 pub struct AudioCapture {
     device: Device,
     config: StreamConfig,
@@ -46,10 +47,11 @@ impl AudioCapture {
 
         let supported = device.default_input_config()?;
         tracing::info!(
-            "Audio device: {:?}, sample rate: {}, channels: {}",
+            "Audio device: {:?}, sample rate: {}, channels: {}, format: {:?}",
             device.name(),
             supported.sample_rate().0,
-            supported.channels()
+            supported.channels(),
+            supported.sample_format()
         );
 
         // 16 kHz mono — the format both ElevenLabs and Voxtral expect
@@ -62,24 +64,20 @@ impl AudioCapture {
         Ok(Self { device, config })
     }
 
-    pub fn device_sample_rate(&self) -> u32 {
-        self.device
-            .default_input_config()
-            .map(|c| c.sample_rate().0)
-            .unwrap_or(16000)
-    }
-
     /// Start capturing audio. The returned `Stream` must be kept alive for the
     /// duration of capture — dropping it stops the audio device.
     pub fn start(&self) -> Result<(Stream, mpsc::Receiver<Vec<f32>>)> {
         let (tx, rx) = mpsc::channel::<Vec<f32>>(SAMPLE_CHANNEL_CAPACITY);
-        let err_tx = tx.clone();
 
-        let native_rate = self.device_sample_rate();
-        let native_channels = self
-            .device
-            .default_input_config()?
-            .channels() as usize;
+        // One query, used for rate, channel count AND sample format — the
+        // format used to be read for the log line and then ignored, with the
+        // stream hard-coded to `f32`. Devices that only offer integer formats
+        // (common for USB interfaces, and for ALSA hw: devices on Linux) then
+        // failed stream construction with an opaque backend error.
+        let supported = self.device.default_input_config()?;
+        let native_rate = supported.sample_rate().0;
+        let native_channels = supported.channels() as usize;
+        let sample_format = supported.sample_format();
 
         let config = if native_rate == 16000 && native_channels == 1 {
             self.config.clone()
@@ -96,9 +94,43 @@ impl AudioCapture {
         let needs_resample = native_rate != 16000;
         let needs_downmix = native_channels > 1;
         tracing::info!(
-            "Audio capture: native {}Hz {}ch → 16kHz 1ch (resample={}, downmix={})",
-            native_rate, native_channels, needs_resample, needs_downmix
+            "Audio capture: native {}Hz {}ch {:?} → 16kHz 1ch f32 (resample={}, downmix={})",
+            native_rate, native_channels, sample_format, needs_resample, needs_downmix
         );
+
+        // Dispatch once, here, so the per-callback path stays monomorphic.
+        let stream = match sample_format {
+            SampleFormat::F32 => self.build_stream::<f32>(&config, tx, native_channels, native_rate),
+            SampleFormat::I16 => self.build_stream::<i16>(&config, tx, native_channels, native_rate),
+            SampleFormat::U16 => self.build_stream::<u16>(&config, tx, native_channels, native_rate),
+            SampleFormat::I8 => self.build_stream::<i8>(&config, tx, native_channels, native_rate),
+            SampleFormat::U8 => self.build_stream::<u8>(&config, tx, native_channels, native_rate),
+            SampleFormat::I32 => self.build_stream::<i32>(&config, tx, native_channels, native_rate),
+            SampleFormat::U32 => self.build_stream::<u32>(&config, tx, native_channels, native_rate),
+            SampleFormat::F64 => self.build_stream::<f64>(&config, tx, native_channels, native_rate),
+            other => anyhow::bail!("Unsupported input sample format: {:?}", other),
+        }?;
+
+        stream.play()?;
+        Ok((stream, rx))
+    }
+
+    /// Build the input stream for one concrete device sample type `T`,
+    /// converting to `f32` in the callback via cpal's `Sample` trait.
+    fn build_stream<T>(
+        &self,
+        config: &StreamConfig,
+        tx: mpsc::Sender<Vec<f32>>,
+        native_channels: usize,
+        native_rate: u32,
+    ) -> Result<Stream>
+    where
+        T: SizedSample + 'static,
+        f32: FromSample<T>,
+    {
+        let err_tx = tx.clone();
+        let needs_resample = native_rate != 16000;
+        let needs_downmix = native_channels > 1;
         let resample_ratio = if needs_resample {
             16000.0 / native_rate as f64
         } else {
@@ -109,22 +141,29 @@ impl AudioCapture {
             accumulator: 0.0,
             last_sample: 0.0,
         };
+        let mut float_buf: Vec<f32> = Vec::new();
         let mut mono_buf: Vec<f32> = Vec::new();
         let mut out_buf: Vec<f32> = Vec::new();
         let mut dropped_chunks: u64 = 0;
 
         let stream = self.device.build_input_stream(
-            &config,
-            move |data: &[f32], _info: &cpal::InputCallbackInfo| {
+            config,
+            move |data: &[T], _info: &cpal::InputCallbackInfo| {
+                // Normalize to f32 in [-1.0, 1.0]. For T = f32 this is the
+                // identity conversion and optimizes out.
+                float_buf.clear();
+                float_buf.extend(data.iter().map(|s| s.to_sample::<f32>()));
+
                 let samples: &[f32] = if needs_downmix {
                     mono_buf.clear();
                     mono_buf.extend(
-                        data.chunks(native_channels)
+                        float_buf
+                            .chunks(native_channels)
                             .map(|frame| frame.iter().sum::<f32>() / native_channels as f32),
                     );
                     &mono_buf
                 } else {
-                    data
+                    &float_buf
                 };
 
                 let out: &[f32] = if needs_resample {
@@ -187,8 +226,7 @@ impl AudioCapture {
             None,
         )?;
 
-        stream.play()?;
-        Ok((stream, rx))
+        Ok(stream)
     }
 }
 

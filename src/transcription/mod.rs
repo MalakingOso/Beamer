@@ -44,6 +44,29 @@ pub(crate) fn http_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(reqwest::Client::new)
 }
 
+/// Warm DNS, TLS and the shared client's connection pool for a batch
+/// backend's API host, without starting a transcription.
+///
+/// Batch backends have no session to open, so warmup used to fall through to
+/// opening a *realtime* WebSocket instead — a different, metered product from
+/// the one the user selected, opened and discarded on every single launch.
+/// An unauthenticated GET to the API root pays the same one-time connection
+/// costs with no billable side effect; the response is discarded and any
+/// status (including 401/404) counts as success, since only the transport
+/// matters here.
+pub async fn preconnect_batch_host(backend: &str) -> anyhow::Result<()> {
+    let url = match backend {
+        "voxtral_batch" => "https://api.mistral.ai/",
+        _ => "https://api.elevenlabs.io/",
+    };
+    http_client()
+        .get(url)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await?;
+    Ok(())
+}
+
 /// Discriminant for transcript events. Both backends normalize their
 /// wire-format messages into this shared enum.
 #[derive(Debug, Clone)]

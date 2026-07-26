@@ -230,6 +230,34 @@ fn verify_clipboard_contains(expected: &str) -> bool {
     }
 }
 
+/// Reap a `wl-copy` child that has daemonized.
+///
+/// `wl-copy` forks a background process to serve clipboard requests and the
+/// process we spawned exits immediately — but only once someone waits on it.
+/// Never waiting left one zombie per clipboard fallback for the lifetime of
+/// the app. This polls briefly rather than calling `wait()` outright, so an
+/// unexpectedly foregrounded `wl-copy` (e.g. `--foreground` in a wrapper
+/// script) can't block the injection path; giving up just restores the old
+/// leak-one-zombie behavior for that rare case.
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn reap_daemonized(mut child: std::process::Child, what: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                tracing::debug!("{} did not exit within 500ms — leaving it running", what);
+                return;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            Err(e) => {
+                tracing::debug!("Could not wait on {}: {}", what, e);
+                return;
+            }
+        }
+    }
+}
+
 /// Set clipboard via wl-copy subprocess.
 #[cfg(not(target_os = "windows"))]
 fn set_clipboard_wl_copy(text: &str) -> Result<()> {
@@ -241,8 +269,11 @@ fn set_clipboard_wl_copy(text: &str) -> Result<()> {
     if let Some(mut stdin) = child.stdin.take() {
         use std::io::Write;
         stdin.write_all(text.as_bytes())?;
+        // Dropping stdin closes the pipe so wl-copy stops reading and forks.
     }
-    // Don't wait — wl-copy stays alive to serve clipboard requests
+    // The forked background process keeps serving the selection; the process
+    // we spawned exits now, and reaping it keeps it from lingering as a zombie.
+    reap_daemonized(child, "wl-copy");
     tracing::debug!("Clipboard: wl-copy process spawned");
     Ok(())
 }

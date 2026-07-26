@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -5,6 +7,14 @@ use evdev::{Device, EventSummary, KeyCode};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::hotkey::{HotkeyConfig, HotkeyEvent, VK_LWIN};
+
+/// How often to rescan `/dev/input` for keyboards that appeared after startup.
+///
+/// Devices used to be enumerated exactly once, so a keyboard plugged in later —
+/// or one that re-enumerates after a suspend/resume or a Bluetooth reconnect —
+/// never got a listener and the hotkey silently did nothing on it until Beamer
+/// was restarted. Rescanning is a cheap directory walk plus an ioctl per node.
+const DEVICE_RESCAN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
 struct HookState {
     config: Arc<Mutex<HotkeyConfig>>,
@@ -18,22 +28,28 @@ struct HookState {
     trigger_held: bool,
 }
 
-/// Find all keyboard devices in /dev/input/event*.
-fn find_keyboard_devices() -> Vec<Device> {
+/// Find all keyboard devices in /dev/input/event*, skipping any whose
+/// `/dev/input` path is already being watched.
+fn find_keyboard_devices(known: &mut HashSet<PathBuf>) -> Vec<(PathBuf, Device)> {
     let mut keyboards = Vec::new();
 
-    for (_path, device) in evdev::enumerate() {
+    for (path, device) in evdev::enumerate() {
+        if known.contains(&path) {
+            continue;
+        }
         if let Some(keys) = device.supported_keys() {
             if keys.contains(KeyCode::KEY_A)
                 && keys.contains(KeyCode::KEY_Z)
                 && keys.contains(KeyCode::KEY_SPACE)
             {
                 tracing::info!(
-                    "Found keyboard device: {:?} ({:?})",
+                    "Found keyboard device: {:?} at {:?} ({:?})",
                     device.name(),
+                    path,
                     device.physical_path()
                 );
-                keyboards.push(device);
+                known.insert(path.clone());
+                keyboards.push((path, device));
             }
         }
     }
@@ -224,7 +240,8 @@ pub fn start_ll_hook(
         trigger_held: false,
     }));
 
-    let keyboards = find_keyboard_devices();
+    let mut known: HashSet<PathBuf> = HashSet::new();
+    let keyboards = find_keyboard_devices(&mut known);
     if keyboards.is_empty() {
         tracing::error!(
             "No keyboard devices found! Make sure your user is in the 'input' group:\n\
@@ -239,42 +256,82 @@ pub fn start_ll_hook(
             .show();
     }
 
-    let device_count = keyboards.len();
-    tracing::info!("Monitoring {} keyboard device(s) via evdev", device_count);
+    tracing::info!("Monitoring {} keyboard device(s) via evdev", keyboards.len());
 
-    for mut device in keyboards {
+    // A device's path is dropped from `known` when its listener exits, so a
+    // keyboard that disconnects and reconnects is picked up by the next rescan
+    // rather than being remembered as "already watched" forever.
+    let known = Arc::new(Mutex::new(known));
+    for (path, device) in keyboards {
+        spawn_device_listener(path, device, state.clone(), known.clone());
+    }
+
+    {
+        let known = known.clone();
         let state = state.clone();
-        let name = device.name().unwrap_or("unknown").to_string();
-
         std::thread::Builder::new()
-            .name(format!("evdev-kbd-{}", name))
-            .spawn(move || {
-                tracing::debug!("Listening on keyboard: {}", name);
-                loop {
-                    match device.fetch_events() {
-                        Ok(events) => {
-                            let mut state = state.lock().unwrap();
-                            for event in events {
-                                if let EventSummary::Key(_ev, key, value) =
-                                    event.destructure()
-                                {
-                                    handle_key_event(key, value, &mut state);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            if e.kind() == std::io::ErrorKind::WouldBlock {
-                                std::thread::sleep(std::time::Duration::from_millis(10));
-                            } else {
-                                tracing::error!("evdev read error on {}: {}", name, e);
-                                break;
-                            }
-                        }
-                    }
+            .name("evdev-hotplug".into())
+            .spawn(move || loop {
+                std::thread::sleep(DEVICE_RESCAN_INTERVAL);
+                let new_devices = {
+                    let mut guard = known.lock().unwrap_or_else(|p| p.into_inner());
+                    find_keyboard_devices(&mut guard)
+                };
+                for (path, device) in new_devices {
+                    tracing::info!("New keyboard appeared at {:?} — attaching listener", path);
+                    spawn_device_listener(path, device, state.clone(), known.clone());
                 }
             })
-            .expect("Failed to spawn keyboard listener thread");
+            .expect("Failed to spawn keyboard hotplug watcher thread");
     }
 
     HotkeyHandle { config, reset_flag }
+}
+
+/// Read events from one keyboard until it errors out or disappears, then drop
+/// its path from `known` so a reconnect can be re-attached.
+fn spawn_device_listener(
+    path: PathBuf,
+    mut device: Device,
+    state: Arc<Mutex<HookState>>,
+    known: Arc<Mutex<HashSet<PathBuf>>>,
+) {
+    let name = device.name().unwrap_or("unknown").to_string();
+    let thread_name = format!("evdev-kbd-{}", name);
+
+    let spawned = std::thread::Builder::new()
+        .name(thread_name)
+        .spawn(move || {
+            tracing::debug!("Listening on keyboard: {}", name);
+            loop {
+                match device.fetch_events() {
+                    Ok(events) => {
+                        let mut state = state.lock().unwrap_or_else(|p| p.into_inner());
+                        for event in events {
+                            if let EventSummary::Key(_ev, key, value) = event.destructure() {
+                                handle_key_event(key, value, &mut state);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if e.kind() == std::io::ErrorKind::WouldBlock {
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        } else {
+                            // Unplugged (ENODEV) or a genuine read error —
+                            // either way this device is done.
+                            tracing::info!("evdev listener for {} exiting: {}", name, e);
+                            break;
+                        }
+                    }
+                }
+            }
+            known
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&path);
+        });
+
+    if let Err(e) = spawned {
+        tracing::error!("Failed to spawn keyboard listener thread: {}", e);
+    }
 }

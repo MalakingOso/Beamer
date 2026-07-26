@@ -4,35 +4,86 @@ fn is_audio_playing() -> bool {
     is_audio_playing_wasapi()
 }
 
-/// Pause media only if audio is currently playing.
-/// Returns `true` if we actually sent the pause keystroke.
-pub fn pause_media_if_playing() -> bool {
-    #[cfg(target_os = "windows")]
-    if is_audio_playing() {
-        send_media_play_pause();
-        return true;
-    }
+/// Proof that Beamer paused playback, and the handle for undoing it.
+///
+/// Returned only when a pause actually happened, so "did we pause?" is carried
+/// in the type rather than a bare `bool` the caller might forget to act on. On
+/// Linux it remembers the D-Bus bus name of the *specific* player that was
+/// paused: resuming used to just grab the first paused player it could find,
+/// which meant that if you had (say) Spotify already paused and VLC playing,
+/// Beamer paused VLC and then resumed Spotify.
+///
+/// `Drop` resumes, so every exit path out of a recording session restores
+/// playback — including the error paths (mic lost mid-recording, transcription
+/// failure) that previously left the user's music paused with no explanation.
+/// `drop(guard)` at the point where playback should come back.
+#[must_use = "dropping this immediately resumes playback; hold it for the duration of the recording"]
+pub struct MediaPause {
+    /// D-Bus bus name of the paused player. Absent on Windows, where the
+    /// play/pause key is broadcast to the shell rather than addressed to one
+    /// player, so there's no identity to remember.
     #[cfg(not(target_os = "windows"))]
-    if let Some(player) = find_playing_mpris_player() {
-        if player.pause().is_ok() {
-            tracing::info!("Paused MPRIS player: {}", player.bus_name());
-            return true;
-        }
-    }
-    false
+    bus_name: String,
 }
 
-/// Resume media by sending the play/pause key.
-/// Only call this when we know we previously paused.
-pub fn resume_media() {
+impl MediaPause {
+    fn resume_inner(&mut self) {
+        #[cfg(target_os = "windows")]
+        {
+            send_media_play_pause();
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            match find_mpris_player_by_bus_name(&self.bus_name) {
+                Some(player) => match player.play() {
+                    Ok(()) => tracing::info!("Resumed MPRIS player: {}", self.bus_name),
+                    Err(e) => tracing::warn!(
+                        "Failed to resume MPRIS player {}: {}",
+                        self.bus_name,
+                        e
+                    ),
+                },
+                // The player quit while we were recording. Nothing to resume,
+                // and deliberately no fallback to "some other paused player" —
+                // that's the bug this guard exists to prevent.
+                None => tracing::info!(
+                    "MPRIS player {} is gone — nothing to resume",
+                    self.bus_name
+                ),
+            }
+        }
+    }
+}
+
+impl Drop for MediaPause {
+    fn drop(&mut self) {
+        self.resume_inner();
+    }
+}
+
+/// Pause media only if audio is currently playing.
+/// Returns a [`MediaPause`] guard when a pause actually happened.
+pub fn pause_media_if_playing() -> Option<MediaPause> {
     #[cfg(target_os = "windows")]
-    send_media_play_pause();
+    {
+        if is_audio_playing() {
+            send_media_play_pause();
+            return Some(MediaPause {});
+        }
+        None
+    }
     #[cfg(not(target_os = "windows"))]
     {
-        // Find a paused player and resume it
-        if let Some(player) = find_paused_mpris_player() {
-            if let Err(e) = player.play() {
-                tracing::warn!("Failed to resume MPRIS player: {}", e);
+        let player = find_playing_mpris_player()?;
+        let bus_name = player.bus_name().to_string();
+        match player.pause() {
+            Ok(()) => {
+                tracing::info!("Paused MPRIS player: {}", bus_name);
+                Some(MediaPause { bus_name })
+            }
+            Err(e) => {
+                tracing::warn!("Failed to pause MPRIS player {}: {}", bus_name, e);
+                None
             }
         }
     }
@@ -47,13 +98,19 @@ fn find_playing_mpris_player() -> Option<mpris::Player> {
     })
 }
 
-/// Find the first MPRIS2 player that is currently Paused.
+/// Find one specific MPRIS2 player by its D-Bus bus name.
+///
+/// Matched on bus name rather than `PlayerFinder::find_by_name`, which matches
+/// on the human-facing `Identity` property and so can't distinguish two
+/// instances of the same application.
 #[cfg(not(target_os = "windows"))]
-fn find_paused_mpris_player() -> Option<mpris::Player> {
+fn find_mpris_player_by_bus_name(bus_name: &str) -> Option<mpris::Player> {
     let finder = mpris::PlayerFinder::new().ok()?;
-    finder.find_all().ok()?.into_iter().find(|p| {
-        p.get_playback_status().ok() == Some(mpris::PlaybackStatus::Paused)
-    })
+    finder
+        .find_all()
+        .ok()?
+        .into_iter()
+        .find(|p| p.bus_name() == bus_name)
 }
 
 #[cfg(target_os = "windows")]

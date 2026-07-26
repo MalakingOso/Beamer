@@ -89,7 +89,8 @@ submit a chat box or form mid-injection. The clipboard path keeps newlines
 (an atomic paste doesn't press keys).
 
 ### 1. gnome (direct typing via the bundled Shell extension — preferred)
-- The extension (v2) owns a `Clutter.VirtualInputDevice` inside GNOME Shell —
+- The extension (v4; capability floor is v2) owns a
+  `Clutter.VirtualInputDevice` inside GNOME Shell —
   the same mechanism as GNOME's on-screen keyboard — and exposes
   `TypeText(s) -> b` on `app.beamer.FocusProvider`.
 - Full Unicode, layout-independent (keysym = codepoint | 0x01000000; Mutter
@@ -160,17 +161,30 @@ Ctrl+Shift+V.
 To add a terminal, PR-append the app id (lowercase, exact match — no
 substring heuristic).
 
-### GNOME Shell extension v2 (`extension/beamer-focus@beamer.app/`)
+### GNOME Shell extension v4 (`extension/beamer-focus@beamer.app/`)
 
 D-Bus interface on `org.gnome.Shell` / `/app/beamer/FocusProvider`:
 
 | Method | Purpose |
 |---|---|
 | `GetFocusedAppId() -> s` | focused app id (v1) |
-| `GetVersion() -> u` | capability probe (returns 2) |
+| `GetVersion() -> u` | capability probe (returns 4) |
 | `TypeText(s) -> b` | type Unicode text via virtual keyboard |
 | `SendPasteChord(b) -> b` | Ctrl(+Shift)+V for the clipboard backend |
 | `ShowIndicator(s)` / `UpdateLevel(d)` / `HideIndicator()` | shell-native recording pill (Deploy Purple waveform, bottom-center of the focused window's monitor, click-through) |
+
+`REQUIRED_VERSION` in `src/injection/gnome.rs` is still **2** — that's the
+version that introduced `TypeText`/`SendPasteChord`, and it's the real
+capability floor. `HELPER_VERSION`/`metadata.json` are bumped past it purely
+so existing installs surface as "update available" and pick up fixes; don't
+raise `REQUIRED_VERSION` unless a genuinely new method is being depended on.
+
+`TypeText` is served by `TypeTextAsync`, which types in batches on a GLib
+timeout and replies when the last batch lands. The pending `invocation` is
+parked in `this._typeInvocation` and answered exactly once via
+`_finishTyping(ok)` — including from `disable()`, so tearing the extension
+down mid-injection replies `false` immediately instead of stranding the
+caller until its client-side timeout (seconds, scaled to text length) fires.
 
 Rust clients: `src/injection/focus.rs` (focus), `src/injection/gnome.rs`
 (typing + chord), `src/ui/shell_indicator.rs` (pill, dedicated worker

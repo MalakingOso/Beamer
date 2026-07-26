@@ -113,23 +113,28 @@ pub async fn warm_all(mut progress: Signal<WarmupProgress>) {
         tracing::debug!("warmup: skipping network preconnect — no key for backend '{}'", backend);
     } else {
         let t3 = std::time::Instant::now();
+        // Matched exhaustively on purpose. A `_ =>` fallback used to route the
+        // two *batch* backends into the ElevenLabs *realtime* constructor,
+        // so every launch opened and immediately discarded a metered realtime
+        // STT session for users who had never selected one. Batch backends get
+        // a transport-only preconnect instead; only the realtime backends —
+        // which really do open a session when you record — open one here.
         let result: anyhow::Result<()> = match backend.as_str() {
-            "voxtral" | "voxtral_batch" => {
-                match crate::transcription::start_voxtral_session(&api_key).await {
-                    Ok(session) => {
-                        drop(session);
-                        Ok(())
-                    }
-                    Err(e) => Err(e),
-                }
+            "voxtral" => crate::transcription::start_voxtral_session(&api_key)
+                .await
+                .map(drop),
+            "elevenlabs" => {
+                crate::transcription::start_elevenlabs_session(&api_key, &language)
+                    .await
+                    .map(drop)
             }
-            _ => match crate::transcription::start_elevenlabs_session(&api_key, &language).await {
-                Ok(session) => {
-                    drop(session);
-                    Ok(())
-                }
-                Err(e) => Err(e),
-            },
+            "voxtral_batch" | "elevenlabs_batch" => {
+                crate::transcription::preconnect_batch_host(&backend).await
+            }
+            other => {
+                tracing::warn!("warmup: unknown backend '{}', skipping preconnect", other);
+                Ok(())
+            }
         };
         match result {
             Ok(()) => tracing::debug!("warmup: network preconnect ok ({:?})", t3.elapsed()),

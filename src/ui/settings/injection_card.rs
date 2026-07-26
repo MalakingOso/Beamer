@@ -17,54 +17,95 @@ pub fn InjectionCard() -> Element {
 
                 #[cfg(not(target_os = "windows"))]
                 {
-                    // Hook must be called unconditionally to satisfy Dioxus's hook ordering
-                    // contract. The subprocess runs ~110ms on first render regardless of
-                    // desktop — acceptable since it only happens once per Settings open on
-                    // non-Windows platforms.
-                    let mut status = use_signal(|| crate::install::gnome_extension::status());
+                    use crate::install::gnome_extension::{self, Status as HelperStatus};
+
+                    // Hooks must run unconditionally to satisfy Dioxus's hook
+                    // ordering contract, so they sit outside the desktop check.
+                    //
+                    // `None` = the probe hasn't answered yet. Every call into
+                    // `gnome_extension` shells out to `gnome-extensions` (the
+                    // status probe alone runs ~110ms; install additionally
+                    // copies files), so they all go through `spawn_blocking`
+                    // rather than running inline in a render or an event
+                    // handler, where they would freeze the window.
+                    let mut status: Signal<Option<HelperStatus>> = use_signal(|| None);
+                    let mut busy = use_signal(|| false);
+
+                    use_hook(move || {
+                        spawn(async move {
+                            match tokio::task::spawn_blocking(gnome_extension::status).await {
+                                Ok(s) => status.set(Some(s)),
+                                Err(e) => tracing::warn!("GNOME extension status probe panicked: {}", e),
+                            }
+                        });
+                    });
 
                     if is_gnome_wayland {
-                        use crate::install::gnome_extension::Status as HelperStatus;
-                        let current = status();
+                        let current = *status.read();
+                        let is_busy = *busy.read();
                         let (label, action): (String, Option<&str>) = match current {
-                            HelperStatus::Enabled =>
+                            None =>
+                                ("GNOME helper: checking\u{2026}".into(), None),
+                            Some(HelperStatus::Enabled) =>
                                 ("GNOME helper: Active (direct typing)".into(), Some("Remove")),
-                            HelperStatus::Disabled =>
+                            Some(HelperStatus::Disabled) =>
                                 ("GNOME helper: Installed, click to enable".into(), Some("Enable")),
-                            HelperStatus::PendingRestart =>
+                            Some(HelperStatus::PendingRestart) =>
                                 ("GNOME helper: Installed — log out and back in to activate".into(), None),
-                            HelperStatus::NotInstalled =>
+                            Some(HelperStatus::NotInstalled) =>
                                 ("Install GNOME helper for reliable typing + recording pill".into(), Some("Install")),
-                            HelperStatus::UpdateAvailable =>
+                            Some(HelperStatus::UpdateAvailable) =>
                                 ("GNOME helper: update available (adds direct typing + pill)".into(), Some("Update")),
-                            HelperStatus::UpdatePendingRestart =>
+                            Some(HelperStatus::UpdatePendingRestart) =>
                                 ("GNOME helper: updated — log out and back in to activate".into(), None),
                         };
 
                         rsx! {
                             div { class: "card-row",
                                 span { class: "card-label", "{label}" }
-                                if let Some(btn) = action {
+                                if let (Some(btn), Some(current)) = (action, current) {
                                     button {
                                         class: "btn-small",
+                                        disabled: is_busy,
                                         onclick: move |_| {
-                                            let result = match current {
-                                                HelperStatus::NotInstalled
-                                                | HelperStatus::UpdateAvailable =>
-                                                    crate::install::gnome_extension::install(),
-                                                HelperStatus::Disabled =>
-                                                    crate::install::gnome_extension::enable_installed(),
-                                                HelperStatus::Enabled =>
-                                                    crate::install::gnome_extension::uninstall(),
-                                                // These render no button; match is exhaustive
-                                                // for safety if the render and click race.
-                                                HelperStatus::PendingRestart
-                                                | HelperStatus::UpdatePendingRestart => Ok(()),
-                                            };
-                                            if let Err(e) = result {
-                                                tracing::warn!("GNOME extension action failed: {}", e);
+                                            if *busy.peek() {
+                                                return;
                                             }
-                                            status.set(crate::install::gnome_extension::status());
+                                            busy.set(true);
+                                            spawn(async move {
+                                                let outcome = tokio::task::spawn_blocking(move || {
+                                                    let result = match current {
+                                                        HelperStatus::NotInstalled
+                                                        | HelperStatus::UpdateAvailable =>
+                                                            gnome_extension::install(),
+                                                        HelperStatus::Disabled =>
+                                                            gnome_extension::enable_installed(),
+                                                        HelperStatus::Enabled =>
+                                                            gnome_extension::uninstall(),
+                                                        // These render no button; match is exhaustive
+                                                        // for safety if the render and click race.
+                                                        HelperStatus::PendingRestart
+                                                        | HelperStatus::UpdatePendingRestart => Ok(()),
+                                                    };
+                                                    // Re-probe on the same blocking thread so the
+                                                    // UI never sees a stale status.
+                                                    (result, gnome_extension::status())
+                                                })
+                                                .await;
+
+                                                match outcome {
+                                                    Ok((result, fresh)) => {
+                                                        if let Err(e) = result {
+                                                            tracing::warn!("GNOME extension action failed: {}", e);
+                                                        }
+                                                        status.set(Some(fresh));
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::warn!("GNOME extension action panicked: {}", e);
+                                                    }
+                                                }
+                                                busy.set(false);
+                                            });
                                         },
                                         "{btn}"
                                     }

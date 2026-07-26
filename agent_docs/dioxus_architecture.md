@@ -122,3 +122,13 @@ network — paying one-time costs up front so the first recording doesn't
 stall), waits for a 1500ms CSS fill animation to finish, closes the splash
 window, then reveals the main window (except on Windows, which stays hidden
 until a tray click, matching the original tray-app convention).
+
+The network step **matches on the backend name exhaustively**. Realtime
+backends (`elevenlabs`, `voxtral`) open and drop a real session, which is
+what they'd do on the first recording anyway. Batch backends
+(`elevenlabs_batch`, `voxtral_batch`) get
+`transcription::preconnect_batch_host` instead — an unauthenticated GET that
+warms DNS/TLS/the shared client's connection pool with no billable side
+effect. Do not reintroduce a `_ =>` fallback here: it previously routed the
+batch backends into the ElevenLabs *realtime* constructor, so every launch
+opened a metered realtime STT session for users who had never selected one.

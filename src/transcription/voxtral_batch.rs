@@ -28,12 +28,66 @@ fn levenshtein(a: &str, b: &str) -> usize {
 }
 
 /// Similarity ratio (0.0–1.0) based on Levenshtein distance.
+///
+/// The denominator counts **characters**, matching `levenshtein`'s unit. Using
+/// `str::len()` (bytes) inflated it for any non-ASCII transcript — a 3-byte em
+/// dash or CJK character counted as 3 — which shrank the ratio's denominator
+/// mismatch and pushed similarity toward 1.0, weakening the hallucination
+/// guard exactly where transcription is least reliable.
 fn similarity(a: &str, b: &str) -> f64 {
-    let max_len = a.len().max(b.len());
+    let max_len = a.chars().count().max(b.chars().count());
     if max_len == 0 {
         return 1.0;
     }
     1.0 - (levenshtein(a, b) as f64 / max_len as f64)
+}
+
+#[cfg(test)]
+mod similarity_tests {
+    use super::{levenshtein, similarity, MIN_SIMILARITY};
+
+    #[test]
+    fn identical_strings_are_fully_similar() {
+        assert_eq!(similarity("hello world", "hello world"), 1.0);
+        assert_eq!(similarity("", ""), 1.0);
+    }
+
+    #[test]
+    fn one_substitution_in_ten_chars() {
+        // 1 edit over a 10-char max length.
+        assert!((similarity("abcdefghij", "abcdefghiX") - 0.9).abs() < 1e-9);
+    }
+
+    /// Regression: with a byte-length denominator, an all-CJK string scored
+    /// 3x more similar than it is, because each char costs 1 edit but 3 bytes.
+    #[test]
+    fn non_ascii_is_scored_per_character_not_per_byte() {
+        let a = "你好世界"; // 4 chars, 12 bytes
+        let b = "你好世X"; // 1 substitution
+        assert_eq!(levenshtein(a, b), 1);
+        // Per character: 1 - 1/4 = 0.75. Per byte it would have been ~0.92.
+        assert!((similarity(a, b) - 0.75).abs() < 1e-9, "got {}", similarity(a, b));
+    }
+
+    /// The guard must still reject a conversational reply — the failure mode
+    /// `MIN_SIMILARITY` exists to catch — when the transcript is non-ASCII.
+    #[test]
+    fn hallucinated_reply_is_below_the_threshold_for_non_ascii_input() {
+        let transcript = "请把季度报表发给会计部门";
+        let hallucination = "Sure! I can help you with that. Which quarter did you mean?";
+        assert!(
+            similarity(transcript, hallucination) < MIN_SIMILARITY,
+            "got {}",
+            similarity(transcript, hallucination)
+        );
+    }
+
+    #[test]
+    fn lightly_edited_transcript_stays_above_the_threshold() {
+        let raw = "lets deploy the beemer build to staging tonight";
+        let corrected = "lets deploy the Beamer build to staging tonight";
+        assert!(similarity(raw, corrected) > MIN_SIMILARITY);
+    }
 }
 
 /// Use the Mistral chat API to correct vocabulary terms in the transcript.

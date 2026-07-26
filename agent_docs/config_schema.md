@@ -68,3 +68,21 @@ tokio::spawn
 ```
 
 Max 100 terms (ElevenLabs keyterms limit).
+
+Renames go through `Vocabulary::rename`, which edits the term **in place**.
+Don't reimplement a rename as `remove` + `add` — `add` appends, so the on-disk
+order diverges from what the Vocab page shows until the next restart.
+
+## History File
+
+Location: `%APPDATA%\Beamer\history.json` (`~/.config/Beamer/history.json` on
+Linux), written by `src/ui/history.rs`.
+
+- **Capped at 1000 entries** (`MAX_ENTRIES`), oldest evicted first. The whole
+  file is re-serialized after every injection, so an uncapped log made each
+  dictation pay for every dictation before it.
+- **Written atomically**: serialize to `history.json.tmp`, then rename over the
+  target, so a crash mid-write can't leave a half-written file.
+- **Corruption is preserved, not overwritten**: if the JSON doesn't parse,
+  `load()` moves it to `history.json.corrupt` and starts empty. Silently
+  defaulting would have let the next append destroy the original for good.

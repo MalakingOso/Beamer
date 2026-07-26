@@ -178,7 +178,16 @@ pub(super) fn setup_recording_pill(
                     .with_data_directory(super::webview_data_dir())
                     .with_window(builder)
                     .with_background_color((0, 0, 0, 0))
-                    .with_custom_head(format!(r#"<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&display=swap" rel="stylesheet"><style>body{{opacity:0;transition:opacity 0.15s ease;}}{}</style><script>{}</script>"#, PILL_CSS, PILL_JS))
+                    // DM Mono is inlined from the bundled woff2 rather than
+                    // fetched from fonts.googleapis.com: no outbound request
+                    // from a local dictation app, and the pill renders in the
+                    // right typeface offline.
+                    .with_custom_head(format!(
+                        r#"<style>{}body{{opacity:0;transition:opacity 0.15s ease;}}{}</style><script>{}</script>"#,
+                        crate::assets::dm_mono_face_css(),
+                        PILL_CSS,
+                        PILL_JS
+                    ))
                     .with_exits_when_last_window_closes(false);
 
                 let dom = VirtualDom::new(RecordingPill);
@@ -299,6 +308,10 @@ pub(super) fn setup_menu_handlers(
         move |event| {
             if event.id == quit_id {
                 tracing::info!("Quit menu item clicked — exiting");
+                // `process::exit` skips destructors, so the single-instance
+                // guard has to be handed back explicitly or the lockfile
+                // outlives us.
+                crate::release_single_instance();
                 std::process::exit(0);
             } else if event.id == home_id {
                 current_page.set(Page::Home);
