@@ -689,7 +689,7 @@ manage_server = true          # false = connect only, never spawn
 llama_server_path = "/home/berkley/Programming/llama.cpp/build/bin/llama-server"
 llama_lib_dir = "/home/berkley/Programming/llama.cpp/build/bin"
 vulkan_device = 0             # B60; confirm against `llama-server --list-devices`
-idle_shutdown_minutes = 0     # 0 = never; B60 is headless and dedicated
+idle_shutdown_minutes = 0     # 0 = never; reconsider at ladder rung 3
 
 [llm.cleanup]                 # "S1-mini" by "Superwhisper"
 model_path = "…/s1-mini-q4_k_m.gguf"
