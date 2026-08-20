@@ -455,14 +455,34 @@ Startup sequence per model:
 
 Servers are spawned **lazily on first use**, not at Beamer startup.
 
-**Idle shutdown defaults to disabled (`0`).** At the default 5.6 GB (§3),
-holding the weights resident is a fair trade against a multi-second cold reload
-on the next note, and still leaves ~17 GB of the B60 for other work.
+**Idle shutdown is asymmetric, because the two stages have opposite
+constraints.**
 
-This default should be **reconsidered by anyone promoting to ladder rung 3**:
-holding 14.9 GB indefinitely on a card this machine uses for other GPU work is
-a different proposition, and a 15–60 minute timeout is likely the better
-setting there.
+| Model | Lifecycle | Default |
+|---|---|---|
+| S1-mini (462 MB) | Resident once started | `idle_shutdown_minutes = 0` |
+| Extraction (5.15 GB) | Load on demand, unload when idle | `idle_shutdown_minutes = 5` |
+
+S1-mini is the stage the user actually watches — the note visibly rewrites
+itself — so it stays hot. At 462 MB its residency is noise.
+
+The extraction model is the opposite on both axes: it is the VRAM-hungry one
+and the one nobody is waiting on, since its output is a set of suggestions
+reviewed later. It has no business holding 5 GB of a card this machine uses for
+other GPU work.
+
+Reloading it is cheaper than it first appears on this hardware:
+
+- **60 GB RAM with ~49 GB in page cache** means the GGUF stays cached after
+  first read; a reload is a PCIe upload, not a disk read.
+- **`~/.cache/mesa_shader_cache` is populated**, so Vulkan pipeline compilation
+  is paid once per driver version, not once per spawn.
+
+A warm respawn is therefore expected in the low seconds *(estimate — measure it
+in step 1)*, against a pipeline that is asynchronous anyway: the sticky note is
+already on screen with the user's words before any model runs.
+
+Only the first extraction after boot pays the full cold cost.
 
 Child processes are killed on Beamer exit; a leaked `llama-server` holding
 multiple GB of VRAM would be a nasty failure mode. The implementation must handle
@@ -689,12 +709,13 @@ manage_server = true          # false = connect only, never spawn
 llama_server_path = "/home/berkley/Programming/llama.cpp/build/bin/llama-server"
 llama_lib_dir = "/home/berkley/Programming/llama.cpp/build/bin"
 vulkan_device = 0             # B60; confirm against `llama-server --list-devices`
-idle_shutdown_minutes = 0     # 0 = never; reconsider at ladder rung 3
+# idle shutdown is per-model — see §7
 
 [llm.cleanup]                 # "S1-mini" by "Superwhisper"
 model_path = "…/s1-mini-q4_k_m.gguf"
 port = 8081
 ctx = 8192
+idle_shutdown_minutes = 0     # resident: latency-critical, only 462 MB
 styling = "semi-formal"       # casual | semi-casual | semi-formal | formal
 structure = "lists"           # prose | lists
 context = "general"           # general | email
@@ -703,6 +724,7 @@ context = "general"           # general | email
 model_path = "…/gemma-4-E4B_q4_0-it.gguf"
 port = 8082
 ctx = 8192
+idle_shutdown_minutes = 5     # unload when idle: 5 GB, nobody is waiting
 min_confidence = 0.5          # below this, the suggestion is not shown at all
 
 [notes]
