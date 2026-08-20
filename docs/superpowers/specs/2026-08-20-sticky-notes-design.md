@@ -10,8 +10,8 @@ A second global hotkey dictates into a **sticky note** instead of injecting text
 into the focused field. The note window appears immediately with the raw
 transcript. Two on-device model passes then run in the background: a fast
 cleanup pass rewrites the transcript into properly punctuated prose in place,
-and a slower analysis pass extracts action items into a global **Tasks** page
-inside Beamer.
+and a slower analysis pass proposes action items as **suggestions on the note**,
+which you accept into a global **Tasks** page or dismiss.
 
 No cloud service is involved in the AI passes. Speech-to-text continues to use
 the existing cloud backends, because that path is already fast and already
@@ -22,7 +22,8 @@ built.
 - Dictate a thought and have it land on the desktop as a note, without
   interrupting whatever is focused.
 - The note reads like written English, not like a transcript.
-- Action items buried in the note surface as checkable tasks.
+- Action items buried in the note surface as checkable tasks — and, more
+  importantly, things that merely *sound* like tasks do not.
 - All text analysis happens locally on this machine's GPUs.
 - Notes persist across restarts, including where they sit on screen.
 
@@ -101,7 +102,7 @@ punctuate; it is a text normalizer trained for exactly this transformation.
 | Base | Qwen3-0.6B finetune; GGUF arch `qwen3`, 311 tensors, 28 blocks |
 | Context | 40,960 tokens |
 | Measured accuracy | **94.8% token accuracy** on 7,519 held-out English cases — *measured on this Q4_K_M build* |
-| License | Apache 2.0 **plus an additional naming term** (see §3.3) |
+| License | Apache 2.0 **plus an additional naming term** (see “Attribution obligation” below) |
 
 **Q4_K_M, not F16.** The 1.4 GB F16 build exists, but Q4_K_M is the build the
 publisher recommends and the one the 94.8% figure was measured on. Q4_K_M keeps
@@ -152,46 +153,95 @@ success, not failure. Beamer keeps `raw` as `body` in that case and marks the
 note `Cleaned`, not `CleanFailed` — blanking a note because the speaker only
 said "um" would destroy the record of a bad recording.
 
-### Stage 2 — task extraction: `google/gemma-4-26B-A4B-it-qat-q4_0-gguf`
+### Stage 2 — task extraction: `google/gemma-4-E4B-it-qat-q4_0-gguf`
+
+**This is a starting point chosen to be replaced by measurement, not a final
+answer.** See “Choosing the extraction model by measurement” below.
 
 | Property | Value |
 |---|---|
-| File | `gemma-4-26B_q4_0-it.gguf`, **14.44 GB** |
-| Architecture | Gemma 4 MoE — 26B total, **~4B active**; 128 experts, top-8 routed |
-| Layers | 30; `sliding_window: 1024`, full attention only every 6th layer; `attention_k_eq_v: true` |
-| Context | 262,144 max (Beamer uses 8,192) |
-| Quantization | **QAT** — quantization-aware trained, published by Google itself |
-| License | Apache-2.0 per the Hub tag (verify at download — some third-party derivatives are tagged `license:gemma`) |
+| File | `gemma-4-E4B_q4_0-it.gguf`, **5.15 GB** |
+| Architecture | Gemma 4 "E" variant, ~4B effective parameters |
+| Quantization | **QAT** — quantization-aware trained, published by Google |
+| License | Apache-2.0 per the Hub tag (verify at download) |
+| Context | Beamer uses 8,192 |
 
-Two properties make this the pick:
-
-**MoE is the decisive win on a bandwidth-bound GPU.** Decode speed on Arc via
-Vulkan is limited by how many bytes must be read per token. A dense 27B at Q4
-reads its whole ~16 GB every token. This model reads only its 8 active experts
-of 128 — roughly 2 GB. Same VRAM footprint on disk, roughly 3–4× the decode
-speed *(estimate; see Risks)*.
-
-**QAT is not an ordinary quant.** The model was trained with q4_0 quantization
-in the loop, so quality at 4 bits tracks the bf16 model rather than degrading
-from it. Every alternative below ships post-training imatrix quants instead.
-
-The `mmproj` file (vision projector, 1.19 GB) is **not** downloaded — Beamer's
+The `mmproj` file (991 MB vision projector) is **not** downloaded — Beamer's
 use is text-only.
 
-Sliding-window attention on 25 of 30 layers plus shared K/V keeps the KV cache
-unusually small for a 26B model, which is why 8K context costs little.
+#### Why not the 26B MoE that the previous draft specified
+
+An earlier draft chose `gemma-4-26B-A4B-it` (14.44 GB) on the argument that
+MoE decode is cheap: it reads only its 8 active experts of 128, roughly
+2.2 GB/token, against ~5.2 GB/token for this dense E4B. By that measure the
+26B is genuinely the *faster* model despite being three times the size on
+disk, and that argument still holds.
+
+It was rejected anyway, for two reasons:
+
+1. **VRAM on the B60 is not free.** The earlier draft claimed it was, because
+   the card is headless. That ignored the fact that this machine runs other
+   GPU work on the B60 — a vLLM/XPU stack among it. Permanently parking
+   14.9 GB there so Beamer can serve a handful of short requests a day is a
+   bad trade against work that actually needs the card.
+2. **The job is small, and the hard part isn't capacity.** The difficulty in
+   stage 2 is *judgment* — deciding that something is not a task (§7.3) — and
+   the design now handles that with a confirmation step rather than by
+   assuming a larger model will be right more often.
+
+At 5.15 GB + 0.46 GB, Beamer leaves roughly 17 GB of the B60 free for
+everything else.
+
+#### The model ladder
+
+If measurement (below) shows E4B's precision is inadequate, promote in this
+order. All are official Google QAT builds under Apache-2.0, so promotion is a
+config change and a download — no code.
+
+| Rung | Model | On disk | Read/token |
+|---|---|---|---|
+| 1 (default) | `gemma-4-E4B-it` q4_0 | 5.15 GB | ~5.2 GB |
+| 2 | `gemma-4-12B-it` QAT UD-Q4_K_XL | 6.72 GB | ~6.7 GB |
+| 3 | `gemma-4-26B-A4B-it` q4_0 | 14.44 GB | ~2.2 GB (MoE) |
+
+Note rung 3 is both the largest and the fastest. If latency rather than
+quality turns out to be the binding constraint, skip rung 2.
 
 ### VRAM budget
 
 | Item | Size |
 |---|---|
-| `gemma-4-26B_q4_0-it.gguf` | 14.44 GB |
+| `gemma-4-E4B_q4_0-it.gguf` | 5.15 GB |
 | `s1-mini-q4_k_m.gguf` | 0.46 GB |
-| **Weights total** | **14.90 GB** |
+| **Weights total** | **5.61 GB** |
 | Available on B60 | 22.7 GB |
-| **Headroom for KV caches, buffers, fragmentation** | **~7.8 GB** |
+| **Left free for other work on the card** | **~17 GB** |
 
-Both models stay resident simultaneously. No swapping, no reload stalls.
+Both models stay resident simultaneously. At rung 3 the total would be
+14.90 GB, leaving ~7.8 GB.
+
+### Choosing the extraction model by measurement
+
+The right model for stage 2 is an empirical question about *this user's*
+dictation, and the spec deliberately does not assert an answer.
+
+**Corpus.** Roughly 50 real notes captured through Beamer's own note hotkey,
+hand-labelled with the tasks each should produce — which for many notes is
+**none**. Deliberately over-sample notes containing no tasks; those are the
+cases where extraction models fail, and a corpus of only task-bearing notes
+would hide the failure this feature most needs to avoid.
+
+**Metrics.** **Precision is primary** — under the strict policy in §7.3 a
+fabricated task is worse than a missed one. Recall is secondary. Report both,
+plus per-example diffs so regressions are legible rather than a moving number.
+
+**Harness.** A standalone binary under `src/bin/` that runs the corpus against
+a configured endpoint and prints the scores. There is precedent: `src/bin/
+voxtral_test.rs` and `src/bin/ws_test.rs` already exist as backend probes.
+
+**Free ongoing labels.** Every suggestion the user dismisses is a labelled
+negative, and every one accepted is a labelled positive (§5). The corpus grows
+by using the feature.
 
 ### Alternatives considered and rejected
 
@@ -201,14 +251,15 @@ Both models stay resident simultaneously. No swapping, no reload stalls.
 | `ornith-ai/Ornith-1.5-35B-A3B-GGUF` | **21.7 GB** Q4_K_M | Does not fit alongside stage 1 with usable KV cache. Also 2 days old at time of writing, from an unproven org. |
 | `Qwen3.8-27B` GGUF | ~16 GB Q4 | Dense. Same VRAM, ~3–4× slower decode than a comparable MoE. |
 | `google/gemma-4-31B-it` | ~18 GB Q4 | Dense, larger, slower, no QAT build. |
-| `empero-ai/Qwen3.8-9B-Distill-GGUF` | ~9.5 GB Q8 | Dense 9B — fits easily but is a quality step down from a 26B MoE for no speed gain worth having. Reasonable fallback if the 26B disappoints on latency. |
-| `LiquidAI/LFM2.5-2.6B-GGUF` | ~2 GB | The previous draft's pick, sized for a 10 GB card. Overtaken now that the budget is 22.7 GB. |
+| `gemma-4-26B-A4B-it` QAT | 14.44 GB | Fastest option and strong, but parks 15 GB on a card this machine needs for other GPU work. Kept as rung 3 of the ladder (§3), not the default. |
+| `empero-ai/Qwen3.8-9B-Distill-GGUF` | ~9.5 GB Q8 | Viable, but not QAT and outside the Gemma 4 ladder, so promoting to it means re-running the eval from scratch rather than swapping a path. Keep in reserve. |
+| `LiquidAI/LFM2.5-2.6B-GGUF` | ~2 GB | Non-QAT and weaker than a same-size Gemma 4 QAT build. Reasonable rung-0 if even 5 GB proves too much. |
 | `unsloth/…-qat-GGUF` UD-Q4_K_XL | 14.25 GB | Unsloth's dynamic K-quant of the same QAT weights. Arguably better bit allocation than legacy q4_0, but q4_0 is the scheme QAT actually targeted. Worth A/B testing; not the default. |
 | `Cactus-Compute/needle2` | — | On-device tool-calling specialist, but `cactus-needle` format — a whole second runtime. |
 | DeepSeek-V4 family | — | **No `deepseek_v4` arch in this llama.cpp build.** Cannot run. |
 | Any `mtp-*.gguf` draft weights | — | MTP tensors are explicitly ignored by this build (§2). |
 
-### 3.3 Attribution obligation
+### Attribution obligation
 
 `s1-mini`'s license is Apache 2.0 **with an additional term**, quoted in full:
 
@@ -242,10 +293,14 @@ notes::store ──── creates Note { state: Raw } ──► sticky window op
 llm::cleanup  (S1-mini)   ──► Note.body updated in place, state: Cleaned
       │
       ▼
-llm::extract  (gemma-4-26B-A4B) ──► Task rows created, state: Analyzed
+llm::extract  (gemma-4-E4B)     ──► Task rows created as **Suggested**
+      │                                  state: Analyzed
+      ▼
+suggestion chips appear on the sticky
       │
       ▼
-Tasks page badge
+user accepts ──► Tasks page      user dismisses ──► retained as a
+                                                     labelled negative
 ```
 
 The two LLM stages run as one background tokio task, **sequentially**:
@@ -292,12 +347,20 @@ pub struct Note {
     pub archived: bool,
 }
 
+/// A suggestion's lifecycle. Dismissed rows are RETAINED, never deleted —
+/// they are the labelled negatives that grow the eval corpus (§3).
+pub enum TaskStatus { Suggested, Accepted, Dismissed }
+
 pub struct Task {
     pub id: String,
     pub note_id: String,       // provenance: click a task, get its note
-    pub text: String,
-    pub done: bool,
+    pub text: String,          // normalized imperative, e.g. "Call the vet"
+    pub evidence: String,      // exact span of the note that triggered it
+    pub confidence: f32,       // 0.0-1.0, as reported by the model
+    pub status: TaskStatus,
+    pub done: bool,            // only meaningful when status == Accepted
     pub created: String,
+    pub decided: Option<String>, // when accepted/dismissed; the eval signal
 }
 ```
 
@@ -314,7 +377,8 @@ Two deliberate departures from `history.rs`:
   window close and on app shutdown.
 - **No entry cap.** `history.rs` caps at 1000 because dictations are disposable.
   Notes are authored content; silently dropping them is wrong. Old notes are
-  `archived`, never deleted without user action.
+  `archived`, never deleted without user action. `Dismissed` tasks are likewise
+  retained rather than deleted — they are training signal, not litter.
 
 ## 6. Capture — the note-mode hotkey
 
@@ -363,8 +427,8 @@ Beamer's first non-ASR model client.
 Beamer supervises `llama-server` child processes rather than requiring the user
 to run them. Two processes, one per model, on two loopback ports (defaults
 8081 for cleanup, 8082 for extraction). Two processes rather than model
-swapping because both fit simultaneously (§3) and swapping a 14.4 GB model
-would put a multi-second stall in the middle of the pipeline.
+swapping because both fit simultaneously (§3) and swapping models would put a
+multi-second stall in the middle of the pipeline.
 
 Startup sequence per model:
 
@@ -385,19 +449,23 @@ Startup sequence per model:
    s1-mini's trained input format (§3) depends on its template being applied
    exactly.
 3. Poll `/health` until ready or a timeout elapses — 30 s for s1-mini, **120 s
-   for the 26B model**, which must read 14.4 GB from disk and upload it to
-   VRAM on a cold start.
+   for the extraction model**, which must read several GB from disk and upload
+   it to VRAM on a cold start. The timeout is sized for ladder rung 3 (§3) so
+   promoting the model does not require touching it.
 
 Servers are spawned **lazily on first use**, not at Beamer startup.
 
-**Idle shutdown defaults to disabled (`0`).** The earlier draft proposed a
-15-minute timeout, sized for a card that was also driving displays. The B60 is
-headless and dedicated (§2), so holding 14.9 GB costs nothing anyone else
-wants, while a cold reload costs a multi-second stall on the next note. The
-setting remains configurable for anyone who wants the VRAM back.
+**Idle shutdown defaults to disabled (`0`).** At the default 5.6 GB (§3),
+holding the weights resident is a fair trade against a multi-second cold reload
+on the next note, and still leaves ~17 GB of the B60 for other work.
+
+This default should be **reconsidered by anyone promoting to ladder rung 3**:
+holding 14.9 GB indefinitely on a card this machine uses for other GPU work is
+a different proposition, and a 15–60 minute timeout is likely the better
+setting there.
 
 Child processes are killed on Beamer exit; a leaked `llama-server` holding
-14.4 GB of VRAM would be a nasty failure mode. The implementation must handle
+multiple GB of VRAM would be a nasty failure mode. The implementation must handle
 Beamer being SIGKILLed too — on next start, an already-listening port is
 adopted rather than fought over, which step 1 already covers.
 
@@ -417,18 +485,82 @@ format specified in §3. Temperature 0. The response is plain text and is used
 verbatim. There is no prompt engineering to do here and no room for
 improvisation — the format is part of the model's contract.
 
-**Extraction** (`llm/extract.rs`): sends the cleaned `body` and asks for a JSON
-array of action items. Temperature 0. Uses llama.cpp's
+**Extraction** (`llm/extract.rs`): sends the cleaned `body` and asks the model
+to *judge* what, if anything, is a task. Temperature 0. Uses llama.cpp's
 `response_format: {"type": "json_object"}` grammar constraint, so output is
 structurally valid JSON by construction rather than by hope.
 
 ```json
-{ "tasks": ["call the vet", "send Tuesday's invoice"] }
+{ "tasks": [
+    { "text": "Call the vet", "evidence": "I need to call the vet about Milo", "confidence": 0.93 }
+] }
 ```
+
+Every task carries the **exact span** of the note that produced it. This is not
+decoration: it is what makes a false positive visible to the user in one glance
+and makes the prompt debuggable when it misfires. A task with no traceable
+evidence is a fabrication, and the parser rejects any whose `evidence` is not a
+substring of the note.
 
 The parser must still tolerate ```json fences — models emit them regardless of
 instructions, and the grammar constraint does not apply to every server
-version.
+version. `{"tasks": []}` is a normal, frequent, successful response.
+
+### 7.3 What counts as a task
+
+This is the hard part of the whole feature, and it is a **precision** problem,
+not an extraction problem. An extraction-shaped prompt ("list the action items")
+biases the model toward producing output, which is exactly the failure to
+avoid: a note that is pure venting must yield nothing.
+
+**Policy: strict — first-person commitments only.** A task is only created for
+a concrete, future action the speaker themselves has committed to. Everything
+else stays as note text.
+
+The system prompt enumerates the negative categories explicitly, because naming
+them is what suppresses them:
+
+| Not a task | Example |
+|---|---|
+| Completed or past action | "I called the vet yesterday" |
+| Someone else's action | "Sarah is sending the invoice" |
+| Hypothetical or conditional | "if the build fails we'd roll back" |
+| Opinion, venting, emotion | "I'm so done with this project" |
+| Observation or fact | "the API returns 500 on empty payloads" |
+| Vague aspiration or idea | "we should think about caching", "it'd be cool to have dark mode" |
+| Rhetorical question | "why do I even bother" |
+
+Aspirations are deliberately excluded. They are the largest ambiguous class,
+and admitting them is what turns a task list into a graveyard of vague
+intentions. The policy can be loosened later; a list nobody trusts cannot be
+un-poisoned.
+
+Three further prompt requirements:
+
+1. **State that empty is normal.** "Most notes contain no tasks. Returning an
+   empty list is the correct and common answer. When uncertain, return
+   nothing." Without this, models reliably invent one.
+2. **Few-shot with hard negatives.** At least two exemplars are notes that
+   contain no tasks and correctly return `{"tasks": []}`. Positive-only
+   exemplars teach the model that output is always expected.
+3. **Bias toward omission**, stated explicitly, because the confirmation step
+   (below) makes a missed task cheap to notice and a fabricated one expensive
+   to trust.
+
+### 7.4 Suggestions, not facts
+
+Extraction never writes to the Tasks page directly. Tasks are created with
+`status: Suggested` and surface as chips on the sticky note, each showing its
+text and its evidence span. One click accepts, one dismisses.
+
+This is the structural answer to the precision problem, and it does three
+things at once:
+
+- A false positive costs one click instead of quietly polluting the task list.
+- It lowers the model quality bar, which is what makes a 5 GB model a
+  reasonable default instead of a 15 GB one.
+- Every decision is a **labelled example**. Dismissed rows are retained (§5),
+  so the eval corpus in §3 grows every time the feature is used.
 
 ### Failure handling
 
@@ -531,9 +663,16 @@ beside History.
   `vixalien/sticky`'s all-notes view: color swatch, first lines of `body`,
   relative timestamp, task count badge. Click pops out the sticky window. Text
   search over `raw` and `body`. Archive toggle.
-- **`src/ui/tasks_page.rs`** — flat checkbox list grouped by source note, with
-  a done/undone filter and click-through to the originating note. Checking a
-  task writes through to `tasks.json` on the same debounce.
+- **`src/ui/tasks_page.rs`** — flat checkbox list of **accepted** tasks only,
+  grouped by source note, with a done/undone filter and click-through to the
+  originating note. Checking a task writes through to `tasks.json` on the same
+  debounce. Dismissed tasks never appear here; they are retained in storage as
+  eval data, viewable only from a debug surface.
+
+Suggestion chips live on the sticky note itself (`sticky.rs`), not on either
+page: each shows the proposed task text with its evidence span, and an
+accept/dismiss pair. A note with pending suggestions shows a count badge on its
+card in the notes board.
 
 Both reuse `Card`, `Toggle` and the other primitives in
 `src/ui/components.rs`.
@@ -560,10 +699,11 @@ styling = "semi-formal"       # casual | semi-casual | semi-formal | formal
 structure = "lists"           # prose | lists
 context = "general"           # general | email
 
-[llm.extract]                 # google/gemma-4-26B-A4B-it QAT q4_0
-model_path = "…/gemma-4-26B_q4_0-it.gguf"
+[llm.extract]                 # google/gemma-4-E4B-it QAT q4_0 (ladder rung 1)
+model_path = "…/gemma-4-E4B_q4_0-it.gguf"
 port = 8082
 ctx = 8192
+min_confidence = 0.5          # below this, the suggestion is not shown at all
 
 [notes]
 all_workspaces = true         # Mutter: stick() notes across workspaces
@@ -573,7 +713,7 @@ default_color = "purple"
 Model files are **not** downloaded by Beamer. They are fetched manually (or by
 a small documented script committed alongside the spec) and their paths
 configured. Adding a downloader is a separate feature with its own progress UI,
-resumability and disk-space concerns — and at 14.4 GB it is not a trivial one.
+resumability and disk-space concerns.
 
 `agent_docs/config_schema.md` must be updated to match.
 
@@ -586,6 +726,13 @@ Unit-testable without a compositor or a GPU:
   one write); archive does not delete.
 - **`llm` extraction parsing** — clean JSON; JSON wrapped in ```json fences;
   malformed JSON → error, not panic; `{"tasks": []}` → zero tasks, not an error.
+- **Evidence validation** — a task whose `evidence` is not a substring of the
+  note is rejected as a fabrication rather than shown to the user.
+- **Confidence threshold** — suggestions below `min_confidence` are dropped.
+- **Suggestion lifecycle** — accepting moves a task to the Tasks page;
+  dismissing retains the row with `status: Dismissed` and a `decided`
+  timestamp. A test must assert dismissal does **not** delete, since the eval
+  corpus depends on it.
 - **`llm` cleanup contract** — an **empty** cleanup response is treated as
   success with `body` left equal to `raw` (§3), *not* as a failure. A test must
   pin this, because the intuitive implementation gets it backwards.
@@ -615,6 +762,8 @@ Against the project's 500-lines-per-file constraint:
 | `src/llm/server.rs` | `llama-server` spawn / health / idle shutdown |
 | `src/llm/cleanup.rs` | stage 1 prompt + call |
 | `src/llm/extract.rs` | stage 2 prompt + call + JSON parsing |
+| `src/llm/prompts.rs` | the s1-mini wire format and the task-policy prompt, with its few-shot exemplars |
+| `src/bin/task_eval.rs` | eval harness: runs the labelled corpus, reports precision/recall |
 | `src/orchestrator/sink.rs` | `CaptureMode`, `do_note_capture` |
 | `src/ui/sticky.rs` | sticky note window component + registry |
 | `src/ui/notes_page.rs` | all-notes board |
@@ -641,16 +790,24 @@ the same attribution.
   before any Rust is written. If stage 1 does not land in roughly a second on a
   typical note, the "watch the sticky tidy itself" experience does not exist
   and the fast path needs rethinking.
-- **Vulkan MoE performance on Intel is the largest unknown.** llama.cpp's
-  Vulkan backend is well exercised for dense transformers; MoE expert routing
-  is less travelled. If gemma-4-26B-A4B underperforms its parameter count,
-  the fallback ladder is `empero-ai/Qwen3.8-9B-Distill-GGUF` (dense, ~9.5 GB)
-  then `NVIDIA-Nemotron-3.5-Lightning-30B-A3B`.
+- **Task/not-task precision is the feature's central risk**, and no model
+  choice eliminates it. The mitigations are structural — strict policy,
+  enumerated negatives, hard-negative exemplars, evidence spans, a confidence
+  floor, and above all the confirmation step. Expect the first prompt to
+  over-trigger and expect to iterate on it against the corpus (§3).
+- **A 4B model may not hold the strict policy.** Suppressing output is harder
+  for small models than producing it; E4B may propose tasks for aspirations
+  and hypotheticals no matter how the prompt is worded. That is precisely what
+  the eval corpus is for, and why the ladder to 12B and 26B-A4B is documented
+  as a config change rather than a rewrite.
+- **Vulkan MoE performance on Intel is untested** and matters only if the
+  ladder reaches rung 3. llama.cpp's Vulkan backend is well exercised for dense
+  transformers; MoE expert routing is less travelled.
 - **Gemma 4 licensing must be confirmed at download.** Google's own repos are
   tagged `license:apache-2.0`, but some third-party derivatives carry
   `license:gemma`. Read the LICENSE in the repo actually downloaded, as was
   done for s1-mini.
-- **The s1-mini naming attribution is a shipping requirement** (§3.3), not a
+- **The s1-mini naming attribution is a shipping requirement** (§3), not a
   nicety. It is easy to forget and it is a licence term.
 - **s1-mini's input format is unforgiving.** The publisher documents that a
   reworded system prompt or an out-of-set control value produces hallucinated
@@ -660,10 +817,14 @@ the same attribution.
   changes. `GGML_VK_VISIBLE_DEVICES=0` may not always mean the B60. The
   implementation must log the device llama-server actually selected at startup
   so a mismatch is visible rather than mysterious.
-- **14.4 GB cold start.** First use after boot reads 14.4 GB from disk. With
-  idle shutdown disabled this happens once per session, but the first note of
-  the day will wait on it. Beamer should surface "loading model" state rather
-  than appearing hung — and note creation itself still must not block.
+- **Cold start.** First use after boot reads 5.6 GB from disk (14.9 GB at
+  ladder rung 3). With idle shutdown disabled this happens once per session,
+  but the first note of the day waits on it. Beamer should surface a "loading
+  model" state rather than appearing hung — and note creation itself still must
+  not block.
+- **Beamer shares the B60 with other work on this machine.** The 5.6 GB default
+  is sized to stay out of the way. Anyone promoting to rung 3 should know they
+  are claiming 15 GB of that card for as long as Beamer runs.
 - **Two extra hotkey listeners** are the most likely source of platform-
   specific bugs, particularly on the evdev path.
 - **Extension changes require a re-login** to test, which makes iteration on
