@@ -44,10 +44,12 @@ measured during implementation.
 |---|---|---|
 | GPU 1 | Intel Arc B570 (BMG G21), 10 GB, `0000:03:00.0`, `card1` | `/sys/class/drm`, `vulkaninfo` |
 | GPU 2 | Intel Arc Pro B60 (BMG G21), 22.7 GB, `0000:0a:00.0`, `card2` | same |
+| **Display topology** | **B570 drives both monitors** (`card1-DP-1`, `card1-DP-4` connected). **B60 has zero connected outputs** — headless compute. | `/sys/class/drm/*/status` |
 | Vulkan driver | Mesa 26.1.7 (kisak-mesa PPA), `DRIVER_ID_INTEL_OPEN_SOURCE_MESA`, both Arc cards enumerated | `vulkaninfo --summary` |
 | llama.cpp | built at `/home/berkley/Programming/llama.cpp/build/bin/`, version 8782 (`e97492369`) | `llama-server --version` |
 | llama.cpp backend | **Vulkan** (`GGML_VULKAN:BOOL=ON`, `GGML_SYCL:BOOL=OFF`, `GGML_CUDA:BOOL=OFF`) | `build/CMakeCache.txt` |
-| llama.cpp arch support | `qwen3`, `qwen35`, `qwen35moe`, `qwen3moe`, `qwen3next`, `qwen3vl` | `src/llama-arch.cpp` |
+| llama.cpp arch support | includes `gemma4`, `qwen3`, `qwen35`, `qwen35moe`, `lfm2`, `lfm2moe`, `nemotron_h_moe`, `minimax-m2`, `kimi-linear`. **No DeepSeek-V4 arch** — that family cannot run on this build. | `src/llama-arch.cpp` |
+| **MTP unsupported** | `// NextN/MTP tensors are currently ignored (reserved for future MTP support)`. Published `mtp-*.gguf` draft weights are unusable here. Classic `--model-draft` speculative decoding **is** supported. | `src/llama-arch.cpp:757`, `common/arg.cpp` |
 | Running inference servers | none (nothing on 8000/8001/11434, no ollama installed) | `ss -ltnp`, `which` |
 | Disk free | 649 GB | `df -h` |
 | GNOME extension | `beamer-focus@beamer.app` v4, exports `app.beamer.FocusProvider` at `/app/beamer/FocusProvider` | `extension/…/extension.js:20` |
@@ -79,56 +81,151 @@ warns about.
 
 ## 3. Model selection
 
-Two models, two jobs. Splitting them is what makes the fast path fast.
+Two models, two jobs. Splitting them is what makes the fast path fast, and it
+is forced anyway: the stage-1 model is not a chat model and cannot do stage 2.
 
-### Stage 1 — cleanup: `superwhisper/s1-mini-GGUF`
+Both run on the **B60**. That is not a preference — the B570 drives both
+monitors and is busy compositing GNOME, while the B60 has no connected outputs
+at all. Its full 22.7 GB is available with no framebuffer and no compositor
+competing for bandwidth.
 
-- 751.6M parameters, Qwen3-0.6B finetune, Apache-adjacent (`license: other` —
-  **must be read before shipping**, see Risks).
-- Trained specifically for ASR post-processing: text normalization, inverse
-  text normalization, punctuation, truecasing, dictation cleanup.
-- Official GGUF published by the same org, tagged `llama.cpp`.
-- Quantization: **Q8_0** (~800 MB). At this size the memory saved by Q4 is
-  irrelevant and the job is verbatim-fidelity text rewriting, where quantization
-  damage shows up directly as wrong words.
-- Expected latency for a 200-word note: well under one second *(estimate)*.
+### Stage 1 — cleanup: `superwhisper/s1-mini-GGUF`, Q4_K_M
 
-This model is doing the job it was built for. A general instruct model prompted
-to "add punctuation" is strictly worse here and slower.
+The single best-fitting model found. It is not a general model prompted to
+punctuate; it is a text normalizer trained for exactly this transformation.
 
-### Stage 2 — task extraction: `LiquidAI/LFM2.5-2.6B-GGUF`
+| Property | Value |
+|---|---|
+| File | `s1-mini-q4_k_m.gguf`, **462 MB** |
+| Parameters | 0.6B unique (751.6M tensor elements; embeddings are tied but materialized twice) |
+| Base | Qwen3-0.6B finetune; GGUF arch `qwen3`, 311 tensors, 28 blocks |
+| Context | 40,960 tokens |
+| Measured accuracy | **94.8% token accuracy** on 7,519 held-out English cases — *measured on this Q4_K_M build* |
+| License | Apache 2.0 **plus an additional naming term** (see §3.3) |
 
-- 2.6B parameters, 421K downloads, built and quantized for on-device use,
-  GGUF-native.
-- Job: read the cleaned note, emit a JSON array of action items.
-- Quantization: **Q6_K** (~2.2 GB). VRAM is not scarce here, and extraction
-  quality is more sensitive to quantization than cleanup throughput is.
-- Expected latency: 1–3 s for a short JSON output *(estimate)*.
+**Q4_K_M, not F16.** The 1.4 GB F16 build exists, but Q4_K_M is the build the
+publisher recommends and the one the 94.8% figure was measured on. Q4_K_M keeps
+the 29 most quantization-sensitive tensors at Q6_K and normalization params at
+F32. Choosing F16 would trade 1 GB of VRAM for an unmeasured quality delta.
 
-**Upgrade path if extraction quality disappoints:** `empero-ai/Qwen3.8-9B-Distill-GGUF`
-(9B, tagged `reasoning` and `function-calling`, Apache-2.0) at Q4_K_M ≈ 5.5 GB.
-Still comfortable on either card. Slower, considerably more capable. The model
-id is a config field precisely so this swap costs no code.
+What it does: removes fillers, resolves false starts and self-corrections to
+the value the speaker landed on, applies punctuation and capitalization, and
+renders spoken numbers, dates, times, currency and email addresses in written
+form.
 
-Also noted and rejected for now: `Cactus-Compute/needle2` (on-device function
-calling, but `cactus-needle` format rather than GGUF — a new runtime), and the
-Qwen3.8-27B family (overkill; the B60 could run it, but a 27B model spun up to
-extract two to-dos is absurd).
+**It is English-only and not a chat model.** It will not follow general
+instructions. This is a feature — it cannot wander off and "improve" your
+note — but it means stage 2 must be a separate model.
 
-### GPU assignment
+#### Mandatory input format
 
-**Default to the B570 (`card1`, 10 GB), not the B60.** Reasons:
+The model was trained on an exact input shape. The publisher's documentation
+states plainly that deviating from it causes hallucination or garbled output.
+This is not a prompt to tune; it is a wire format.
 
-1. Both models together are under 3 GB; 10 GB is ample.
-2. The B60 has a documented wedge history (2026-04-29, 2026-05-07) and is the
-   card reserved for heavier work in other projects. Leaving it free avoids
-   contention and avoids Beamer being the process that wedges it.
-3. If the B570 is busy or absent, the device is a config field.
+System prompt, verbatim:
 
-Device selection passes through `GGML_VK_VISIBLE_DEVICES` on the spawned
-process. The exact enumeration index must be confirmed at implementation time
-against `llama-server --list-devices`, since Vulkan device order is not
-guaranteed to match DRM card order.
+```
+You are a text normalizer for speech-to-text transcripts. The input begins with a control line specifying the styling, structure, and context settings; clean the transcript to match those settings and output only the cleaned text.
+```
+
+User message — control line, newline, then the transcript:
+
+```
+[Styling: semi-formal] [Structure: prose] [Context: general]
+<raw transcript>
+```
+
+| Axis | Trained values | Beamer's default |
+|---|---|---|
+| `Styling` | `casual`, `semi-casual`, `semi-formal`, `formal` | `semi-formal` (the publisher's suggested default: standard written English, contractions kept, colloquialisms smoothed) |
+| `Structure` | `prose`, `lists` | `lists` — a dictated note that enumerates things should become bullets; the model is conservative and needs 3+ items before it will |
+| `Context` | `general`, `email` | `general` |
+
+Styling is exposed as a per-note setting in the UI, defaulting from config.
+Values outside the trained sets must never be sent.
+
+#### Empty output is a valid result
+
+Filler-only or noise-only input correctly returns an **empty string**. This is
+success, not failure. Beamer keeps `raw` as `body` in that case and marks the
+note `Cleaned`, not `CleanFailed` — blanking a note because the speaker only
+said "um" would destroy the record of a bad recording.
+
+### Stage 2 — task extraction: `google/gemma-4-26B-A4B-it-qat-q4_0-gguf`
+
+| Property | Value |
+|---|---|
+| File | `gemma-4-26B_q4_0-it.gguf`, **14.44 GB** |
+| Architecture | Gemma 4 MoE — 26B total, **~4B active**; 128 experts, top-8 routed |
+| Layers | 30; `sliding_window: 1024`, full attention only every 6th layer; `attention_k_eq_v: true` |
+| Context | 262,144 max (Beamer uses 8,192) |
+| Quantization | **QAT** — quantization-aware trained, published by Google itself |
+| License | Apache-2.0 per the Hub tag (verify at download — some third-party derivatives are tagged `license:gemma`) |
+
+Two properties make this the pick:
+
+**MoE is the decisive win on a bandwidth-bound GPU.** Decode speed on Arc via
+Vulkan is limited by how many bytes must be read per token. A dense 27B at Q4
+reads its whole ~16 GB every token. This model reads only its 8 active experts
+of 128 — roughly 2 GB. Same VRAM footprint on disk, roughly 3–4× the decode
+speed *(estimate; see Risks)*.
+
+**QAT is not an ordinary quant.** The model was trained with q4_0 quantization
+in the loop, so quality at 4 bits tracks the bf16 model rather than degrading
+from it. Every alternative below ships post-training imatrix quants instead.
+
+The `mmproj` file (vision projector, 1.19 GB) is **not** downloaded — Beamer's
+use is text-only.
+
+Sliding-window attention on 25 of 30 layers plus shared K/V keeps the KV cache
+unusually small for a 26B model, which is why 8K context costs little.
+
+### VRAM budget
+
+| Item | Size |
+|---|---|
+| `gemma-4-26B_q4_0-it.gguf` | 14.44 GB |
+| `s1-mini-q4_k_m.gguf` | 0.46 GB |
+| **Weights total** | **14.90 GB** |
+| Available on B60 | 22.7 GB |
+| **Headroom for KV caches, buffers, fragmentation** | **~7.8 GB** |
+
+Both models stay resident simultaneously. No swapping, no reload stalls.
+
+### Alternatives considered and rejected
+
+| Candidate | Size | Why not |
+|---|---|---|
+| `NVIDIA-Nemotron-3.5-Lightning-30B-A3B` | ~17 GB Q4 | Closest rival — 3B active, GGUF published by **ggml-org itself**. Rejected on three counts: `license: other` vs Apache-2.0; post-training imatrix quants vs QAT; and it is a **mamba2 hybrid**, and SSM kernels are the least-mature path in llama.cpp's Vulkan backend. A performance surprise on Intel is likely enough to matter. **Documented as the primary A/B alternative.** |
+| `ornith-ai/Ornith-1.5-35B-A3B-GGUF` | **21.7 GB** Q4_K_M | Does not fit alongside stage 1 with usable KV cache. Also 2 days old at time of writing, from an unproven org. |
+| `Qwen3.8-27B` GGUF | ~16 GB Q4 | Dense. Same VRAM, ~3–4× slower decode than a comparable MoE. |
+| `google/gemma-4-31B-it` | ~18 GB Q4 | Dense, larger, slower, no QAT build. |
+| `empero-ai/Qwen3.8-9B-Distill-GGUF` | ~9.5 GB Q8 | Dense 9B — fits easily but is a quality step down from a 26B MoE for no speed gain worth having. Reasonable fallback if the 26B disappoints on latency. |
+| `LiquidAI/LFM2.5-2.6B-GGUF` | ~2 GB | The previous draft's pick, sized for a 10 GB card. Overtaken now that the budget is 22.7 GB. |
+| `unsloth/…-qat-GGUF` UD-Q4_K_XL | 14.25 GB | Unsloth's dynamic K-quant of the same QAT weights. Arguably better bit allocation than legacy q4_0, but q4_0 is the scheme QAT actually targeted. Worth A/B testing; not the default. |
+| `Cactus-Compute/needle2` | — | On-device tool-calling specialist, but `cactus-needle` format — a whole second runtime. |
+| DeepSeek-V4 family | — | **No `deepseek_v4` arch in this llama.cpp build.** Cannot run. |
+| Any `mtp-*.gguf` draft weights | — | MTP tensors are explicitly ignored by this build (§2). |
+
+### 3.3 Attribution obligation
+
+`s1-mini`'s license is Apache 2.0 **with an additional term**, quoted in full:
+
+> In addition to the terms of the Apache License, Version 2.0 above: any use,
+> distribution, or integration of this model, whether unmodified or as part of
+> a derivative work or product, must continue to identify it by its original
+> name, "S1-mini" by "Superwhisper", using that exact capitalization,
+> regardless of any other name under which the model or a product
+> incorporating it is marketed or distributed.
+
+This is binding and easy to satisfy, but it is **not optional**. Beamer must
+carry the string `"S1-mini" by "Superwhisper"` — exact capitalization — in an
+About/credits surface in the settings UI and in the repository's README. This
+is a required implementation task, not a nicety.
+
+Apache 2.0 also requires shipping a copy of the license and its attribution
+notices. Both model licenses go in a `licenses/` directory in the repo.
 
 ## 4. Architecture
 
@@ -142,10 +239,10 @@ orchestrator (existing audio → ASR path, unchanged)
 notes::store ──── creates Note { state: Raw } ──► sticky window opens immediately
       │
       ▼
-llm::cleanup  (s1-mini)   ──► Note.body updated in place, state: Cleaned
+llm::cleanup  (S1-mini)   ──► Note.body updated in place, state: Cleaned
       │
       ▼
-llm::extract  (LFM2.5)    ──► Task rows created, state: Analyzed
+llm::extract  (gemma-4-26B-A4B) ──► Task rows created, state: Analyzed
       │
       ▼
 Tasks page badge
@@ -266,8 +363,8 @@ Beamer's first non-ASR model client.
 Beamer supervises `llama-server` child processes rather than requiring the user
 to run them. Two processes, one per model, on two loopback ports (defaults
 8081 for cleanup, 8082 for extraction). Two processes rather than model
-swapping because both models together are under 3 GB and swapping would put a
-multi-second stall in the fast path.
+swapping because both fit simultaneously (§3) and swapping a 14.4 GB model
+would put a multi-second stall in the middle of the pipeline.
 
 Startup sequence per model:
 
@@ -275,16 +372,34 @@ Startup sequence per model:
    user run their own server and lets Beamer survive its own restart without
    respawning.
 2. If not, and `llm.manage_server = true`, spawn:
-   `llama-server -m <gguf> --port <port> --host 127.0.0.1 -ngl 99 -c 4096`
-   with `LD_LIBRARY_PATH` set to the llama.cpp build dir and
-   `GGML_VK_VISIBLE_DEVICES` set to the configured device.
-3. Poll `/health` until ready or a timeout (~30 s) elapses.
 
-Servers are spawned **lazily on first use**, not at Beamer startup — no reason
-to hold VRAM for a user who never dictates a note. An idle timer (default
-15 minutes, configurable, 0 = never) shuts them down. Child processes are
-killed on Beamer exit; a leaked `llama-server` holding VRAM would be a nasty
-failure mode.
+   ```
+   llama-server -m <gguf> --port <port> --host 127.0.0.1 \
+                -ngl 99 -c <ctx> --jinja
+   ```
+
+   with `LD_LIBRARY_PATH` set to the llama.cpp build dir (§2) and
+   `GGML_VK_VISIBLE_DEVICES` set to the configured device.
+
+   `--jinja` is required: both models ship embedded chat templates, and
+   s1-mini's trained input format (§3) depends on its template being applied
+   exactly.
+3. Poll `/health` until ready or a timeout elapses — 30 s for s1-mini, **120 s
+   for the 26B model**, which must read 14.4 GB from disk and upload it to
+   VRAM on a cold start.
+
+Servers are spawned **lazily on first use**, not at Beamer startup.
+
+**Idle shutdown defaults to disabled (`0`).** The earlier draft proposed a
+15-minute timeout, sized for a card that was also driving displays. The B60 is
+headless and dedicated (§2), so holding 14.9 GB costs nothing anyone else
+wants, while a cold reload costs a multi-second stall on the next note. The
+setting remains configurable for anyone who wants the VRAM back.
+
+Child processes are killed on Beamer exit; a leaked `llama-server` holding
+14.4 GB of VRAM would be a nasty failure mode. The implementation must handle
+Beamer being SIGKILLed too — on next start, an already-listening port is
+adopted rather than fought over, which step 1 already covers.
 
 All process spawning and the blocking `/health` poll go through
 `tokio::task::spawn_blocking`, per the threading rules in
@@ -297,14 +412,14 @@ already has `reqwest` and a shared `http_client()` in
 `src/transcription/mod.rs` — the local calls reuse both, so this is the same
 code shape as the existing cloud backends with a different base URL.
 
-**Cleanup** (`llm/cleanup.rs`): system prompt instructs punctuation,
-capitalization, disfluency removal, and inverse text normalization, with an
-explicit instruction not to add, remove, or reword content. Response is plain
-text. Temperature 0.
+**Cleanup** (`llm/cleanup.rs`): sends the exact system prompt and control-line
+format specified in §3. Temperature 0. The response is plain text and is used
+verbatim. There is no prompt engineering to do here and no room for
+improvisation — the format is part of the model's contract.
 
-**Extraction** (`llm/extract.rs`): system prompt asks for a JSON array of
-action items. Temperature 0. Request uses llama.cpp's
-`response_format: {"type": "json_object"}` grammar constraint so the output is
+**Extraction** (`llm/extract.rs`): sends the cleaned `body` and asks for a JSON
+array of action items. Temperature 0. Uses llama.cpp's
+`response_format: {"type": "json_object"}` grammar constraint, so output is
 structurally valid JSON by construction rather than by hope.
 
 ```json
@@ -312,17 +427,23 @@ structurally valid JSON by construction rather than by hope.
 ```
 
 The parser must still tolerate ```json fences — models emit them regardless of
-instructions, and the grammar constraint does not apply to every server version.
+instructions, and the grammar constraint does not apply to every server
+version.
 
 ### Failure handling
 
 The governing rule: **a failure never costs the user words.**
 
-- Cleanup fails → `body` stays equal to `raw`, state becomes `CleanFailed`, the
-  note shows a small retry affordance. The note is still perfectly usable.
+- Cleanup returns **empty** → this is *success*, not failure (§3). Filler-only
+  speech correctly normalizes to nothing. `body` stays equal to `raw`, state
+  becomes `Cleaned`, and the note is flagged "nothing to clean" rather than
+  blanked.
+- Cleanup errors (network, non-2xx, timeout) → `body` stays equal to `raw`,
+  state becomes `CleanFailed`, note shows a retry affordance. Extraction still
+  runs, against `raw`.
 - Extraction fails → state becomes `ExtractFailed`, no tasks created, retry
   available. The note is unaffected.
-- Server unreachable, model file missing, GPU wedged, spawn failed → identical
+- Server unreachable, model file missing, GPU busy, spawn failed → identical
   handling. Note creation itself never depends on any of it.
 
 Errors are logged through the existing `StatusLog` so they surface in the app
@@ -331,11 +452,11 @@ rather than only in `RUST_LOG`.
 ### Trigger policy
 
 - **Dictated notes:** cleanup runs automatically (you asked for correction, and
-  you cannot proofread speech as you produce it). Extraction runs automatically
-  after cleanup.
+  you cannot proofread speech as you produce it). Extraction runs after it.
 - **Typed notes:** neither runs automatically. Rewriting text someone
-  deliberately typed is presumptuous. An explicit "Enhance" button on the note
-  runs both.
+  deliberately typed is presumptuous — and s1-mini is a *transcript* normalizer,
+  so feeding it prose that was never spoken is outside its training
+  distribution. An explicit "Enhance" button runs both.
 
 ## 8. Sticky windows — optimized for Mutter
 
@@ -427,26 +548,32 @@ note_hotkey = ""              # unset by default
 enabled = true
 manage_server = true          # false = connect only, never spawn
 llama_server_path = "/home/berkley/Programming/llama.cpp/build/bin/llama-server"
-vulkan_device = 0             # confirm against `llama-server --list-devices`
-idle_shutdown_minutes = 15    # 0 = never
+llama_lib_dir = "/home/berkley/Programming/llama.cpp/build/bin"
+vulkan_device = 0             # B60; confirm against `llama-server --list-devices`
+idle_shutdown_minutes = 0     # 0 = never; B60 is headless and dedicated
 
-[llm.cleanup]
-model_path = "…/s1-mini-Q8_0.gguf"
+[llm.cleanup]                 # "S1-mini" by "Superwhisper"
+model_path = "…/s1-mini-q4_k_m.gguf"
 port = 8081
+ctx = 8192
+styling = "semi-formal"       # casual | semi-casual | semi-formal | formal
+structure = "lists"           # prose | lists
+context = "general"           # general | email
 
-[llm.extract]
-model_path = "…/LFM2.5-2.6B-Q6_K.gguf"
+[llm.extract]                 # google/gemma-4-26B-A4B-it QAT q4_0
+model_path = "…/gemma-4-26B_q4_0-it.gguf"
 port = 8082
+ctx = 8192
 
 [notes]
 all_workspaces = true         # Mutter: stick() notes across workspaces
 default_color = "purple"
 ```
 
-Model files are **not** downloaded by Beamer. The spec assumes they are fetched
-manually (or by a small documented script) and their paths configured. Adding a
-downloader is a separate feature with its own progress UI, error handling, and
-disk-space concerns.
+Model files are **not** downloaded by Beamer. They are fetched manually (or by
+a small documented script committed alongside the spec) and their paths
+configured. Adding a downloader is a separate feature with its own progress UI,
+resumability and disk-space concerns — and at 14.4 GB it is not a trivial one.
 
 `agent_docs/config_schema.md` must be updated to match.
 
@@ -457,9 +584,14 @@ Unit-testable without a compositor or a GPU:
 - **`notes::store`** — serialize/deserialize round-trip; corrupt-file preserved
   as `.corrupt` and a fresh store returned; debounce coalescing (many edits →
   one write); archive does not delete.
-- **`llm` response parsing** — clean JSON; JSON wrapped in ```json fences;
-  malformed JSON → error, not panic; empty response → error. Cleanup
-  responses that come back empty must be rejected so `body` is never blanked.
+- **`llm` extraction parsing** — clean JSON; JSON wrapped in ```json fences;
+  malformed JSON → error, not panic; `{"tasks": []}` → zero tasks, not an error.
+- **`llm` cleanup contract** — an **empty** cleanup response is treated as
+  success with `body` left equal to `raw` (§3), *not* as a failure. A test must
+  pin this, because the intuitive implementation gets it backwards.
+- **s1-mini request shape** — the system prompt is byte-identical to §3 and the
+  control line only ever carries trained values. A test should reject any
+  attempt to send an out-of-set styling/structure/context value.
 - **State machine** — every stage failure leaves `raw` intact and `body`
   non-empty.
 - **Sink routing** — `HotkeyEvent::RecordStart(CaptureMode::Note)` reaches
@@ -495,20 +627,43 @@ Modified: `src/hotkey/mod.rs`, `ll_hook.rs`, `linux_hotkey.rs`,
 New docs: `agent_docs/local_inference.md`. Updated:
 `agent_docs/config_schema.md`, `agent_docs/dioxus_architecture.md`.
 
+New non-code deliverables, both required by §3.3 rather than optional:
+`licenses/` holding both model licenses, and an About/credits surface in the
+settings UI carrying `"S1-mini" by "Superwhisper"` verbatim. `README.md` gains
+the same attribution.
+
 ## 13. Risks
 
-- **`s1-mini` license is `license: other`.** It must be read before this
-  ships. If it forbids the use, the fallback is to use LFM2.5 for both stages
-  with a cleanup prompt — slower and less precise, but functional.
+- **Every performance figure in this spec is an estimate.** None was
+  benchmarked. The reasoning is sound (MoE reads ~2 GB/token vs ~16 GB for a
+  dense 27B on a bandwidth-bound card) but reasoning is not measurement.
+  **Benchmarking both models on the B60 via Vulkan is implementation step 1**,
+  before any Rust is written. If stage 1 does not land in roughly a second on a
+  typical note, the "watch the sticky tidy itself" experience does not exist
+  and the fast path needs rethinking.
+- **Vulkan MoE performance on Intel is the largest unknown.** llama.cpp's
+  Vulkan backend is well exercised for dense transformers; MoE expert routing
+  is less travelled. If gemma-4-26B-A4B underperforms its parameter count,
+  the fallback ladder is `empero-ai/Qwen3.8-9B-Distill-GGUF` (dense, ~9.5 GB)
+  then `NVIDIA-Nemotron-3.5-Lightning-30B-A3B`.
+- **Gemma 4 licensing must be confirmed at download.** Google's own repos are
+  tagged `license:apache-2.0`, but some third-party derivatives carry
+  `license:gemma`. Read the LICENSE in the repo actually downloaded, as was
+  done for s1-mini.
+- **The s1-mini naming attribution is a shipping requirement** (§3.3), not a
+  nicety. It is easy to forget and it is a licence term.
+- **s1-mini's input format is unforgiving.** The publisher documents that a
+  reworded system prompt or an out-of-set control value produces hallucinated
+  or garbled output. It must be treated as a wire format with a test pinning
+  it, not as a prompt someone may later "improve".
 - **Vulkan device indices are not stable** across driver updates or card
-  changes. `GGML_VK_VISIBLE_DEVICES=0` may not always mean the B570. The
-  implementation should log the device llama-server actually selected at
-  startup so a mismatch is visible rather than mysterious.
-- **B60 wedge history.** Mitigated by defaulting to the B570, and by the rule
-  that inference failure never blocks note creation.
-- **Performance figures in §3 are estimates.** They must be benchmarked early;
-  if stage 1 does not land under ~1 s, the "sticky updates while you watch"
-  experience does not exist and the design of the fast path needs revisiting.
+  changes. `GGML_VK_VISIBLE_DEVICES=0` may not always mean the B60. The
+  implementation must log the device llama-server actually selected at startup
+  so a mismatch is visible rather than mysterious.
+- **14.4 GB cold start.** First use after boot reads 14.4 GB from disk. With
+  idle shutdown disabled this happens once per session, but the first note of
+  the day will wait on it. Beamer should surface "loading model" state rather
+  than appearing hung — and note creation itself still must not block.
 - **Two extra hotkey listeners** are the most likely source of platform-
   specific bugs, particularly on the evdev path.
 - **Extension changes require a re-login** to test, which makes iteration on
