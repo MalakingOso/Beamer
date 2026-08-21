@@ -48,7 +48,7 @@ RUST_LOG=beamer=debug cargo run  # Run with debug logging
 
 ---
 
-# 🚧 PICK UP HERE — Sticky Notes feature (Task 1 done 2026-08-21)
+# 🚧 PICK UP HERE — Sticky Notes feature (Tasks 1–3, 5–8 done 2026-08-21)
 
 Read these three documents first, in order:
 
@@ -56,12 +56,30 @@ Read these three documents first, in order:
 2. **Plan:** `docs/superpowers/plans/2026-08-20-sticky-notes-phase1.md` (13 tasks)
 3. **Benchmarks:** `docs/superpowers/benchmarks/2026-08-20-b60-llama-vulkan.md`
 
-**Task 1 is complete.** Models downloaded, backend chosen by measurement, server
-standing. Every latency estimate in the spec is now a measurement, and two
-decisions changed as a result (below).
+**Tasks 1, 2, 3, 5, 6, 7 and 8 are complete** on branch `feat/sticky-notes`.
+Task 1 replaced every latency estimate with a measurement (two decisions changed
+as a result, below). Batches A–C then built the feature through to its first
+visible payoff: **press the note hotkey, speak, and a sticky note appears on the
+desktop and survives a restart.** 121 tests pass, up from a 101 baseline.
 
-**Next action:** execute **Task 2** — thread `CaptureMode` through `HotkeyEvent`.
-That is the first task that writes feature code. Branch `feat/sticky-notes`.
+**Task 4 (Windows hotkey parity) is deferred** — `ll_hook.rs` is
+`#[cfg(target_os = "windows")]` and cannot be built or tested here.
+
+**Next action:** execute **Task 9** — the GNOME extension's `PlaceWindow` /
+`GetWindowFrame` D-Bus methods. ⚠️ It needs a **full GNOME log out and back in**
+mid-task; extensions do not hot-reload on Wayland. Until Tasks 9/10 land, notes
+reappear wherever Mutter puts them, which is expected, not a bug.
+
+**Set a note hotkey before testing** — `note_hotkey = ""` in `config.toml` means
+note capture is off entirely, by design, so the dictation hotkey can never be
+silently diverted.
+
+Six corrections to the repo plan were found while executing Batches A–C and are
+written up in a `## Corrections found while executing Batches A–C` section in the
+plan file. The one that matters most: **nothing in Tasks 2–8 ever wrote
+`notes.json`** — the flush driver only appeared in Task 11 — so notes were created
+and never persisted. Fixed three ways (immediate flush on capture, a 500 ms
+debounce tick, and a flush before the tray Quit's `process::exit`).
 
 **Measured, so stop estimating:**
 
@@ -85,7 +103,7 @@ unconfirmed. Delivered in three phases; only Phase 1 is planned in detail.
 
 | Phase | Deliverable | Status |
 |---|---|---|
-| 1 | Dictate → sticky note on desktop, persisted, positioned | **Task 1 done; Task 2 next** |
+| 1 | Dictate → sticky note on desktop, persisted, positioned | **Tasks 1–3, 5–8 done; Task 9 (positioning) next** |
 | 2 | S1-mini cleanup pass | **Unblocked** — numbers measured, 0.225 s |
 | 3 | Task extraction, suggestion chips, Tasks page | Plan waits on an eval corpus from real Phase 1 use |
 
