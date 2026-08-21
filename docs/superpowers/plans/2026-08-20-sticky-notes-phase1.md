@@ -221,7 +221,7 @@ mod tests {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test --lib hotkey::tests 2>&1 | tail -20`
+Run: `cargo test --bin beamer hotkey::tests 2>&1 | tail -20`
 Expected: FAIL — `cannot find type CaptureMode`, and `HotkeyEvent::RecordStart` takes no arguments.
 
 - [ ] **Step 3: Write minimal implementation**
@@ -257,7 +257,7 @@ Fix the resulting compile errors by pattern-matching the payload and ignoring it
 
 - [ ] **Step 4: Run tests and build to verify**
 
-Run: `cargo test --lib hotkey::tests 2>&1 | tail -20`
+Run: `cargo test --bin beamer hotkey::tests 2>&1 | tail -20`
 Expected: PASS, both tests.
 
 Run: `cargo build 2>&1 | tail -20`
@@ -348,7 +348,7 @@ mod tests {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test --lib linux_hotkey 2>&1 | tail -20`
+Run: `cargo test --bin beamer linux_hotkey 2>&1 | tail -20`
 Expected: FAIL — `BindingConfig`, `Modifiers`, `matching_binding`, `BindingState`, `MAX_BINDINGS`, `build_bindings` are all undefined.
 
 - [ ] **Step 3: Write minimal implementation**
@@ -537,7 +537,7 @@ Update the caller in `src/ui/app.rs` (and anywhere else the compiler flags) to p
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cargo test --lib linux_hotkey 2>&1 | tail -20`
+Run: `cargo test --bin beamer linux_hotkey 2>&1 | tail -20`
 Expected: PASS, all three tests.
 
 Run: `cargo build 2>&1 | tail -5`
@@ -678,7 +678,7 @@ fn notes_config_defaults() {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test --lib config:: 2>&1 | tail -20`
+Run: `cargo test --bin beamer config:: 2>&1 | tail -20`
 Expected: FAIL — no field `note_hotkey`, no `NotesConfig`.
 
 - [ ] **Step 3: Write minimal implementation**
@@ -751,7 +751,7 @@ Add `#[serde(default)] pub notes: NotesConfig,` to `Config` and to its `Default`
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cargo test --lib config:: 2>&1 | tail -20`
+Run: `cargo test --bin beamer config:: 2>&1 | tail -20`
 Expected: PASS, all four new tests plus the existing ones.
 
 - [ ] **Step 5: Wire the note hotkey into the listener**
@@ -921,7 +921,7 @@ mod tests {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test --lib notes:: 2>&1 | tail -20`
+Run: `cargo test --bin beamer notes:: 2>&1 | tail -20`
 Expected: FAIL — nothing in `super` is defined.
 
 - [ ] **Step 3: Write minimal implementation**
@@ -1175,7 +1175,7 @@ Add `mod notes;` to `src/main.rs` beside the other module declarations.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cargo test --lib notes:: 2>&1 | tail -20`
+Run: `cargo test --bin beamer notes:: 2>&1 | tail -20`
 Expected: PASS, all seven tests.
 
 - [ ] **Step 5: Commit**
@@ -1229,7 +1229,7 @@ mod tests {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test --lib orchestrator::sink 2>&1 | tail -20`
+Run: `cargo test --bin beamer orchestrator::sink 2>&1 | tail -20`
 Expected: FAIL — `should_create_note` and `sink_injects` undefined.
 
 - [ ] **Step 3: Write minimal implementation**
@@ -1309,7 +1309,7 @@ Update the `run_orchestrator` call site in `src/ui/app.rs` to pass the new `note
 
 - [ ] **Step 4: Run tests and build**
 
-Run: `cargo test --lib orchestrator::sink 2>&1 | tail -20`
+Run: `cargo test --bin beamer orchestrator::sink 2>&1 | tail -20`
 Expected: PASS, both tests.
 
 Run: `cargo build 2>&1 | tail -5`
@@ -1388,7 +1388,7 @@ mod tests {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test --lib ui::sticky 2>&1 | tail -20`
+Run: `cargo test --bin beamer ui::sticky 2>&1 | tail -20`
 Expected: FAIL — `window_title` and `TITLE_PREFIX` undefined.
 
 - [ ] **Step 3: Write minimal implementation**
@@ -1574,7 +1574,7 @@ Add `pub mod sticky;` to `src/ui/mod.rs`.
 
 - [ ] **Step 4: Run tests and build**
 
-Run: `cargo test --lib ui::sticky 2>&1 | tail -20`
+Run: `cargo test --bin beamer ui::sticky 2>&1 | tail -20`
 Expected: PASS, both tests.
 
 Run: `cargo build 2>&1 | tail -5`
@@ -1764,7 +1764,7 @@ mod tests {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test --lib ui::shell_window 2>&1 | tail -20`
+Run: `cargo test --bin beamer ui::shell_window 2>&1 | tail -20`
 Expected: FAIL — `retry_delays` undefined.
 
 - [ ] **Step 3: Write minimal implementation**
@@ -1896,7 +1896,7 @@ pub(super) fn close_note_window(
 
 - [ ] **Step 4: Run tests and build**
 
-Run: `cargo test --lib ui::shell_window 2>&1 | tail -20`
+Run: `cargo test --bin beamer ui::shell_window 2>&1 | tail -20`
 Expected: PASS.
 
 Run: `cargo build 2>&1 | tail -5`
@@ -1965,7 +1965,7 @@ Search behaviour is pure logic and belongs in the store, where it can be tested.
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test --lib notes:: 2>&1 | tail -20`
+Run: `cargo test --bin beamer notes:: 2>&1 | tail -20`
 Expected: FAIL — no method `search`.
 
 - [ ] **Step 3: Write minimal implementation**
@@ -2127,7 +2127,7 @@ Add the grid styles to the main stylesheet:
 
 - [ ] **Step 4: Run tests and build**
 
-Run: `cargo test --lib notes:: 2>&1 | tail -20`
+Run: `cargo test --bin beamer notes:: 2>&1 | tail -20`
 Expected: PASS, all nine tests.
 
 Run: `cargo build 2>&1 | tail -5`
@@ -2218,7 +2218,7 @@ mod tests {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test --lib llm:: 2>&1 | tail -20`
+Run: `cargo test --bin beamer llm:: 2>&1 | tail -20`
 Expected: FAIL — module `llm` does not exist.
 
 - [ ] **Step 3: Implement the client and config**
@@ -2252,7 +2252,7 @@ All blocking HTTP goes through `tokio::task::spawn_blocking`.
 
 - [ ] **Step 5: Verify**
 
-Run: `cargo test --lib llm:: 2>&1 | tail -20` → PASS
+Run: `cargo test --bin beamer llm:: 2>&1 | tail -20` → PASS
 Run: `cargo build 2>&1 | tail -20` → clean
 
 Manual: with the server up, the card lists both models and their states; stop it
