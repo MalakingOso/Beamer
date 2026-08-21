@@ -1,8 +1,8 @@
 # B60 llama.cpp benchmark — Task 1
 
-> **Status: IN PROGRESS.** Environment findings are recorded and verified.
-> Latency/throughput measurements are not yet taken; the verdict section at the
-> bottom is unanswered until they are.
+> **Status: IN PROGRESS.** Environment findings and the backend comparison are
+> complete. Server-level latency (TTFT, cold start, wake-from-sleep) is not yet
+> measured.
 
 **Date:** 2026-08-21
 **Machine:** berkley@CAllisto — Ryzen 9 7950X3D, Intel Arc B570 + Arc Pro B60
@@ -121,27 +121,67 @@ still captured. A sticky note must never be lost because a model server is down.
 
 ## Measurements
 
-> NOT YET TAKEN. The Vulkan build is blocked on `sudo apt install spirv-headers`
-> (a new hard dependency of the Vulkan backend on current master).
+### Backend comparison — `llama-bench`, B60, commit `5a32f7b66`
 
-Two single-token smoke runs were observed while validating the toolchains. They
-are **not** comparable and must not be read as a result — different build
-commits, different `ngl`, and `tg1` is dominated by fixed overhead:
+Both backends built from the **same commit**, run on the **same device**, pinned
+with explicit `-dev` (not env masks, so no index re-mapping), `-ngl 99`, `-r 3`.
 
-| Backend | Build | ngl | tg1 t/s |
-|---|---|---|---|
-| Vulkan | `e97492369` (April) | 99 | 136.34 ± 9.76 |
-| SYCL | `5a32f7b66` (today) | -1 (default) | 229.34 ± 18.37 |
+| Model | Metric | Vulkan | SYCL | SYCL advantage |
+|---|---|---:|---:|:--:|
+| s1-mini-q4_k_m | pp512 | 6358.04 ± 16.53 | **14817.15 ± 45.00** | **2.33x** |
+| s1-mini-q4_k_m | tg128 | 249.70 ± 1.70 | **293.70 ± 0.14** | **1.18x** |
+| gemma-4-E4B_q4_0 | pp512 | 1190.80 ± 2.98 | **2811.44 ± 7.70** | **2.36x** |
+| gemma-4-E4B_q4_0 | tg128 | 61.20 ± 0.09 | **77.41 ± 0.01** | **1.26x** |
 
-Real measurements to take, both backends, both models: prompt-processing t/s,
-token-generation t/s, time-to-first-token, cold start, warm start, and
-wake-from-sleep.
+**SYCL wins every cell.** Prompt processing is the decisive gap (~2.35x);
+generation is smaller but consistent (~1.2x). Variance is negligible.
+
+### Finding 4 — Vulkan on current master uses KHR_coopmat, not NV_coopmat2
+
+The April build reported `matrix cores: NV_coopmat2`; commit `5a32f7b66`
+reports `KHR_coopmat` on the same hardware. This is **not** a build defect:
+configure confirms `GL_NV_cooperative_matrix2 supported by glslc`, so the
+coopmat2 shaders are compiled in. Current master gates coopmat2 at runtime on a
+longer device-feature list (`ggml-vulkan.cpp:7297`), now including
+`cooperativeMatrixTensorAddressing` and `cooperativeMatrixBlockLoads`, which
+Mesa's Intel driver does not fully satisfy. llama.cpp therefore falls back to
+the v1 KHR path.
+
+`KHR_coopmat` is still matrix-core (XMX) acceleration, not a generic FP shader
+fallback — but it is the v1 path. Benchmarking it is correct, because it is what
+the deployed configuration actually selects.
+
+Open question, cheap to answer if ever needed: `build.stale-pre-20260821/` still
+holds April binaries that *do* select coopmat2, so "would v2 have closed the
+2.35x gap?" can be tested without rebuilding. Not pursued — SYCL's margin is
+large and coopmat2 is unavailable on this driver regardless.
+
+### Caveat on scope
+
+`llama-bench` measures raw model throughput, not end-to-end request latency.
+Server-level numbers (TTFT, wall-clock for a real note, cold start,
+wake-from-sleep) are measured separately below.
+
+### Server-level latency
+
+NOT YET TAKEN.
 
 ## Verdict
 
-UNANSWERED — pending measurements.
+**Backend: SYCL.** Settled by measurement, not by the spawn-constraint argument
+in the spec. SYCL is 2.35x faster at prompt processing and ~1.2x at generation
+on both models, from the same commit on the same device. The committed decision
+to use Vulkan was made on an operational constraint (no oneAPI environment for a
+Beamer-spawned process) that the standalone-server architecture removed; with
+that gone, the performance data decides, and it is not close.
 
-Thresholds to apply, from the plan:
-- S1-mini cleans a ~60-word note in **≲1.5 s** → Phase 2 proceeds as specced.
-- Wake-from-sleep of E4B **>10 s** → asymmetric idle-shutdown default is wrong;
-  the model should stay resident.
+Vulkan remains a working fallback (`build/`) requiring no oneAPI runtime.
+
+**Phase 2 (S1-mini cleanup): projected to pass, pending server-level
+confirmation.** At 14817 t/s prompt and 294 t/s generation, a ~60-word note
+(~120 prompt tokens, ~80 generated) projects to roughly 0.3 s of model time,
+far inside the 1.5 s threshold. This is a projection from throughput, not a
+measurement; the server-level number supersedes it.
+
+**Asymmetric idle shutdown: still unanswered** — needs the wake-from-sleep
+measurement.
