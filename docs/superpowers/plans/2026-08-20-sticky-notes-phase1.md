@@ -2597,3 +2597,115 @@ Dictate with a second hotkey → a coloured sticky note appears on the GNOME des
 
 - **Task 1's benchmark numbers.** Phase 2's plan is written against measured latency, not estimates. If S1-mini is slower than ~1.5 s per note, Phase 2 is a different design.
 - **Real captured notes.** Phase 3's extraction model is chosen by measuring against a corpus of your actual dictation, which does not exist until Phase 1 has been in use for a while. Use Phase 1 for a week before Phase 3 is planned.
+
+---
+
+# Corrections found while executing Tasks 9-13 (2026-08-21)
+
+Batch D-G executed Tasks 9, 11, 11b, 12 and 13. Task 10 was **superseded by a
+scope change**, and Task 4 remains deferred. Corrections to the tasks as
+written, recorded so the next session does not rediscover them.
+
+## 0. Scope change: position persistence is dropped
+
+Decided with the user before execution. Notes are **auto-placed** in an
+irregular scatter rather than restored to where they were. This deletes the
+whole of Task 10's geometry-capture work, the quit-time sweep and the
+close-race that came with it.
+
+Why it is an improvement and not a retreat: reading a window's own geometry
+back on Wayland is the least reliable thing in the design, and what replaced it
+— `ui::note_layout::place_next` — is a pure function with five real tests.
+`GetWindowFrame` still shipped in the extension, unused, because it is the only
+way to verify a `PlaceWindow` actually landed and adding it later would cost
+another full GNOME log out.
+
+**Do not "restore" position persistence** without new information. It is
+recorded in the spec (§8) and `agent_docs/sticky_notes.md` as a decision.
+
+## 1. `use_wry_event_handler` handlers are per-window
+
+The close handler must be registered inside `StickyNote`, **not** `App()`.
+`create_wry_event_handler` keys the handler to the registering window
+(`desktop_context.rs:233`) and `apply_event` skips any `WindowEvent` whose
+`window_id` differs. In `App()` it would compile, run and never fire.
+
+Verified in dioxus-desktop 0.7.9's source, along with two facts the design
+depends on: `App::tick()` runs `apply_event` **before** dispatching
+`CloseRequested`, so the handler fires while the webview still exists; and
+`ctx.close()` sends `UserEvent(CloseWindow)`, never a `WindowEvent`, so the
+archive path cannot double-fire and no guard flag is needed. Child windows also
+default to `WindowCloses` (only the main window sets `WindowHides`), so Alt+F4
+genuinely destroys a sticky.
+
+The hook also has to sit **above** the component's early return.
+
+## 2. Placement must be computed at slot-reservation time
+
+Not inside `open_note_window`. The reconciler opens every note in one pass on
+restart; placing after the `await` shows all of them the same empty occupied
+set and stacks them in one spot. The registry slot therefore became a struct
+(`StickySlot { pos, ctx }`) rather than `Option<WeakDesktopContext>`.
+
+## 3. Coordinate spaces differ
+
+`MonitorHandle::size()` is physical pixels; `Meta.Window.move_frame` is
+GNOME's logical stage coordinates. Identical at scale 1.0, divergent at any
+other. The scale factor is divided out in `sticky_windows::work_area`.
+
+## 4. `indicator.js` needed three edits, not one
+
+Task 13 named one `'recording'` site. There are two — `:81` (label visibility)
+and `:156` (waveform level target) — **plus** `show()` never assigned
+`style_class` at all, so the pill could only ever wear the class it was
+constructed with. Missing the level-target edit leaves the note pill ignoring
+the microphone and idle-sweeping, which looks like a working pill.
+
+## 5. `notes/mod.rs` crossed 500 lines, as the batch plan predicted
+
+`search`/`archived`/`restore` plus tests took it to 525. `Note`, `NoteColor`
+and `NoteState` moved to `notes/model.rs` (95 lines), leaving `mod.rs` at 446.
+
+## 6. Two CSS tokens in the plan's card styling do not exist
+
+`--fg-primary` and `--radius-sm` are not in this stylesheet; they are `--fg`
+and `--radius`. Undefined custom properties fail silently, so this renders
+wrong rather than erroring. The whole sheet is now audited — one pre-existing
+offender remains (`--bg-elevated`, `styles.css:752`, since `c709faa`), recorded
+in `todo.md`.
+
+## 7. `set_open` needed a no-op guard
+
+Its callers are window events, not user edits. Without the guard a redundant
+`set_open` bumps `modified`, dirties the store and schedules a write for a fact
+that did not change.
+
+## 8. The extension's title match is hardened
+
+A background security review flagged that `_findWindowByTitle` would move and
+pin *any* window titled `Beamer Note <id>`. Two sibling findings — that any
+session-bus client can call the new methods, and that `GetWindowFrame`
+discloses geometry — were assessed as adding no reachable capability: the same
+object has exported `TypeText` since v2, which synthesizes arbitrary keystrokes
+into the focused window, and the session bus is same-uid-only.
+
+The title collision was worth blunting, so the lookup now prefers a window
+whose app id looks like Beamer's and falls back to a title-only match, logging
+when it does. A hard filter was rejected: guessing the app id wrong would break
+placement silently, and diagnosing that costs a full log out.
+
+## 9. The Windows target does not compile
+
+`src/hotkey/ll_hook.rs:137,143` still construct `HotkeyEvent::RecordStart` with
+no payload. Task 2 gave the variant a `CaptureMode` and fixed only
+`linux_hotkey.rs`. The file is `#[cfg(target_os = "windows")]`, so Linux stays
+green and this is invisible here. **Task 4 is a build fix, not parity work.**
+Recorded in `todo.md` as a break, not as "unverified".
+
+## 10. Extension version verification expects 3 -> 5
+
+The installed copy was **v3** while the repo was already at v4 — v4 was never
+installed. Confirmed at execution time via `GetVersion`. A post-logout answer
+of 3 *or* 4 means the copy did not take. Note that
+`gnome-extensions list --details` also reports the shell's cached version, not
+what is on disk, so it cannot be used to check this.

@@ -1,10 +1,16 @@
 # Dioxus Architecture
 
-There is no multi-window overlay/glow system and no Mica backdrop wiring —
-that was never built. What exists: one main window (settings/home UI), an
-optional recording pill window on Windows/macOS, a splash window during
-startup, and (Linux only) an in-shell indicator driven over D-Bus instead of
+There is no Mica backdrop wiring — that was never built. Multi-window is real,
+and grew: one main window (settings/home UI), an optional recording pill window
+on Windows/macOS, a splash window during startup, **one sticky note window per
+open note**, and (Linux only) an in-shell indicator driven over D-Bus instead of
 a Dioxus window at all.
+
+Sticky notes are the only place multiple long-lived `VirtualDom`s share state,
+and the rules for doing that safely are not obvious — `use_context` does not
+cross the boundary, `GlobalSignal` silently diverges per window, and event
+handlers are per-window. **Read `agent_docs/sticky_notes.md` before touching
+multi-window code.**
 
 ## Threading Model
 

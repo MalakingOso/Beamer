@@ -10,9 +10,13 @@ Windows system-tray dictation app. Captures mic audio, transcribes via cloud API
 - `src/injection/` — Text injection fallback chain (UIA → SendInput → clipboard)
 - `src/hotkey/` — Global hotkey registration (hold-to-talk + toggle modes)
 - `src/config/` — TOML config + vocabulary management
+- `src/notes/` — Sticky note store (`mod.rs`) + data types (`model.rs`)
+- `src/llm/` — Client for the standalone llama.cpp server (Beamer never spawns it)
 - `src/tray/` — System tray icon + menu
 - `src/ui/` — Dioxus desktop: settings window, overlay, screen edge glow
   - `src/ui/settings/` — One file per card section (recording, transcription, api_keys, etc.)
+  - `src/ui/sticky*.rs`, `note_layout.rs`, `shell_window.rs` — Sticky note windows, placement
+  - `src/ui/notes_page.rs` — All-notes board
   - `src/ui/components.rs` — Shared: Card, Select, Toggle, MaskedInput, TagChip
 
 ## Commands
@@ -45,6 +49,7 @@ RUST_LOG=beamer=debug cargo run  # Run with debug logging
 - `agent_docs/config_schema.md` — TOML schema, vocab format
 - `agent_docs/dioxus_architecture.md` — Threading model, multi-window, tray integration
 - `agent_docs/design_system.md` — Color tokens, typography, Mica setup, component patterns
+- `agent_docs/sticky_notes.md` — Note windows, Wayland placement, cross-window state (CRITICAL for multi-window work)
 
 ---
 

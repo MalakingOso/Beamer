@@ -959,7 +959,10 @@ Against the project's 500-lines-per-file constraint:
 | `src/llm/prompts.rs` | the s1-mini wire format and the task-policy prompt, with its few-shot exemplars |
 | `src/bin/task_eval.rs` | eval harness: runs the labelled corpus, reports precision/recall |
 | `src/orchestrator/sink.rs` | `CaptureMode`, `do_note_capture` |
-| `src/ui/sticky.rs` | sticky note window component + registry |
+| `src/ui/sticky.rs` | sticky note window component + close detection |
+| `src/ui/sticky_windows.rs` | window registry, open/close, the reconciler |
+| `src/ui/note_layout.rs` | pure scatter placement — `place_next`, no I/O, no Dioxus |
+| `src/ui/shell_window.rs` | D-Bus client for the extension's `PlaceWindow` |
 | `src/ui/notes_page.rs` | all-notes board |
 | `src/ui/tasks_page.rs` | tasks list |
 
@@ -974,6 +977,23 @@ New non-code deliverables, both required by §3.3 rather than optional:
 `licenses/` holding both model licenses, and an About/credits surface in the
 settings UI carrying `"S1-mini" by "Superwhisper"` verbatim. `README.md` gains
 the same attribution.
+
+### Position persistence was dropped (2026-08-21)
+
+**Notes do not remember where they were.** Beamer places them itself, in a
+deterministic irregular scatter, recomputed from scratch every launch. §8's
+`GetWindowFrame` capture, the quit-time geometry sweep and the close-race they
+implied are all moot; `GetWindowFrame` still ships, unused, as the verification
+path for placement.
+
+The reasoning: reading a window's own geometry back on Wayland is the least
+reliable part of the whole design, and it bought a property nobody had asked
+for by name. `vixalien/sticky`, the app this was modelled on, does not persist
+positions either. Choosing the layout instead of recovering it turned the
+hardest part of the feature into a pure function with real tests.
+
+`Note::pos` remains in the persisted schema and is honoured natively on
+Windows, but nothing writes it from window geometry.
 
 ## 13. Risks
 
