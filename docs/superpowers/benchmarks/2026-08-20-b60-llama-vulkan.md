@@ -314,6 +314,56 @@ smaller is simply faster, monotonically. Rung 3 is now a *quality* option only �
 if it wins, it wins on extraction precision and is paid for in latency. It
 should not be reached for on a speed argument.
 
+#### Finding 9 — LiquidAI LFM2 and poolside Laguna, evaluated and rejected
+
+Both were raised as candidates. llama.cpp supports all three architectures
+(`lfm2`, `lfm2moe`, `laguna` — verified in `src/llama-arch.cpp`), so neither was
+gated on runtime support.
+
+**poolside Laguna — rejected without testing.** They are MoE *coding* models,
+and `Laguna-XS-2.1` — the **extra-small** member — is **19.56 GB at Q4_K_M**,
+which would nearly fill the B60 by itself. Combined with Finding 8 (MoE is the
+slowest class on this hardware) and a task that is not code, there is no
+plausible path to it winning.
+
+**LiquidAI `LFM2-1.2B-Extract` — tested, and it is fast but wrong.** On paper the
+strongest candidate seen: a *purpose-built* extraction model, which is the same
+architectural argument this spec already makes for preferring S1-mini over a
+general model at stage 1.
+
+| Model | Size | pp512 | tg128 |
+|---|---|---:|---:|
+| `LFM2-1.2B-Extract` Q4_K_M | **695 MiB** | **13003** | **340.8** |
+| `gemma-4-E2B` q4_0 | 3.10 GiB | 4744 | 116.0 |
+| `gemma-4-E4B` q4_0 (default) | 4.79 GiB | 2816 | 77.3 |
+
+**4.4x E4B's generation speed at 1/7th the size — and it fails the precision
+test outright.** Given a note with four first-person commitments and three
+planted negatives (an aspiration, a task belonging to Dave, a hypothetical), it
+returned **all seven**, ignoring the exclusion instructions entirely. Given a
+note containing no tasks at all, it hallucinated `["look up", "weather", "look
+up"]`.
+
+Gemma E2B, on the same two no-task notes, correctly returned `[]` for both.
+
+**Why it loses is exactly what this spec already says:** *"Extraction is a
+precision problem, not an extraction problem."* LFM2-Extract is optimized for
+**keyword faithfulness** — its own model card lists that as a headline metric,
+measuring whether output values actually appear in the input text. It pulls text
+into a schema; it does not judge what qualifies. Stage 2 needs judgement under a
+strict policy, and a general instruction-following model does that better than a
+specialist extractor, even one 7x smaller and 4x faster.
+
+Licence note, for the record: the **LFM Open License v1.0** is Apache-2.0-shaped
+with a Commercial Use limitation (§5) conditioned on annual revenue below
+$10,000,000. Not a blocker here — this is a personal project with no commercial
+plans — but it is a different licence class from the Apache-2.0 the ladder
+otherwise sticks to, and would need revisiting if that changed.
+
+**Do not re-propose without new evidence.** If a future eval shows Gemma's
+precision inadequate, the answer is up the Gemma ladder or a fine-tune — not a
+specialist extractor.
+
 ### Cold start (page cache dropped)
 
 NOT MEASURED — requires `sudo sync && echo 3 > /proc/sys/vm/drop_caches`, which
