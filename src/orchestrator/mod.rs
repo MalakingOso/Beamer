@@ -42,7 +42,7 @@ pub async fn run(
 
     while let Some(event) = hotkey_rx.next().await {
         match event {
-            HotkeyEvent::RecordStart => {
+            HotkeyEvent::RecordStart(_) => {
                 if let Err(e) = handle_recording(
                     &config,
                     &mut rec_state,
@@ -145,7 +145,7 @@ async fn handle_recording(
             hotkey_event = hotkey_rx.next() => {
                 match hotkey_event {
                     Some(HotkeyEvent::RecordStop) | None => break,
-                    Some(HotkeyEvent::RecordStart) => {}
+                    Some(HotkeyEvent::RecordStart(_)) => {}
                 }
             }
 
@@ -303,7 +303,7 @@ async fn handle_batch_recording(
             hotkey_event = hotkey_rx.next() => {
                 match hotkey_event {
                     Some(HotkeyEvent::RecordStop) | None => break,
-                    Some(HotkeyEvent::RecordStart) => {}
+                    Some(HotkeyEvent::RecordStart(_)) => {}
                 }
             }
             chunk = audio_rx.recv() => {

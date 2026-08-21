@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use evdev::{Device, EventSummary, KeyCode};
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::hotkey::{HotkeyConfig, HotkeyEvent, VK_LWIN};
+use crate::hotkey::{CaptureMode, HotkeyConfig, HotkeyEvent, VK_LWIN};
 
 /// How often to rescan `/dev/input` for keyboards that appeared after startup.
 ///
@@ -181,7 +181,7 @@ fn handle_key_event(key: KeyCode, value: i32, state: &mut HookState) {
                     state.toggled_on = !state.toggled_on;
                     let event = if state.toggled_on {
                         tracing::info!("Hotkey triggered: RecordStart (toggle)");
-                        HotkeyEvent::RecordStart
+                        HotkeyEvent::RecordStart(CaptureMode::Inject)
                     } else {
                         tracing::info!("Hotkey triggered: RecordStop (toggle)");
                         HotkeyEvent::RecordStop
@@ -189,7 +189,7 @@ fn handle_key_event(key: KeyCode, value: i32, state: &mut HookState) {
                     let _ = state.tx.send(event);
                 } else {
                     tracing::info!("Hotkey triggered: RecordStart (hold)");
-                    let _ = state.tx.send(HotkeyEvent::RecordStart);
+                    let _ = state.tx.send(HotkeyEvent::RecordStart(CaptureMode::Inject));
                     state.armed = true;
                 }
             }
