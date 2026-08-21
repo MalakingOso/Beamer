@@ -4,9 +4,10 @@
 //! used for the splash and pill windows in `app_setup.rs`. Deliberately NOT
 //! always-on-top: notes sit in the normal stacking order.
 //!
-//! Wayland gives clients no control over their own position, so placement and
-//! geometry read-back both go through Beamer's GNOME extension (`shell_window`).
-//! The window title is the handle the extension matches on.
+//! Wayland gives clients no control over their own position, so placement goes
+//! through Beamer's GNOME extension (`shell_window`); the window title is the
+//! handle it matches on. There is no geometry read-back — notes are placed by
+//! `note_layout`, never restored to where they were.
 //!
 //! The store arrives as a **prop**, not via `use_context`. Each sticky window is
 //! its own `VirtualDom` with its own scope tree, and `use_context` walks only
@@ -16,6 +17,8 @@
 //! on the main thread, so the handle resolves across the dom boundary even
 //! though the context does not.
 
+use dioxus::desktop::tao::event::{Event, WindowEvent};
+use dioxus::desktop::use_wry_event_handler;
 use dioxus::prelude::*;
 
 use crate::notes::{NoteColor, NoteStore};
@@ -50,6 +53,32 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
         let id = id.clone();
         use_memo(move || notes.read().get(&id).cloned())
     };
+
+    // Record that the user closed this window, so the board can offer to bring
+    // it back. Registered here, above the early return below — a hook after a
+    // conditional return breaks the fixed-hook-order rule the moment the note
+    // is archived.
+    //
+    // **Registered inside `StickyNote`, deliberately not in `App()`.**
+    // `create_wry_event_handler` keys the handler to the window that registers
+    // it, and `apply_event` skips any `WindowEvent` whose `window_id` differs.
+    // A handler registered in `App()` would therefore only ever see the *main*
+    // window's events — a silent no-op that looks entirely correct. Here,
+    // `window()` resolves to this sticky's own context, so it sees its own
+    // close and nothing else, and no `WindowId` map is needed.
+    //
+    // This arm fires only for user and compositor closes. A programmatic
+    // `ctx.close()` sends `UserEvent(CloseWindow)` straight to
+    // `handle_close_requested` and never produces a `WindowEvent`, so the
+    // archive path cannot double-fire through here and needs no guard flag.
+    {
+        let id = id.clone();
+        use_wry_event_handler(move |event, _| {
+            if let Event::WindowEvent { event: WindowEvent::CloseRequested, .. } = event {
+                notes.write().set_open(&id, false);
+            }
+        });
+    }
 
     let Some(note) = note() else {
         // The note was archived from another window while this one was open.

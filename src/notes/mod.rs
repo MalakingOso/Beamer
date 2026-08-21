@@ -73,7 +73,15 @@ pub struct Note {
     pub body: String,
     pub state: NoteState,
     pub color: NoteColor,
-    /// Honored natively on Windows; on Wayland applied by the GNOME extension.
+    /// **Not read on Linux, and never written from window geometry.**
+    ///
+    /// Position memory was dropped by decision: `ui::note_layout` chooses where
+    /// each note goes, freshly, every launch. The field stays because it is
+    /// part of the persisted schema and `with_position` is still honoured
+    /// natively on Windows — but nothing captures a window's actual position
+    /// into it, and nothing should. Reading a window's own position back is
+    /// exactly what Wayland does not permit, and the API that appears to do it
+    /// returns `Ok((0, 0))` rather than an error.
     pub pos: Option<(i32, i32)>,
     pub size: Option<(u32, u32)>,
     pub open: bool,
@@ -239,7 +247,16 @@ impl NoteStore {
         }
     }
 
+    /// Record whether a note's window is showing.
+    ///
+    /// A no-op when the value is unchanged. The guard matters because the
+    /// callers are event handlers, not user edits: without it a redundant
+    /// `set_open` would bump `modified`, dirty the store and trigger a write
+    /// for a fact that did not change.
     pub fn set_open(&mut self, id: &str, open: bool) {
+        if self.get(id).is_none_or(|n| n.open == open) {
+            return;
+        }
         if let Some(note) = self.touch(id) {
             note.open = open;
             self.dirty = true;
@@ -356,6 +373,38 @@ mod tests {
         assert_eq!(reloaded.notes[0].pos, Some((100, 200)));
         assert_eq!(reloaded.notes[0].size, Some((320, 240)));
         assert_eq!(reloaded.notes[0].color, NoteColor::Amber);
+    }
+
+    #[test]
+    fn set_open_with_an_unchanged_value_does_not_dirty_the_store() {
+        let mut store = temp_store("set_open");
+        let id = store.create("hello".into(), NoteColor::Purple);
+        store.flush_if_dirty();
+        let before = store.get(&id).unwrap().modified.clone();
+
+        store.set_open(&id, true); // already true
+
+        assert!(
+            !store.is_dirty(),
+            "a redundant set_open must not schedule a write — the callers are \
+             window events, not user edits"
+        );
+        assert_eq!(
+            store.get(&id).unwrap().modified,
+            before,
+            "nothing changed, so the modified timestamp must not move"
+        );
+
+        store.set_open(&id, false);
+        assert!(store.is_dirty(), "a real change must still be persisted");
+        assert!(!store.get(&id).unwrap().open);
+    }
+
+    #[test]
+    fn set_open_on_a_missing_note_is_a_no_op() {
+        let mut store = temp_store("set_open_missing");
+        store.set_open("nope", true);
+        assert!(!store.is_dirty());
     }
 
     #[test]

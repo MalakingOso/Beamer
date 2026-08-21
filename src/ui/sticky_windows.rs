@@ -181,6 +181,92 @@ pub fn close_note_window(mut registry: StickyRegistry, id: &str) {
     }
 }
 
+/// Whether the registry currently holds a usable window for a note.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotState {
+    /// No entry at all.
+    Absent,
+    /// Reserved, but the window is still being constructed.
+    Opening,
+    /// An entry whose window still exists.
+    Live,
+    /// An entry whose window is gone. Reached when a window dies without a
+    /// close event — a force-kill, or a compositor crash.
+    Dead,
+}
+
+/// What clicking a note's card on the board should do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReopenAction {
+    /// Raise the window that already exists.
+    Focus,
+    /// An open is already in flight; let it finish.
+    Nothing,
+    /// Drop a stale slot, then mark the note open so the reconciler builds a
+    /// fresh window.
+    PruneAndReopen,
+    /// Mark the note open and let the reconciler do the rest.
+    Reopen,
+}
+
+/// Decide what a board click means, given the registry and the note.
+///
+/// Split out from `reopen_note` because the gesture itself needs a live event
+/// loop and a real window to test, while this — the part that can actually be
+/// wrong — needs neither.
+pub fn reopen_action(slot: SlotState, open: bool) -> ReopenAction {
+    match (slot, open) {
+        (SlotState::Live, true) => ReopenAction::Focus,
+        // A live slot on a note already marked closed is a window mid-teardown:
+        // its close handler has run but the reconciler has not caught up yet.
+        // Focusing it would raise a window that is about to vanish.
+        (SlotState::Live, false) => ReopenAction::PruneAndReopen,
+        (SlotState::Opening, _) => ReopenAction::Nothing,
+        (SlotState::Dead, _) => ReopenAction::PruneAndReopen,
+        (SlotState::Absent, _) => ReopenAction::Reopen,
+    }
+}
+
+fn slot_state(registry: &StickyRegistry, id: &str) -> SlotState {
+    match registry.peek().get(id) {
+        None => SlotState::Absent,
+        Some(StickySlot { ctx: None, .. }) => SlotState::Opening,
+        Some(StickySlot { ctx: Some(weak), .. }) => match weak.upgrade() {
+            Some(_) => SlotState::Live,
+            None => SlotState::Dead,
+        },
+    }
+}
+
+/// Bring a note back — the notes board's click handler.
+///
+/// Pruning a dead slot belongs here rather than in the reconciler. The
+/// reconciler must leave stale slots alone or it would fight a user who just
+/// closed a window; a board click is the one gesture that unambiguously means
+/// "bring it back", so it is the right place to clean up after a window that
+/// died without saying so.
+pub fn reopen_note(mut registry: StickyRegistry, mut notes: Signal<NoteStore>, id: &str) {
+    let open = notes.peek().get(id).is_some_and(|n| n.open);
+    match reopen_action(slot_state(&registry, id), open) {
+        ReopenAction::Focus => {
+            if let Some(StickySlot { ctx: Some(weak), .. }) = registry.peek().get(id) {
+                if let Some(ctx) = weak.upgrade() {
+                    ctx.set_visible(true);
+                    ctx.set_focus();
+                }
+            }
+        }
+        ReopenAction::Nothing => {}
+        ReopenAction::PruneAndReopen => {
+            registry.write().remove(id);
+            notes.write().set_open(id, true);
+        }
+        ReopenAction::Reopen => {
+            notes.write().set_open(id, true);
+        }
+    }
+}
+
 /// Watch the note store and keep the set of open windows matching it.
 ///
 /// Call once from `App()`. Returns the registry so the notes board can reach
@@ -259,4 +345,51 @@ pub fn setup_sticky_windows(
     });
 
     registry
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_live_window_is_raised_rather_than_reopened() {
+        assert_eq!(reopen_action(SlotState::Live, true), ReopenAction::Focus);
+    }
+
+    #[test]
+    fn a_window_that_died_without_a_close_event_is_pruned_first() {
+        // Without the prune the slot still counts as registered, the
+        // reconciler never opens a replacement, and the board click no-ops
+        // forever with nothing to show for it.
+        assert_eq!(
+            reopen_action(SlotState::Dead, false),
+            ReopenAction::PruneAndReopen
+        );
+        assert_eq!(
+            reopen_action(SlotState::Dead, true),
+            ReopenAction::PruneAndReopen
+        );
+    }
+
+    #[test]
+    fn a_window_mid_teardown_is_replaced_not_focused() {
+        assert_eq!(
+            reopen_action(SlotState::Live, false),
+            ReopenAction::PruneAndReopen,
+            "its close handler has run; focusing it would raise a window that is about to vanish"
+        );
+    }
+
+    #[test]
+    fn an_unregistered_note_just_gets_marked_open() {
+        assert_eq!(reopen_action(SlotState::Absent, false), ReopenAction::Reopen);
+    }
+
+    #[test]
+    fn an_open_already_in_flight_is_left_alone() {
+        // Pruning a reserved slot would let the reconciler start a second
+        // window while the first is still being constructed.
+        assert_eq!(reopen_action(SlotState::Opening, false), ReopenAction::Nothing);
+        assert_eq!(reopen_action(SlotState::Opening, true), ReopenAction::Nothing);
+    }
 }
