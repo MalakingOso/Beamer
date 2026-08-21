@@ -291,6 +291,29 @@ footprint is **~3.1-3.4 GB** (18898 MiB free loaded vs 21985 MiB sleeping vs
 spec's 5.61 GB estimate. The cause was not investigated; recorded because VRAM
 budgeting was a spec-level concern and the real number is comfortably better.
 
+#### Finding 8 — the MoE ladder rung is the SLOWEST, not the fastest
+
+The spec asserted that rung 3 (`gemma-4-26B-A4B`, 26B total / ~4B active) would
+be "both the largest and the fastest", reasoning from bytes read per token
+(~2.2 GB vs ~5.2 GB dense). **Measured on the B60 via SYCL, that is false.**
+
+| Model | Params | On disk | pp512 | tg128 |
+|---|---|---|---:|---:|
+| `gemma-4-E2B` | 4.63 B | 3.10 GiB | **4744** | **116.0** |
+| `gemma-4-E4B` | 7.46 B | 4.79 GiB | 2816 | 77.3 |
+| `gemma-4-26B-A4B` (MoE) | 25.23 B | 13.43 GiB | 1063 | **43.6** |
+
+The MoE is **2.7x slower** at generation than E2B and **1.8x slower** than E4B,
+while costing 4.3x the disk of E2B. The read-per-token argument assumes
+bandwidth-bound decoding; on this hardware, expert routing and gather overhead
+dominate instead. llama.cpp's SYCL backend added "Fused MoE" in its 2026.04-05
+release notes and it is still slower here.
+
+**Consequence:** the ladder is not ordered the way the spec assumed. On the B60,
+smaller is simply faster, monotonically. Rung 3 is now a *quality* option only —
+if it wins, it wins on extraction precision and is paid for in latency. It
+should not be reached for on a speed argument.
+
 ### Cold start (page cache dropped)
 
 NOT MEASURED — requires `sudo sync && echo 3 > /proc/sys/vm/drop_caches`, which
