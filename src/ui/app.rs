@@ -9,6 +9,7 @@ use crate::notes::NoteStore;
 use crate::orchestrator::{self, RecordingState};
 use crate::update::UpdateStatus;
 use crate::ui::app_setup;
+use crate::ui::sticky_windows;
 #[cfg(target_os = "linux")]
 use crate::ui::linux_integration;
 use crate::ui::history::TranscriptionHistory;
@@ -108,11 +109,21 @@ pub fn App() -> Element {
         }
     });
 
+    // Sticky note windows: one effect keeps the set of open windows matching
+    // the set of notes that should be showing. Covers both a note dictated just
+    // now and notes restored from disk at startup.
+    sticky_windows::setup_sticky_windows(window.clone(), notes);
+
+    // Coalesce per-keystroke note edits into one write. `do_note_capture`
+    // flushes a newly captured transcript immediately — that one must never be
+    // lost — so this tick only ever carries body/colour/geometry edits.
+    app_setup::setup_notes_flush(notes);
+
     // Background update check on startup (3s delay to keep launch snappy)
     app_setup::setup_update_check(config, update_status);
 
     // Tray menu clicks + tray icon left-click (toggle window visibility).
-    app_setup::setup_menu_handlers(&items, window.clone(), current_page, last_injection, config, update_status);
+    app_setup::setup_menu_handlers(&items, window.clone(), current_page, last_injection, config, update_status, notes);
     app_setup::setup_tray_click_handler(window.clone());
 
     let page = *current_page.read();

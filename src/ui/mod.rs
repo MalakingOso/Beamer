@@ -10,6 +10,8 @@ pub mod pill;
 pub mod settings;
 pub mod shell_indicator;
 pub mod splash;
+pub mod sticky;
+pub mod sticky_windows;
 pub mod status_log;
 pub mod vocab_page;
 

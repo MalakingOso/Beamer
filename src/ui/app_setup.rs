@@ -13,6 +13,7 @@ use dioxus::desktop::{Config as DesktopConfig, DesktopContext, WindowBuilder};
 use dioxus::prelude::*;
 
 use crate::config::Config;
+use crate::notes::NoteStore;
 #[cfg(not(target_os = "linux"))]
 use crate::orchestrator::RecordingState;
 use crate::tray::{self, TrayMenuItems};
@@ -248,6 +249,30 @@ pub(super) fn setup_recording_pill(
     });
 }
 
+/// How often the notes store is checked for pending edits.
+///
+/// Note bodies are edited per keystroke; writing the whole file on each one
+/// would be pathological, so edits coalesce into at most one write per tick.
+const NOTES_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Drive the notes store's debounced write.
+///
+/// `is_dirty()` is checked through `peek()` rather than `read()` on purpose: a
+/// `write()` on every tick would notify every subscriber — including each open
+/// sticky window — twice a second, whether or not anything had changed.
+pub(super) fn setup_notes_flush(mut notes: Signal<NoteStore>) {
+    use_hook(move || {
+        spawn(async move {
+            loop {
+                tokio::time::sleep(NOTES_FLUSH_INTERVAL).await;
+                if notes.peek().is_dirty() {
+                    notes.write().flush_if_dirty();
+                }
+            }
+        });
+    });
+}
+
 /// Background update check on startup (3s delay to keep launch snappy).
 pub(super) fn setup_update_check(config: Signal<Config>, mut update_status: Signal<UpdateStatus>) {
     use_hook({
@@ -295,6 +320,7 @@ pub(super) fn setup_menu_handlers(
     last_injection: Signal<String>,
     config: Signal<Config>,
     mut update_status: Signal<UpdateStatus>,
+    mut notes: Signal<NoteStore>,
 ) {
     use_muda_event_handler({
         let home_id = items.home.id().clone();
@@ -308,6 +334,10 @@ pub(super) fn setup_menu_handlers(
         move |event| {
             if event.id == quit_id {
                 tracing::info!("Quit menu item clicked — exiting");
+                // `process::exit` below skips the 500ms flush tick along with
+                // every destructor, so any note edit still sitting in memory
+                // has to be written out here or it dies with the process.
+                notes.write().flush_if_dirty();
                 // `process::exit` skips destructors, so the single-instance
                 // guard has to be handed back explicitly or the lockfile
                 // outlives us.
