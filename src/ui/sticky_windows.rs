@@ -18,9 +18,10 @@
 //! the file on relaunch but leave the desktop empty.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use dioxus::desktop::tao::dpi::{LogicalPosition, LogicalSize};
-use dioxus::desktop::{Config as DesktopConfig, DesktopContext, WindowBuilder};
+use dioxus::desktop::{Config as DesktopConfig, DesktopContext, WeakDesktopContext, WindowBuilder};
 use dioxus::prelude::*;
 
 use crate::notes::{Note, NoteStore};
@@ -29,11 +30,18 @@ use crate::ui::sticky::{window_title, StickyNote, StickyNoteProps, STICKY_CSS};
 /// Maps note id -> its live window, so a note cannot be opened twice and can be
 /// closed programmatically when archived.
 ///
-/// The value is `Option<DesktopContext>` because `new_window` is async: the slot
-/// is reserved with `None` *before* awaiting, so a second reconcile pass during
-/// the await sees the id as taken. Without the reservation a note gets two
-/// windows.
-pub type StickyRegistry = Signal<HashMap<String, Option<DesktopContext>>>;
+/// The value is an `Option` because `new_window` is async: the slot is reserved
+/// with `None` *before* awaiting, so a second reconcile pass during the await
+/// sees the id as taken. Without the reservation a note gets two windows.
+///
+/// The handle is **weak**. `DesktopContext` is an `Rc<DesktopService>` and
+/// `DesktopService` owns the tao `Window`; dioxus-desktop drops the webview from
+/// its own map when a window closes, but a strong `Rc` held here would keep the
+/// OS window alive after its `VirtualDom` is gone — a visible window that is
+/// never polled again. The crate ships `WeakDesktopContext` for exactly this
+/// (see its doc comment: "the tao window is never dropped and therefore cannot
+/// be closed").
+pub type StickyRegistry = Signal<HashMap<String, Option<WeakDesktopContext>>>;
 
 /// Open one note's window. Assumes the caller has already reserved `note.id` in
 /// the registry.
@@ -71,14 +79,26 @@ async fn open_note_window(
 
     let ctx: DesktopContext = window.new_window(dom, cfg).await;
     tracing::info!("Opened sticky window for note {}", note.id);
-    registry.write().insert(note.id.clone(), Some(ctx));
+    registry
+        .write()
+        .insert(note.id.clone(), Some(Rc::downgrade(&ctx)));
 }
 
 /// Close a note's window and drop its registry slot.
+///
+/// A weak handle that fails to upgrade means the window is already gone — the
+/// user closed it, or the compositor did. That is not an error; the slot is
+/// dropped either way so the reconciler can reopen the note if it should be
+/// showing.
 pub fn close_note_window(mut registry: StickyRegistry, id: &str) {
-    if let Some(Some(ctx)) = registry.write().remove(id) {
-        tracing::info!("Closing sticky window for note {}", id);
-        ctx.close();
+    if let Some(Some(weak)) = registry.write().remove(id) {
+        match weak.upgrade() {
+            Some(ctx) => {
+                tracing::info!("Closing sticky window for note {}", id);
+                ctx.close();
+            }
+            None => tracing::debug!("Sticky window for note {} was already gone", id),
+        }
     }
 }
 
@@ -96,6 +116,14 @@ pub fn setup_sticky_windows(window: DesktopContext, notes: Signal<NoteStore>) {
         let mut to_open: Vec<Note> = Vec::new();
         let mut to_close: Vec<String> = Vec::new();
         {
+            // Dead weak handles are deliberately NOT pruned here. A slot whose
+            // window the user closed still counts as "registered", so the
+            // reconciler leaves it alone. Pruning would make the note instantly
+            // reopen — the reconciler would fight the user. The correct
+            // response to a user-closed window is `set_open(false)` on the
+            // note, which needs close-detection (`use_wry_event_handler` on
+            // `WindowEvent::Destroyed`) and belongs with the window-lifecycle
+            // work in Task 9/10. Until then a closed note reappears on restart.
             let live = registry.peek();
             for note in store.notes.iter() {
                 let showing = note.open && !note.archived;
