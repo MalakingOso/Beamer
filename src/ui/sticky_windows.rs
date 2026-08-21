@@ -70,12 +70,14 @@ async fn open_note_window(
     );
 
     let ctx: DesktopContext = window.new_window(dom, cfg).await;
+    tracing::info!("Opened sticky window for note {}", note.id);
     registry.write().insert(note.id.clone(), Some(ctx));
 }
 
 /// Close a note's window and drop its registry slot.
 pub fn close_note_window(mut registry: StickyRegistry, id: &str) {
     if let Some(Some(ctx)) = registry.write().remove(id) {
+        tracing::info!("Closing sticky window for note {}", id);
         ctx.close();
     }
 }
