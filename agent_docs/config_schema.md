@@ -47,6 +47,28 @@ all_workspaces = true        # Mutter only: stick() note windows so they follow
 default_color = "purple"     # purple | violet | amber | teal | rose | slate
                              # An unrecognised value falls back to "purple"
 
+[llm]
+enabled = true                       # On-device cleanup and task extraction
+base_url = "http://127.0.0.1:8080"   # The ONLY connection setting — Beamer
+                                     # never spawns or configures the server
+request_timeout_ms = 15000           # Generous on purpose: waking a sleeping
+                                     # extraction model costs ~1.7s, or ~4s
+                                     # from cold. A timeout means "not cleaned",
+                                     # never "note lost"
+
+[llm.cleanup]                        # "S1-mini" by "Superwhisper"
+enabled = true
+model = "s1-mini-q4_k_m"     # Server-side model id (the GGUF filename stem),
+                             # NOT a path. Must match an id from GET /v1/models
+styling = "semi-formal"      # casual | semi-casual | semi-formal | formal
+structure = "lists"          # prose | lists
+context = "general"          # general | email
+
+[llm.extract]                # google/gemma-4-E4B-it QAT q4_0 (ladder rung 1)
+enabled = true
+model = "gemma-4-E4B_q4_0-it"
+min_confidence = 0.5         # Below this a suggestion is not shown at all
+
 [advanced]
 vad_aggressiveness = 2       # 1-3, higher = fewer false positives
 silence_timeout_ms = 600     # Silence duration to trigger speech end
@@ -57,6 +79,29 @@ pre_buffer_ms = 300          # Audio to keep before speech start
 
 All fields have sensible defaults. Missing fields use defaults on load.
 First run creates the file with all defaults.
+
+## Model server
+
+Beamer is a plain HTTP client of a **standalone** `llama-server`; it does not
+spawn, configure or shut it down. That is why `[llm]` has one connection
+setting and nothing about how the server runs. Launch settings live in
+`deploy/llama-beamer.service`; per-model settings, including idle shutdown and
+the required no-thinking flags for both models, live in
+`deploy/llama-models.ini`.
+
+Model files are **not** downloaded by Beamer. They are fetched manually into
+`~/models/beamer/` and served from there.
+
+⚠️ Never poll `GET /v1/models` on a timer. A status read resets the server's
+per-model idle clock, so a background health check pins the ~3 GB extraction
+model in VRAM permanently, with no error and no symptom. Beamer probes on
+button press and once when the settings page opens, nowhere else.
+
+⚠️ `[llm.cleanup]` carries a licence obligation, not just a config. `s1-mini`
+is Apache 2.0 plus a binding additional term requiring the model to be
+identified as `"S1-mini" by "Superwhisper"` — that exact capitalization. The
+string lives in `src/llm/mod.rs` as `MODEL_CREDIT`, is rendered in the Local AI
+settings card, and is pinned by an exact-equality test.
 
 ## API Keys
 

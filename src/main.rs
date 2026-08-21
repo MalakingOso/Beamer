@@ -5,6 +5,7 @@ mod hotkey;
 mod injection;
 #[cfg(not(target_os = "windows"))]
 mod install;
+mod llm;
 mod media;
 mod notes;
 mod orchestrator;

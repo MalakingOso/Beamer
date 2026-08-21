@@ -18,6 +18,8 @@ pub struct Config {
     pub appearance: AppearanceConfig,
     #[serde(default)]
     pub notes: NotesConfig,
+    #[serde(default)]
+    pub llm: crate::llm::LlmConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,6 +125,7 @@ impl Default for Config {
             injection: InjectionConfig::default(),
             appearance: AppearanceConfig::default(),
             notes: NotesConfig::default(),
+            llm: crate::llm::LlmConfig::default(),
         }
     }
 }

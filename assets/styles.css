@@ -1256,3 +1256,48 @@ body {
   color: var(--accent);
   border-color: var(--border-strong);
 }
+
+/* ── Local AI card ────────────────────────────────────────────────────────
+   The per-model state list is the only user-facing surface the residency
+   policy has: without it, "loaded" vs "sleeping" vs "unloaded" is invisible. */
+
+.llm-status {
+  font-size: 12px;
+}
+
+.llm-status.ok { color: var(--success); }
+.llm-status.bad { color: var(--danger); }
+
+.llm-models {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  background: var(--bg-recessed);
+  border: 2px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.llm-model-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-family: "DM Mono", "Cascadia Code", monospace;
+  font-size: 12px;
+}
+
+.llm-model-id { color: var(--fg); }
+.llm-model-state { color: var(--fg-secondary); }
+
+.llm-note,
+.llm-credit {
+  font-size: 12px;
+  color: var(--fg-secondary);
+  line-height: 1.5;
+}
+
+.llm-credit {
+  padding-top: 4px;
+  border-top: 2px solid var(--border);
+}
