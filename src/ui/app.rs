@@ -82,7 +82,7 @@ pub fn App() -> Element {
             .unwrap_or_default();
         drop(cfg);
 
-        let handle = Rc::new(start_ll_hook(initial, hook_tx));
+        let handle = Rc::new(start_ll_hook(initial, None, hook_tx));
 
         // Bridge hook events to the orchestrator coroutine
         spawn(async move {
@@ -100,7 +100,7 @@ pub fn App() -> Element {
         if let Some(new_config) =
             HotkeyConfig::parse(&cfg.recording.hotkey, cfg.recording.mode == "toggle")
         {
-            hotkey_handle.update_config(new_config);
+            hotkey_handle.update_configs(new_config, None);
         }
     });
 
