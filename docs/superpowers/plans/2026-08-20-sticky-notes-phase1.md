@@ -558,7 +558,22 @@ git commit -m "feat(hotkey): evdev listener watches two independent bindings"
 
 ---
 
-### Task 4: Windows low-level hook parity
+### Task 4: Windows low-level hook parity — DEFERRED
+
+> **Deferred 2026-08-21 by decision.** Windows is not a live target for Phase 1.
+> `src/hotkey/ll_hook.rs` is `#[cfg(target_os = "windows")]` and cannot be
+> compiled or tested on this machine, so doing it now would ship code verified
+> nowhere. Skipped deliberately, not forgotten.
+>
+> **To pick it up:** mirror Task 3 exactly. Task 3 moves `BindingConfig`,
+> `BindingState`, `Modifiers`, `MAX_BINDINGS`, `build_bindings` and
+> `matching_binding` into `src/hotkey/mod.rs` precisely so both platforms share
+> one copy — so this task is only about wiring `ll_hook.rs` to the shared items
+> and producing the same `start_ll_hook(inject, note, tx)` /
+> `HotkeyHandle::update_configs(inject, note)` signatures, keeping
+> `src/ui/app.rs` free of `#[cfg]` at the call site. The steps below still
+> apply as written.
+
 
 `src/hotkey/ll_hook.rs` is `#[cfg(target_os = "windows")]`, so it is **not compiled on this machine and cannot be verified here.** Keep the change mechanical and mirror Task 3 exactly.
 
