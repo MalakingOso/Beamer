@@ -2709,3 +2709,31 @@ installed. Confirmed at execution time via `GetVersion`. A post-logout answer
 of 3 *or* 4 means the copy did not take. Note that
 `gnome-extensions list --details` also reports the shell's cached version, not
 what is on disk, so it cannot be used to check this.
+
+## 11. Smaller corrections, for completeness
+
+Each of these was written into the plan's task text and is wrong; none needed a
+section of its own.
+
+- **`use_context::<Signal<NoteStore>>()` for `NotesPage`** — wrong twice. No
+  `provide_context` exists anywhere in `src/`, so it would panic rather than
+  resolve; and pages in this app take props. `NotesPage` takes
+  `{ notes, registry }`.
+- **`PENDING_OPENS` + `setup_note_opener` polling** — deleted, not implemented.
+  `reopen_note` + `set_open` does the same job reactively, through the
+  reconciler that already exists, with no static and no poll loop.
+- **`setup_note_autosave`** — already shipped during Batches A–C as
+  `app_setup::setup_notes_flush`, with an `is_dirty()` gate the plan's version
+  lacks. An unconditional `write()` per tick would notify every open sticky
+  window twice a second regardless of whether anything changed.
+- **"All blocking HTTP goes through `spawn_blocking`" (Task 11b)** — wrong for
+  `reqwest`. `reqwest::Client` is already async and its futures are driven by
+  the tokio runtime dioxus-desktop owns; wrapping one in `spawn_blocking` hands
+  a future to a thread that never polls it. `src/llm/client.rs` uses plain async
+  `reqwest` with a shared `OnceLock` client, mirroring
+  `transcription::http_client()`.
+- **`run_orchestrator`** — the function is `orchestrator::run`.
+- **`open_note_window` is private and its arity changed** — it now takes
+  `(window, registry, notes, note, pos, all_workspaces)`. `close_note_window`
+  still takes `(registry, id)`. Task 10's rewritten `close_note_window` also
+  assumed a strong `ctx`; the registry has held **weak** handles since `3b04fd1`.

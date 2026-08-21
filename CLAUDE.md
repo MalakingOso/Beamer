@@ -52,39 +52,93 @@ RUST_LOG=beamer=debug cargo run  # Run with debug logging
 - `agent_docs/sticky_notes.md` — Note windows, Wayland placement, cross-window state (CRITICAL for multi-window work)
 
 ---
+# 🚧 PICK UP HERE — Sticky Notes Phase 1 (complete except one log out)
 
-# 🚧 PICK UP HERE — Sticky Notes feature (Tasks 1–3, 5–8 done 2026-08-21)
+**Read `agent_docs/sticky_notes.md` first.** It carries everything below in
+durable form, plus the facts that cost real time to learn.
 
-Read these three documents first, in order:
+Phase 1 is **built and committed** on `feat/sticky-notes`. **158 tests pass**,
+up from a 101 baseline (121 at the end of Batches A–C). Zero build warnings.
 
-1. **Spec:** `docs/superpowers/specs/2026-08-20-sticky-notes-design.md`
-2. **Plan:** `docs/superpowers/plans/2026-08-20-sticky-notes-phase1.md` (13 tasks)
-3. **Benchmarks:** `docs/superpowers/benchmarks/2026-08-20-b60-llama-vulkan.md`
+## ⚠️ The one remaining action: LOG OUT OF GNOME
 
-**Tasks 1, 2, 3, 5, 6, 7 and 8 are complete** on branch `feat/sticky-notes`.
-Task 1 replaced every latency estimate with a measurement (two decisions changed
-as a result, below). Batches A–C then built the feature through to its first
-visible payoff: **press the note hotkey, speak, and a sticky note appears on the
-desktop and survives a restart.** 121 tests pass, up from a 101 baseline.
+Extension **v5 is on disk and installed**, but the live shell still answers
+**v3** — GNOME extensions do not hot-reload on Wayland. Until you log out and
+back in, `PlaceWindow` does not exist, so notes land wherever Mutter puts them
+and the note pill shows "Transcribing…" with an idle sweep. **Both are expected
+pre-logout artifacts, not bugs. Do not debug them.**
 
-**Task 4 (Windows hotkey parity) is deferred** — `ll_hook.rs` is
-`#[cfg(target_os = "windows")]` and cannot be built or tested here.
+Nothing else is pending. The log out was sequenced last deliberately, because
+it terminates every process in the session — including the terminal.
 
-**Next action:** execute **Task 9** — the GNOME extension's `PlaceWindow` /
-`GetWindowFrame` D-Bus methods. ⚠️ It needs a **full GNOME log out and back in**
-mid-task; extensions do not hot-reload on Wayland. Until Tasks 9/10 land, notes
-reappear wherever Mutter puts them, which is expected, not a bug.
+### After logging back in
 
-**Set a note hotkey before testing** — `note_hotkey = ""` in `config.toml` means
-note capture is off entirely, by design, so the dictation hotkey can never be
-silently diverted.
+```bash
+gdbus call --session --dest org.gnome.Shell \
+  --object-path /app/beamer/FocusProvider \
+  --method app.beamer.FocusProvider.GetVersion      # expect (uint32 5,)
+```
 
-Six corrections to the repo plan were found while executing Batches A–C and are
-written up in a `## Corrections found while executing Batches A–C` section in the
-plan file. The one that matters most: **nothing in Tasks 2–8 ever wrote
-`notes.json`** — the flush driver only appeared in Task 11 — so notes were created
-and never persisted. Fixed three ways (immediate flush on capture, a 500 ms
-debounce tick, and a flush before the tray Quit's `process::exit`).
+⚠️ **3 *or* 4 means the copy did not take.** The live shell jumps 3 → 5; v4 was
+built but never installed. `gnome-extensions list --details` reports the shell's
+*cached* version too, so it cannot be used for this check.
+
+Then, with a note open (substitute a real id from `~/.config/Beamer/notes.json`):
+
+```bash
+gdbus call --session --dest org.gnome.Shell \
+  --object-path /app/beamer/FocusProvider \
+  --method app.beamer.FocusProvider.PlaceWindow \
+  "Beamer Note <real-id>" 400 300 true              # expect (true,) AND visible movement
+
+gdbus call --session --dest org.gnome.Shell \
+  --object-path /app/beamer/FocusProvider \
+  --method app.beamer.FocusProvider.GetWindowFrame \
+  "Beamer Note <real-id>"                           # expect ~(true, 400, 300, w, h)
+```
+
+`(true,)` with no movement means `move_frame` is being ignored — stop and
+investigate before trusting anything downstream. The `GetWindowFrame` read-back
+is what would catch a physical-vs-logical pixel error; note that at scale 1.0
+the two agree, so a clean read is confirmation, not proof.
+
+### End-to-end checklist
+
+⚠️ **Set `note_hotkey` in `config.toml` first.** Empty means note capture is off
+entirely, by design, so the dictation hotkey can never be silently diverted.
+
+1. Dictation hotkey → text injects as before. *(The regression that matters most.)*
+2. Note hotkey → sticky appears, pill shows the **purple note ring**, and the
+   waveform still tracks your mic.
+3. Dictate four or five notes → **spread irregularly**, none stacked, none off-screen.
+4. Close one with Alt+F4 → `notes.json` shows `"open": false`.
+5. Notes board (new sidebar icon): search finds a note by a word you actually
+   *said*; clicking a card reopens it; archive hides it; "Show archived" restores.
+6. Restart with several notes open → they reappear, freshly scattered. Positions
+   deliberately do **not** match the previous session.
+7. Local AI card with the server up → lists both models and their states. Then
+   `pkill -x llama-server` (**never** `pkill -f`, which matches the shell running
+   it) → card reports not running, notes still captured.
+
+## Scope change: notes are placed, not remembered
+
+**Position persistence was dropped by decision (2026-08-21).** `place_next`
+scatters each note around the ones already on screen, freshly, every launch.
+Restart and they reappear *elsewhere* — correct, not a bug. This removed the
+least reliable part of the design (reading a window's geometry back on Wayland)
+and replaced it with a pure, tested function. Recorded in the spec §8 and
+`agent_docs/sticky_notes.md` so nobody "restores" it as a missing feature.
+
+## What is NOT done
+
+- **Task 4 — the Windows target does not compile.** `src/hotkey/ll_hook.rs:137,143`
+  still construct `HotkeyEvent::RecordStart` with no payload. It is
+  `#[cfg(target_os = "windows")]`, so Linux builds stay green. This is a **build
+  fix**, not parity work. See `todo.md`.
+- Note **size** is never captured, so resizing is forgotten. Unlike position,
+  this has no design justification.
+- Phase 2 (S1-mini cleanup) is **unblocked** — 0.225 s, measured. Phase 3 waits
+  on an eval corpus from real Phase 1 use.
 
 **Measured, so stop estimating:**
 
@@ -95,8 +149,6 @@ debounce tick, and a flush before the tray Quit's `process::exit`).
 | Wake extraction model from sleep | **1.68 s** (threshold was 10 s) |
 | Cold start (spawn + 4.8 GB load) | 4.06 s |
 | Resident VRAM, both models | ~4.3 GB of 22.7 GB |
-
-Phase 2 proceeds as specced. Asymmetric idle shutdown is confirmed correct.
 
 ## What the feature is
 
