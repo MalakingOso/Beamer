@@ -60,28 +60,27 @@ durable form, plus the facts that cost real time to learn.
 Phase 1 is **built and committed** on `feat/sticky-notes`. **165 tests pass**,
 up from a 101 baseline (121 at the end of Batches A–C). Zero build warnings.
 
-## ⚠️ The one remaining action: LOG OUT OF GNOME
+## ✅ The log out has happened — extension v5 is live
 
-Extension **v5 is on disk and installed**, but the live shell still answers
-**v3** — GNOME extensions do not hot-reload on Wayland. Until you log out and
-back in, `PlaceWindow` does not exist, so notes land wherever Mutter puts them
-and the note pill shows "Transcribing…" with an idle sweep. **Both are expected
-pre-logout artifacts, not bugs. Do not debug them.**
+Confirmed 2026-08-21: `GetVersion` returns `(uint32 5,)` and introspection
+lists both `PlaceWindow` and `GetWindowFrame`. The stale-v3 caveat that used to
+sit here is resolved — notes are placed, and the note pill shows its own state
+rather than "Transcribing…" with an idle sweep.
 
-Nothing else is pending. The log out was sequenced last deliberately, because
-it terminates every process in the session — including the terminal.
+⚠️ **Still unverified: that `PlaceWindow` actually MOVES a window.** Only the
+method's *existence* was checked. `(true,)` is returned by a no-op just as
+readily as by a real move, so run the check below before trusting placement.
 
-### After logging back in
+⚠️ Re-check the version after any future extension edit — GNOME extensions do
+not hot-reload on Wayland, so every change still needs a full log out.
+`gnome-extensions list --details` reports the shell's *cached* version and
+cannot be used for this; only the `GetVersion` call above is authoritative.
 
 ```bash
 gdbus call --session --dest org.gnome.Shell \
   --object-path /app/beamer/FocusProvider \
   --method app.beamer.FocusProvider.GetVersion      # expect (uint32 5,)
 ```
-
-⚠️ **3 *or* 4 means the copy did not take.** The live shell jumps 3 → 5; v4 was
-built but never installed. `gnome-extensions list --details` reports the shell's
-*cached* version too, so it cannot be used for this check.
 
 Then, with a note open (substitute a real id from `~/.config/Beamer/notes.json`):
 
