@@ -2,13 +2,20 @@
 //!
 //! Split out of `mod.rs` to keep that file under the 500-line limit. The audio,
 //! VAD, backend and tail-capture paths are shared by both capture modes; only
-//! what happens to the final text differs.
+//! what happens to the final text differs — which is the whole of this module.
+//!
+//! `deliver` is the single place the inject-vs-note decision is made. All three
+//! `TranscriptKind::Final` sites in `mod.rs` funnel through it rather than
+//! repeating the branch.
 
 use dioxus::prelude::*;
 
+use super::notify::{clipboard_only_fallback, show_notification};
 use crate::config::Config;
 use crate::hotkey::CaptureMode;
+use crate::injection;
 use crate::notes::{NoteColor, NoteStore};
+use crate::ui::history::TranscriptionHistory;
 use crate::ui::status_log::{log_status, LogLevel, StatusLog};
 
 /// Whether a transcript is worth persisting. A recording that produced only
@@ -58,6 +65,71 @@ pub(super) async fn do_note_capture(
         format!("Note created ({} chars)", text.trim().len()),
     );
     Some(id)
+}
+
+/// Route one finished transcript to the sink its capture mode selects.
+///
+/// Every path that produced a final transcript funnels through here, so the
+/// inject-vs-note decision is made in exactly one place rather than repeated at
+/// each of the three `TranscriptKind::Final` sites.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn deliver(
+    text: &str,
+    capture_mode: CaptureMode,
+    backends: &[String],
+    paste_shortcut: &str,
+    last_injection: &mut Signal<String>,
+    history: &mut Signal<TranscriptionHistory>,
+    status_log: &mut Signal<StatusLog>,
+    notes: &mut Signal<NoteStore>,
+    config: &Signal<Config>,
+) {
+    if sink_injects(capture_mode) {
+        do_injection(text, backends, paste_shortcut, last_injection, history, status_log).await;
+    } else if let Some(id) = do_note_capture(text, notes, config, status_log).await {
+        // Nothing here opens or places a window. The reconciler in
+        // `ui::sticky_windows` watches the store and does both.
+        tracing::info!("note {} created", id);
+    }
+}
+
+/// Inject transcribed text into the focused window using the configured fallback chain.
+async fn do_injection(
+    text: &str,
+    backends: &[String],
+    paste_shortcut: &str,
+    last_injection: &mut Signal<String>,
+    history: &mut Signal<TranscriptionHistory>,
+    status_log: &mut Signal<StatusLog>,
+) {
+    match injection::inject_text(text, backends, paste_shortcut).await {
+        Ok(result) => {
+            let status = format!("{}: {}", result.method, result.target_info);
+            tracing::info!("Injected via {}", status);
+            log_status(status_log, LogLevel::Info, format!("Injected via {}", status));
+            last_injection.set(status);
+        }
+        Err(e) => {
+            tracing::error!("Injection failed: {}, trying clipboard-only fallback", e);
+            // Last resort: copy to clipboard and notify user to paste manually
+            match clipboard_only_fallback(text).await {
+                Ok(()) => {
+                    let msg = "Copied to clipboard — press Ctrl+V to paste";
+                    tracing::info!("{}", msg);
+                    log_status(status_log, LogLevel::Info, msg.to_string());
+                    last_injection.set(msg.to_string());
+                    show_notification("Beamer", msg);
+                }
+                Err(cb_err) => {
+                    tracing::error!("Clipboard fallback also failed: {}", cb_err);
+                    log_status(status_log, LogLevel::Error, format!("Injection failed: {}", e));
+                    last_injection.set(format!("Failed: {}", e));
+                }
+            }
+        }
+    }
+
+    history.write().append(text.to_string());
 }
 
 #[cfg(test)]
