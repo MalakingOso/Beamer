@@ -5,10 +5,11 @@ import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
 import { BeamerIndicator } from './indicator.js';
 
-// Bumped to 4 so existing installs surface as "update available" and pick up
-// the disable()-during-TypeText reply fix. The capability floor Beamer
-// requires is still v2 (see REQUIRED_VERSION in src/injection/gnome.rs).
-const HELPER_VERSION = 4;
+// Bumped to 5 for PlaceWindow/GetWindowFrame (sticky note placement) and the
+// 'note' pill state. The capability floor Beamer requires is still v2 (see
+// REQUIRED_VERSION in src/injection/gnome.rs) — every caller of a v5-only
+// method degrades to a silent no-op against an older helper.
+const HELPER_VERSION = 5;
 
 // Typing pace: batches keep long transcripts fast (~500 chars/s) while giving
 // slow event loops (Electron apps) time to drain between batches.
@@ -39,6 +40,21 @@ const DBUS_XML = `
       <arg type="d" direction="in" name="level"/>
     </method>
     <method name="HideIndicator"/>
+    <method name="PlaceWindow">
+      <arg type="s" direction="in" name="title"/>
+      <arg type="i" direction="in" name="x"/>
+      <arg type="i" direction="in" name="y"/>
+      <arg type="b" direction="in" name="all_workspaces"/>
+      <arg type="b" direction="out" name="ok"/>
+    </method>
+    <method name="GetWindowFrame">
+      <arg type="s" direction="in" name="title"/>
+      <arg type="b" direction="out" name="found"/>
+      <arg type="i" direction="out" name="x"/>
+      <arg type="i" direction="out" name="y"/>
+      <arg type="u" direction="out" name="width"/>
+      <arg type="u" direction="out" name="height"/>
+    </method>
   </interface>
 </node>`;
 
@@ -184,5 +200,73 @@ export default class BeamerFocusExtension extends Extension {
 
     HideIndicator() {
         this._indicator?.hide();
+    }
+
+    // ── Window placement ─────────────────────────────────────────────────────
+    //
+    // Code running inside GNOME Shell is not a Wayland client, so it may do
+    // what no client can: read and set a window's absolute position. Beamer
+    // matches its sticky notes by exact title (`Beamer Note <id>`, see
+    // `window_title` in src/ui/sticky.rs) — the only handle a client and the
+    // shell reliably share.
+
+    /// Find a note window by its exact title, preferring one that actually
+    /// belongs to Beamer.
+    ///
+    /// Title is the only handle a Wayland client and the shell reliably share,
+    /// but titles are not owned: any window may call itself `Beamer Note <id>`
+    /// and be moved or pinned across workspaces in the real note's place. The
+    /// app id narrows that to windows Beamer plausibly owns. It is a preference
+    /// rather than a requirement because a hard filter that guessed the app id
+    /// wrong would break placement silently, and diagnosing it costs a full
+    /// GNOME log out — so a title-only match is still honoured, and logged.
+    _findWindowByTitle(title) {
+        let fallback = null;
+        for (const actor of global.get_window_actors()) {
+            const win = actor.meta_window;
+            if (!win || win.get_title() !== title)
+                continue;
+            const id = (win.get_gtk_application_id?.() ||
+                        win.get_wm_class?.() || '').toLowerCase();
+            if (id.includes('beamer'))
+                return win;
+            fallback = fallback ?? win;
+        }
+        if (fallback)
+            log(`beamer: "${title}" matched a window that is not Beamer's`);
+        return fallback;
+    }
+
+    /// Move a window and optionally pin it to every workspace.
+    ///
+    /// Negative coordinates mean "don't move" — pass (-1, -1) to change only
+    /// the sticky state of a window already where it should be.
+    PlaceWindow(title, x, y, allWorkspaces) {
+        const win = this._findWindowByTitle(title);
+        if (!win)
+            return false;
+        if (x >= 0 || y >= 0)
+            win.move_frame(true, x, y);
+        // Both directions, so flipping the config toggle actually takes effect
+        // rather than only ever being able to add stickiness.
+        if (allWorkspaces)
+            win.stick();
+        else
+            win.unstick();
+        return true;
+    }
+
+    /// Read a window's frame rect back in stage coordinates.
+    ///
+    /// Nothing in Beamer calls this today: notes are auto-placed and their
+    /// positions are deliberately not remembered. It ships anyway because
+    /// every extension change costs a full GNOME log out, and this is the only
+    /// way to verify that a `PlaceWindow` actually landed where it was asked to.
+    GetWindowFrame(title) {
+        const win = this._findWindowByTitle(title);
+        if (!win)
+            return [false, 0, 0, 0, 0];
+        const r = win.get_frame_rect();
+        return [true, r.x, r.y, r.width, r.height];
     }
 }

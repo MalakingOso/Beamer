@@ -78,7 +78,16 @@ export class BeamerIndicator {
         const wasVisible = this._pill.visible && this._state !== null;
         this._state = state;
 
-        this._statusLabel.visible = state !== 'recording';
+        // `show()` never touched style_class before, so the pill was stuck with
+        // whatever it was constructed with. Note capture needs a visually
+        // distinct ring, so the class is now driven by state.
+        this._pill.style_class = state === 'note'
+            ? 'beamer-pill beamer-pill-note'
+            : 'beamer-pill';
+
+        // Only the slow, indeterminate stage gets a label. 'recording' and
+        // 'note' are both live mic capture and show the waveform alone.
+        this._statusLabel.visible = state === 'processing';
 
         if (!this._animSource) {
             this._animSource = GLib.timeout_add(
@@ -153,7 +162,7 @@ export class BeamerIndicator {
         // Recording follows the live mic level; processing idles at a calm
         // constant sweep. The smoothing keeps bar motion fluid between the
         // ~15 Hz level updates coming over D-Bus.
-        const target = this._state === 'recording'
+        const target = (this._state === 'recording' || this._state === 'note')
             ? Math.max(0.12, this._level)
             : 0.15;
         this._smoothLevel += (target - this._smoothLevel) * 0.3;
