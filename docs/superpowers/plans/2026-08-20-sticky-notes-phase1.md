@@ -646,7 +646,11 @@ must be built on Windows before any release claiming Windows support."
 
 - [ ] **Step 1: Write the failing test**
 
-Add to `src/config/mod.rs`'s existing `#[cfg(test)] mod tests`:
+Add to `src/config/mod.rs`. **Correction (2026-08-21):** there is no
+`mod tests` in that file — it has two *named* test modules, `migration_tests`
+and `key_cache_tests`. Follow that convention and add a third,
+`mod note_config_tests`; the `cargo test --bin beamer config::` filter still
+matches it.
 
 ```rust
 #[test]
@@ -1087,9 +1091,14 @@ impl NoteStore {
         }
     }
 
+    // Correction (2026-08-21): create `self.path`'s parent, not
+    // `Config::config_dir()`. history.rs does the latter, but its path is
+    // always inside that dir; this store's tests deliberately point `path` at
+    // a PID-scoped temp dir and must not reach into the real config dir.
     pub fn save(&self) -> Result<()> {
-        let dir = Config::config_dir();
-        std::fs::create_dir_all(&dir)?;
+        if let Some(dir) = self.path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
         let contents = serde_json::to_string_pretty(self)?;
 
         let tmp = self.path.with_extension("json.tmp");
@@ -1306,7 +1315,7 @@ pub(super) async fn do_note_capture(
 In `src/orchestrator/mod.rs`:
 
 1. Add `mod sink;` beside `mod session;`.
-2. Add `notes: Signal<NoteStore>` and `capture_mode: CaptureMode` parameters through `run_orchestrator`, `handle_recording` and `handle_batch_recording`. `capture_mode` comes from the `HotkeyEvent::RecordStart(mode)` payload — replace the `RecordStart(_)` placeholder from Task 2 with `RecordStart(mode)` and thread it down.
+2. Add `notes: Signal<NoteStore>` and `capture_mode: CaptureMode` parameters through `run` (**correction 2026-08-21:** the function is `orchestrator::run`, not `run_orchestrator`), `handle_recording`, `handle_batch_recording` and `drain_final_transcripts`. `handle_batch_recording` also needs `config: &Signal<Config>` added — it previously took only a `&Config` snapshot, which `do_note_capture` cannot use. `capture_mode` comes from the `HotkeyEvent::RecordStart(mode)` payload — replace the `RecordStart(_)` placeholder from Task 2 with `RecordStart(mode)` and thread it down.
 3. At each of the three `TranscriptKind::Final` sites, branch:
 
 ```rust
@@ -1609,6 +1618,109 @@ Note: position will be wherever Mutter chose. Task 9 fixes that.
 git add src/ui/sticky.rs src/ui/mod.rs src/ui/app_setup.rs src/notes/mod.rs
 git commit -m "feat(ui): sticky note windows with colour palette and live editing"
 ```
+
+---
+
+## Corrections found while executing Batches A–C (2026-08-21)
+
+Tasks 2, 3, 5, 6, 7 and 8 were executed on branch `feat/sticky-notes`. The plan
+held up well; these are the places it did not, recorded so the next session does
+not rediscover them. Small in-place fixes are marked inline in each task above.
+
+### 1. Nothing in Tasks 2–8 ever wrote `notes.json` (blocking)
+
+`create()` and `set_body()` only set `dirty = true`. `flush_if_dirty`'s doc
+comment promises "a ~500ms interval task" drives the write, but no task in
+Phase 1 creates that task — the only non-test caller in the whole plan is in
+**Task 11**, which is a later batch. Batches A–C as written therefore satisfied
+every unit test while shipping a feature whose notes never reached disk, failing
+the acceptance criterion "quit and relaunch → the note is still there".
+
+Three pieces were added:
+
+- **Immediate flush after `create()`**, inside `do_note_capture` (Task 7). The
+  debounce exists for per-keystroke body edits, which are cheap to lose; a
+  just-captured transcript is not, and the spec's hard constraint is that a note
+  must never be lost. `TranscriptionHistory` already writes inline from the same
+  coroutine, so this is house precedent.
+- **`app_setup::setup_notes_flush`** — a `use_hook` + `spawn` loop on a 500 ms
+  interval. It gates on `notes.peek().is_dirty()` *before* taking `notes.write()`;
+  an unconditional `write()` per tick would notify every subscriber — including
+  every open sticky window — twice a second regardless of whether anything
+  changed. `NoteStore::is_dirty()` was added for this.
+- **A flush in the tray Quit handler**, before `std::process::exit(0)`
+  (`app_setup.rs`). `process::exit` skips destructors *and* the interval tick, so
+  without it every unflushed edit dies with the process.
+
+### 2. Task 8 opened windows only for *new* notes, never for loaded ones
+
+`open_note_window` was called only from Task 7's stub site, so a relaunch
+restored `notes.json` but left the desktop empty — again failing the "survives a
+restart" criterion. `close_note_window` was defined but never called by anything.
+
+Replaced with a **reconciler** in the new `src/ui/sticky_windows.rs`: one
+`use_effect` subscribes to the store and makes the live window set match the
+notes that should be showing —
+
+```text
+open && !archived && not registered  ->  open
+(archived || !open) && registered    ->  close
+```
+
+One mechanism covers both a note dictated just now and a note loaded at startup,
+and it gives `close_note_window` a caller. Task 10's placement work still hooks
+into the single `open_note_window` path, so this does not conflict with it.
+
+Two details the reconciler needs:
+
+- **Reserve the registry slot synchronously.** `new_window` is `async`; the
+  registry type is `HashMap<String, Option<DesktopContext>>` and the slot is
+  inserted as `None` *before* the await, so a second reconcile pass landing
+  mid-open sees the id as taken. Without this a note gets two windows.
+- **Never subscribe to the registry.** The effect `read()`s the store (its
+  trigger) and only `peek()`s the registry — otherwise each window it opens
+  re-runs it.
+
+### 3. `use_context` cannot reach a sticky window — pass the Signal as a prop
+
+Task 8's snippet used `use_context::<Signal<NoteStore>>()` inside `StickyNote`
+plus `use_context_provider(|| notes)` in `App()`. Each window is its own
+`VirtualDom` with its own scope tree, and `use_context` walks only the current
+dom's tree, so the provider in `App()` is invisible from a sticky window.
+
+`StickyNoteProps` now carries `notes: Signal<NoteStore>`, passed via
+`VirtualDom::new_with_props`. This is sound because a `Signal` is `Copy +
+'static` and generational-box's `UNSYNC_RUNTIME` arena is thread-local while
+every desktop `VirtualDom` polls on the main thread. Note the corollary,
+confirmed empirically: `Signal<NoteStore>` is **not `Sync`**, so it cannot be
+stashed in a `static OnceLock` — thread it as a parameter.
+
+Cross-dom *writes* were verified working in practice (clicking a colour dot in a
+sticky window updated the store the main window owns, and the flush driver
+persisted it).
+
+### 4. Window management lives in `sticky_windows.rs`, not `app_setup.rs`
+
+Task 8 put the registry and open/close helpers in `app_setup.rs`. That file was
+390 lines and is flagged as the highest 500-line-cap risk in the batch plan, with
+Task 10 due to add more. The registry, `open_note_window`, `close_note_window`
+and the reconciler went into a new `src/ui/sticky_windows.rs` (128 lines)
+instead; `app_setup.rs` ended at 420 rather than ~510.
+
+### 5. `deliver()` replaces the inlined branch at the three `Final` sites
+
+`src/orchestrator/mod.rs` was 438 lines. Inlining Task 7's five-line
+inject-vs-note branch at each of its three `TranscriptKind::Final` sites would
+have crossed 500. A single `deliver()` helper makes the decision once; the file
+ended at **482**, which is under the cap but tight — the next change to this file
+should split it.
+
+### 6. Builder options Task 8's snippet omitted
+
+`open_note_window` also sets `.with_data_directory(super::webview_data_dir())`
+and `.with_exits_when_last_window_closes(false)`, matching the splash and pill
+windows. The second is load-bearing for a tray app: without it, archiving the
+last sticky while the main window is hidden exits Beamer entirely.
 
 ---
 
