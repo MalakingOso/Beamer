@@ -272,6 +272,25 @@ than VRAM never coming back. Beamer must either poll lazily (only when it is
 about to make a request) or not at all, treating a connection failure as the
 health signal instead.
 
+#### Finding 7 — per-model idle timers are genuinely independent
+
+Verified, because Finding 6 made "obviously it is per-model" untrustworthy:
+S1-mini was driven continuously for 100 s (a request every 5 s) while Gemma
+received nothing. Gemma still went `sleeping`; S1-mini stayed `loaded`.
+
+Router children are separate processes on separate ports with separate activity
+clocks, so ordinary sticky-note use does **not** pin the extraction model in
+VRAM. This is what makes the asymmetric design work in practice rather than only
+on an idle machine.
+
+#### Measured VRAM beats the spec's estimate
+
+The spec budgeted ~5.2 GB resident for the extraction model. Measured resident
+footprint is **~3.1-3.4 GB** (18898 MiB free loaded vs 21985 MiB sleeping vs
+22317 MiB with nothing loaded). Total for both models is ~4.3 GB against the
+spec's 5.61 GB estimate. The cause was not investigated; recorded because VRAM
+budgeting was a spec-level concern and the real number is comfortably better.
+
 ### Cold start (page cache dropped)
 
 NOT MEASURED — requires `sudo sync && echo 3 > /proc/sys/vm/drop_caches`, which
