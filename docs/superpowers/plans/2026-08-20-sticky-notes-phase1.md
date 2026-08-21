@@ -2157,6 +2157,117 @@ git commit -m "feat(ui): notes board page with search and reopen"
 
 ---
 
+### Task 11b: LLM connection config and settings card
+
+Added 2026-08-21. Beamer is now a plain HTTP client to a standalone llama.cpp
+server (spec §7), so it needs a way to point at that server and confirm it is
+reachable. This is deliberately its own task: it touches config and settings UI
+only, and it ships useful on its own — before any cleanup pass exists, the card
+tells you whether the server the later phases depend on is actually up.
+
+**Files:**
+- Create: `src/llm/mod.rs`, `src/llm/client.rs`
+- Create: `src/ui/settings/local_ai_card.rs`
+- Modify: `src/config/mod.rs` (add `LlmConfig`)
+- Modify: `src/ui/settings/mod.rs` (register the card)
+- Modify: `agent_docs/config_schema.md`
+
+**Interfaces:**
+- Produces:
+  - `pub struct LlmConfig { enabled: bool, base_url: String, request_timeout_ms: u64, cleanup: CleanupConfig, extract: ExtractConfig }`
+  - `pub async fn probe(base_url: &str, timeout: Duration) -> Result<Vec<ModelStatus>, ProbeError>`
+  - `pub struct ModelStatus { pub id: String, pub state: String }`
+
+- [ ] **Step 1: Write the failing tests**
+
+In `src/llm/client.rs`, following the repo's inline `#[cfg(test)]` pattern:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_model_list_and_state() {
+        let body = r#"{"data":[
+            {"id":"s1-mini-q4_k_m","status":{"value":"loaded"}},
+            {"id":"gemma-4-E4B_q4_0-it","status":{"value":"sleeping"}}
+        ]}"#;
+        let got = parse_models(body).expect("valid body must parse");
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].id, "s1-mini-q4_k_m");
+        assert_eq!(got[1].state, "sleeping",
+            "the card surfaces sleep state; it must survive parsing");
+    }
+
+    #[test]
+    fn base_url_tolerates_a_trailing_slash() {
+        assert_eq!(models_url("http://127.0.0.1:8080/"), "http://127.0.0.1:8080/v1/models");
+        assert_eq!(models_url("http://127.0.0.1:8080"),  "http://127.0.0.1:8080/v1/models");
+    }
+
+    #[test]
+    fn default_config_points_at_localhost_and_is_enabled() {
+        let c = LlmConfig::default();
+        assert_eq!(c.base_url, "http://127.0.0.1:8080");
+        assert!(c.request_timeout_ms >= 15_000,
+            "must cover a cold server start (~4 s) plus generation, with margin");
+    }
+}
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `cargo test --lib llm:: 2>&1 | tail -20`
+Expected: FAIL — module `llm` does not exist.
+
+- [ ] **Step 3: Implement the client and config**
+
+`parse_models` reads `data[].id` and `data[].status.value`. `probe` issues a
+single `GET {base_url}/v1/models` with the configured timeout.
+
+**`probe` must be called on demand only — never on a timer.** Status reads reset
+the server's per-model idle clock, so a periodic health check pins the ~3 GB
+extraction model in VRAM permanently, with no error and no visible symptom
+(spec §2, benchmark doc Finding 6). Put that warning in a doc comment on
+`probe` itself, where the next person to add a "background health check" will
+read it.
+
+All blocking HTTP goes through `tokio::task::spawn_blocking`.
+
+- [ ] **Step 4: Build the settings card**
+
+`local_ai_card.rs`, following `transcription_card.rs` for structure and
+`components.rs` for `Card` / `Select` / `Toggle`. Deploy Purple throughout.
+
+- Enable toggle, server URL text input.
+- **Test connection** button → `probe` → render either the model list with each
+  model's state, or a plain failure ("Server not running" / status line / "No
+  response").
+- The cleanup and extraction model pickers are `Select`s populated from the last
+  successful probe, falling back to free text seeded from config when no probe
+  has succeeded. This stops the user typing a model name that must match a GGUF
+  filename stem exactly.
+- Probe once when the settings window opens, and on button press. Nowhere else.
+
+- [ ] **Step 5: Verify**
+
+Run: `cargo test --lib llm:: 2>&1 | tail -20` → PASS
+Run: `cargo build 2>&1 | tail -20` → clean
+
+Manual: with the server up, the card lists both models and their states; stop it
+with `pkill -x llama-server` and confirm the card reports it is not running and
+says notes are still captured without cleanup.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/llm/ src/ui/settings/local_ai_card.rs src/ui/settings/mod.rs src/config/mod.rs agent_docs/config_schema.md
+git commit -m "feat(llm): connection config and Local AI settings card"
+```
+
+---
+
 ### Task 12: Documentation
 
 **Files:**
