@@ -17,7 +17,8 @@
 
 [Unit]
 Description=llama.cpp model server for Beamer (SYCL, Arc Pro B60)
-After=graphical-session.target
+# No graphical-session dependency on purpose: the B60 is headless compute with
+# no connected outputs, and the server is a plain localhost HTTP service.
 
 [Service]
 Type=simple

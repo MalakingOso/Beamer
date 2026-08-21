@@ -90,12 +90,25 @@ The S1-mini string must be exactly `"S1-mini" by "Superwhisper"`, quotes and cap
 
 The measurement is worthless with a made-up prompt: S1-mini was trained on an exact input shape and produces garbage without it. Use the real one.
 
+> **CORRECTED 2026-08-21.** The original command here omitted
+> `--chat-template-kwargs`, which makes S1-mini emit `<think>` and stop after
+> three tokens. S1-mini inherits Qwen3's chat template, which defaults thinking
+> ON; the model was trained with it OFF. Do **not** substitute
+> `--reasoning-budget 0` — the model card says output degrades. The GGUF also
+> carries `temp 0.6 / top_p 0.95 / top_k 20` inherited from Qwen3-0.6B, so set
+> greedy decoding explicitly. See
+> `docs/superpowers/benchmarks/2026-08-20-b60-llama-vulkan.md` Finding 5.
+>
+> Note also that the backend is now **SYCL** (`build-sycl/`), not Vulkan, and
+> that this whole step is superseded in practice by the standalone router
+> server in `deploy/`. Kept here for the record.
+
 ```bash
 export LD_LIBRARY_PATH=/home/berkley/Programming/llama.cpp/build/bin:$LD_LIBRARY_PATH
-GGML_VK_VISIBLE_DEVICES=<B60_INDEX> \
 /home/berkley/Programming/llama.cpp/build/bin/llama-server \
   -m ~/models/beamer/s1-mini-q4_k_m.gguf \
-  --port 8081 --host 127.0.0.1 -ngl 99 -c 8192 --jinja &
+  --port 8081 --host 127.0.0.1 -dev Vulkan1 -ngl 99 -c 8192 --jinja \
+  --chat-template-kwargs '{"enable_thinking":false}' --temp 0 --top-k 1 &
 ```
 
 Time how long `/health` takes to return ready, then:
