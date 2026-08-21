@@ -1699,6 +1699,37 @@ Cross-dom *writes* were verified working in practice (clicking a colour dot in a
 sticky window updated the store the main window owns, and the flush driver
 persisted it).
 
+**Cross-dom re-render also works** — traced through dioxus 0.7.9's source, not
+assumed. A `Signal`'s subscriber list is `Arc<Mutex<HashSet<ReactiveContext>>>`
+(`dioxus-signals/src/signal.rs:26`); each subscriber's `ReactiveContext` captured
+*its own* dom's scheduler sender (`reactive_context.rs:103-131`), and
+`mark_dirty` invokes that callback without ever consulting `Runtime::current()`
+(`reactive_context.rs:217-233`). The send wakes the other window's `tao_waker`,
+which posts `UserWindowEvent::Poll(id)` back into the event loop
+(`desktop/src/waker.rs:23-29`). So a write from *any* main-thread code — the
+hotkey handler and tray callbacks included — correctly notifies every window.
+
+Two rules that follow:
+
+- **`peek()` does not subscribe** (`signal.rs:426-431`). A component that only
+  peeks silently never updates.
+- **Never move a `Signal` into `tokio::spawn`.** Desktop's tokio runtime is
+  multi-threaded (`desktop/src/launch.rs:119-125`), and `UnsyncStorage`'s arena
+  is thread-local, so a work-stealing thread would touch the wrong one. Dioxus's
+  own same-thread `spawn` is what to use — which is what `CLAUDE.md` already
+  mandates.
+
+**`GlobalSignal` is not an option here** — do not reach for it in later tasks.
+`get_global_context()` resolves through `Runtime::current()` and stores its map
+on *that dom's* ROOT scope (`dioxus-signals/src/global/mod.rs:286-291`), so every
+window silently gets its own independent copy. No error, no panic, values just
+diverge.
+
+`VirtualDom::provide_root_context(...)` before `new_window` is the officially
+supported alternative to props and would make the plan's original `use_context`
+wording work (`dioxus-core/src/virtual_dom.rs:367-370`); dioxus's own `launch`
+uses it for DI. Props were chosen here because they are typed.
+
 ### 4. Window management lives in `sticky_windows.rs`, not `app_setup.rs`
 
 Task 8 put the registry and open/close helpers in `app_setup.rs`. That file was
@@ -1715,7 +1746,43 @@ have crossed 500. A single `deliver()` helper makes the decision once; the file
 ended at **482**, which is under the cap but tight — the next change to this file
 should split it.
 
-### 6. Builder options Task 8's snippet omitted
+### 6. The window registry must hold **weak** handles
+
+`DesktopContext` is `Rc<DesktopService>` and `DesktopService` owns the tao
+`Window` (`desktop/src/desktop_context.rs:39`, `58-63`). When a window closes,
+dioxus-desktop removes the webview from its own map — but a strong `Rc` held in
+our registry keeps the OS window alive with its `VirtualDom` gone: a visible
+window that is never polled again. The crate ships `WeakDesktopContext` for
+precisely this and says so in its doc comment (`desktop_context.rs:41-44`).
+
+`StickyRegistry` is therefore
+`Signal<HashMap<String, Option<WeakDesktopContext>>>`, and `close_note_window`
+treats a failed upgrade as "already gone" rather than an error.
+
+Dead slots are deliberately **not** pruned by the reconciler. A slot whose
+window the user closed still counts as registered, so the note is left alone;
+pruning would make it reopen instantly and fight the user. The correct response
+to a user-closed window is `set_open(false)`, which needs close-detection
+(`use_wry_event_handler` on `WindowEvent::Destroyed`) and belongs with the
+window-lifecycle work in Task 9/10. `NoteStore::set_open` exists unused for this
+reason. Until then, a note whose window is closed reappears on restart.
+
+### 7. The store's anchor scope must outlive every note window
+
+Dropping a `VirtualDom` drops its scopes, their `Owner`, and recycles every
+`GenerationalBox` those scopes allocated — which **increments the slot
+generation** (`generational-box/src/unsync.rs:227-252`). Because `Signal` is
+`Copy`, *every* copy then fails its generation check and panics with
+`BorrowError::Dropped`. So a `Signal` owned by a window that can close would
+take every note window down with it on the next read.
+
+Beamer is already safe: `launch_app()` sets
+`WindowCloseBehaviour::WindowHides` and `with_exits_when_last_window_closes(false)`
+(`src/ui/mod.rs:63-64`), so the main window's dom is never dropped and
+`use_signal(NoteStore::load)` in `App()` is a sound anchor. **Do not change
+either of those launch options without moving the store's owner.**
+
+### 8. Builder options Task 8's snippet omitted
 
 `open_note_window` also sets `.with_data_directory(super::webview_data_dir())`
 and `.with_exits_when_last_window_closes(false)`, matching the splash and pill
