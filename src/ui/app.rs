@@ -80,9 +80,10 @@ pub fn App() -> Element {
         let cfg = config.peek();
         let initial = HotkeyConfig::parse(&cfg.recording.hotkey, cfg.recording.mode == "toggle")
             .unwrap_or_default();
+        let note_binding = cfg.recording.note_hotkey_config();
         drop(cfg);
 
-        let handle = Rc::new(start_ll_hook(initial, None, hook_tx));
+        let handle = Rc::new(start_ll_hook(initial, note_binding, hook_tx));
 
         // Bridge hook events to the orchestrator coroutine
         spawn(async move {
@@ -100,7 +101,7 @@ pub fn App() -> Element {
         if let Some(new_config) =
             HotkeyConfig::parse(&cfg.recording.hotkey, cfg.recording.mode == "toggle")
         {
-            hotkey_handle.update_configs(new_config, None);
+            hotkey_handle.update_configs(new_config, cfg.recording.note_hotkey_config());
         }
     });
 

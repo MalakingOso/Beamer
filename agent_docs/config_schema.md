@@ -8,8 +8,17 @@
 
 ```toml
 [recording]
-hotkey = "Ctrl+Space"        # Global hotkey binding
+hotkey = "Ctrl+Space"        # Global hotkey binding (dictate -> inject)
 mode = "hold"                # "hold" (hold-to-talk) or "toggle"
+note_hotkey = ""             # Chord that dictates into a sticky note instead of
+                             # injecting. "" (the default) disables note capture
+                             # entirely — no second binding is registered at all,
+                             # so the dictation hotkey is unaffected.
+                             # An unparseable value also yields no binding, rather
+                             # than silently falling back to some other chord.
+note_mode = "toggle"         # "toggle" or "hold". Toggle by default: a note is
+                             # usually longer than a dictated phrase, and holding
+                             # a chord through it is awkward.
 
 [transcription]
 backend = "elevenlabs_batch" # elevenlabs_batch | elevenlabs_realtime | mistral_batch | mistral_realtime
@@ -31,6 +40,12 @@ paste_shortcut = "auto"      # Linux clipboard backend: auto | ctrl_v | ctrl_shi
 glow_color = "#4B0082"       # Screen edge glow color (hex)
 overlay_enabled = true       # Show floating transcription overlay
 auto_start = false           # Start with Windows
+
+[notes]
+all_workspaces = true        # Mutter only: stick() note windows so they follow
+                             # you across workspaces
+default_color = "purple"     # purple | violet | amber | teal | rose | slate
+                             # An unrecognised value falls back to "purple"
 
 [advanced]
 vad_aggressiveness = 2       # 1-3, higher = fewer false positives

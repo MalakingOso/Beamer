@@ -16,6 +16,8 @@ pub struct Config {
     pub injection: InjectionConfig,
     #[serde(default)]
     pub appearance: AppearanceConfig,
+    #[serde(default)]
+    pub notes: NotesConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +28,43 @@ pub struct RecordingConfig {
     pub mode: String,
     #[serde(default)]
     pub pause_media: bool,
+    /// Chord that dictates into a sticky note instead of injecting.
+    /// Empty means unconfigured: no note binding is registered at all.
+    #[serde(default)]
+    pub note_hotkey: String,
+    /// "toggle" or "hold". Toggle by default — a note is usually longer than
+    /// a dictated phrase, and holding a chord through it is awkward.
+    #[serde(default = "default_note_mode")]
+    pub note_mode: String,
+}
+
+impl RecordingConfig {
+    /// Parsed note-capture binding, or `None` when unconfigured or unparseable.
+    ///
+    /// Returning `None` on a bad value is deliberate: silently falling back to
+    /// some other chord would bind dictation to a key the user never chose.
+    pub fn note_hotkey_config(&self) -> Option<crate::hotkey::HotkeyConfig> {
+        if self.note_hotkey.trim().is_empty() {
+            return None;
+        }
+        crate::hotkey::HotkeyConfig::parse(&self.note_hotkey, self.note_mode == "toggle")
+    }
+}
+
+/// Sticky note behaviour and appearance defaults.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotesConfig {
+    /// Mutter only: `stick()` note windows so they follow across workspaces.
+    #[serde(default = "default_true")]
+    pub all_workspaces: bool,
+    #[serde(default = "default_note_color")]
+    pub default_color: String,
+}
+
+impl Default for NotesConfig {
+    fn default() -> Self {
+        Self { all_workspaces: true, default_color: default_note_color() }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +110,8 @@ fn default_backend() -> String { "elevenlabs".into() }
 fn default_language() -> String { "en".into() }
 fn default_backends() -> Vec<String> { crate::injection::default_backend_names() }
 fn default_paste_shortcut() -> String { "auto".into() }
+fn default_note_mode() -> String { "toggle".into() }
+fn default_note_color() -> String { "purple".into() }
 fn default_true() -> bool { true }
 
 
@@ -81,6 +122,7 @@ impl Default for Config {
             transcription: TranscriptionConfig::default(),
             injection: InjectionConfig::default(),
             appearance: AppearanceConfig::default(),
+            notes: NotesConfig::default(),
         }
     }
 }
@@ -91,6 +133,8 @@ impl Default for RecordingConfig {
             hotkey: default_hotkey(),
             mode: default_mode(),
             pause_media: false,
+            note_hotkey: String::new(),
+            note_mode: default_note_mode(),
         }
     }
 }
@@ -345,5 +389,51 @@ mod key_cache_tests {
 
         // Clean up so this test doesn't leak state into others.
         KEY_CACHE.lock().unwrap().remove(name);
+    }
+}
+
+#[cfg(test)]
+mod note_config_tests {
+    use super::*;
+
+    #[test]
+    fn note_hotkey_is_unset_by_default() {
+        let cfg = RecordingConfig::default();
+        assert_eq!(cfg.note_hotkey, "", "no default chord may be stolen from another app");
+        assert!(
+            cfg.note_hotkey_config().is_none(),
+            "an unset note hotkey must produce no binding at all"
+        );
+    }
+
+    #[test]
+    fn configured_note_hotkey_parses_to_a_binding() {
+        let cfg = RecordingConfig {
+            note_hotkey: "Ctrl+Shift+N".into(),
+            note_mode: "toggle".into(),
+            ..RecordingConfig::default()
+        };
+        let parsed = cfg.note_hotkey_config().expect("should parse");
+        assert!(parsed.ctrl);
+        assert!(parsed.shift);
+        assert!(!parsed.alt);
+        assert_eq!(parsed.trigger_vk, 0x4E); // N
+        assert!(parsed.is_toggle, "note capture defaults to toggle, not hold");
+    }
+
+    #[test]
+    fn unparseable_note_hotkey_yields_no_binding_rather_than_a_wrong_one() {
+        let cfg = RecordingConfig {
+            note_hotkey: "Ctrl+NotAKey".into(),
+            ..RecordingConfig::default()
+        };
+        assert!(cfg.note_hotkey_config().is_none());
+    }
+
+    #[test]
+    fn notes_config_defaults() {
+        let cfg = NotesConfig::default();
+        assert!(cfg.all_workspaces, "a sticky note should follow you across workspaces");
+        assert_eq!(cfg.default_color, "purple");
     }
 }
