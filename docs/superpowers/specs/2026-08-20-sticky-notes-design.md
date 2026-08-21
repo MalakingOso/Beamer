@@ -232,14 +232,26 @@ If measurement (below) shows E4B's precision is inadequate, promote in this
 order. All are official Google QAT builds under Apache-2.0, so promotion is a
 config change and a download — no code.
 
-| Rung | Model | On disk | Read/token |
-|---|---|---|---|
-| 1 (default) | `gemma-4-E4B-it` q4_0 | 5.15 GB | ~5.2 GB |
-| 2 | `gemma-4-12B-it` QAT UD-Q4_K_XL | 6.72 GB | ~6.7 GB |
-| 3 | `gemma-4-26B-A4B-it` q4_0 | 14.44 GB | ~2.2 GB (MoE) |
+| Rung | Model | On disk | tg128 (measured) | pp512 (measured) |
+|---|---|---|---:|---:|
+| **0** | `gemma-4-E2B-it` q4_0 | 3.10 GiB | **116.0 t/s** | **4744 t/s** |
+| 1 (default) | `gemma-4-E4B-it` q4_0 | 4.79 GiB | 77.3 t/s | 2816 t/s |
+| 2 | `gemma-4-12B-it` QAT UD-Q4_K_XL | 6.72 GB | not measured | not measured |
+| 3 | `gemma-4-26B-A4B-it` q4_0 | 13.45 GiB | not measured | not measured |
 
-Note rung 3 is both the largest and the fastest. If latency rather than
-quality turns out to be the binding constraint, skip rung 2.
+> **Rung 0 added 2026-08-21.** Measured on the B60 via SYCL. E2B is **1.50x**
+> E4B at generation, **1.68x** at prompt processing, and 35% smaller on disk.
+> Extraction behaved correctly on two spot-checks containing five planted
+> negatives (an aspiration, a task belonging to someone else, a hypothetical) —
+> **no quality regression observed, which at n=2 is not the same as equal
+> quality.** Treat rung 0 as a measured option, not a new default: per this
+> section, the default changes on corpus evidence, and no corpus exists yet.
+
+Rung 3 is expected to be both the largest and the fastest per token — 26B total
+with only ~4B active — but that is still an unmeasured claim. Its cost is load
+time, which residency makes irrelevant when ~18 GB of the card is idle. If
+latency rather than quality is the binding constraint, the ladder is not
+strictly ordered: try rung 0 downward and rung 3 upward before rung 2.
 
 ### VRAM budget
 
