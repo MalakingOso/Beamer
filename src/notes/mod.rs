@@ -14,79 +14,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::config::Config;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NoteState {
-    Raw,
-    Cleaned,
-    CleanFailed,
-    Analyzed,
-    ExtractFailed,
-}
-
-/// Fixed palette rather than free-form hex: keeps notes inside the Deploy
-/// Purple design language and keeps `notes.json` validatable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NoteColor {
-    Purple,
-    Violet,
-    Amber,
-    Teal,
-    Rose,
-    Slate,
-}
-
-impl NoteColor {
-    pub fn from_config_name(name: &str) -> Self {
-        match name.trim().to_ascii_lowercase().as_str() {
-            "violet" => Self::Violet,
-            "amber" => Self::Amber,
-            "teal" => Self::Teal,
-            "rose" => Self::Rose,
-            "slate" => Self::Slate,
-            _ => Self::Purple,
-        }
-    }
-
-    /// CSS class suffix used by `ui::sticky`.
-    pub fn css_class(&self) -> &'static str {
-        match self {
-            Self::Purple => "purple",
-            Self::Violet => "violet",
-            Self::Amber => "amber",
-            Self::Teal => "teal",
-            Self::Rose => "rose",
-            Self::Slate => "slate",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Note {
-    pub id: String,
-    pub created: String,
-    pub modified: String,
-    /// Verbatim transcript or typed text. Never rewritten.
-    pub raw: String,
-    /// Display text. Equals `raw` until a cleanup pass replaces it.
-    pub body: String,
-    pub state: NoteState,
-    pub color: NoteColor,
-    /// **Not read on Linux, and never written from window geometry.**
-    ///
-    /// Position memory was dropped by decision: `ui::note_layout` chooses where
-    /// each note goes, freshly, every launch. The field stays because it is
-    /// part of the persisted schema and `with_position` is still honoured
-    /// natively on Windows — but nothing captures a window's actual position
-    /// into it, and nothing should. Reading a window's own position back is
-    /// exactly what Wayland does not permit, and the API that appears to do it
-    /// returns `Ok((0, 0))` rather than an error.
-    pub pos: Option<(i32, i32)>,
-    pub size: Option<(u32, u32)>,
-    pub open: bool,
-    pub archived: bool,
-}
+mod model;
+pub use model::{Note, NoteColor, NoteState};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NoteStore {
@@ -271,9 +200,55 @@ impl NoteStore {
         }
     }
 
+    /// Return an archived note to the active list.
+    ///
+    /// Leaves `open` alone. Restoring puts a note back on the board; popping a
+    /// window open on top of that would be a second, unasked-for action, and
+    /// clicking the card is already how you get the window back.
+    pub fn restore(&mut self, id: &str) {
+        if self.get(id).is_none_or(|n| !n.archived) {
+            return;
+        }
+        if let Some(note) = self.touch(id) {
+            note.archived = false;
+            self.dirty = true;
+        }
+    }
+
     /// Non-archived notes, newest first.
     pub fn active(&self) -> Vec<&Note> {
-        let mut v: Vec<&Note> = self.notes.iter().filter(|n| !n.archived).collect();
+        Self::newest_first(self.notes.iter().filter(|n| !n.archived).collect())
+    }
+
+    /// Archived notes, newest first.
+    pub fn archived(&self) -> Vec<&Note> {
+        Self::newest_first(self.notes.iter().filter(|n| n.archived).collect())
+    }
+
+    /// Active notes matching `query`, newest first. An empty query matches all.
+    ///
+    /// Searches `raw` as well as `body`. A cleanup pass rewrites `body` and can
+    /// remove the very words that were spoken, so searching only the display
+    /// text would fail to find a note by something you actually said — which is
+    /// the most natural thing to search for.
+    pub fn search(&self, query: &str) -> Vec<&Note> {
+        let needle = query.trim().to_lowercase();
+        if needle.is_empty() {
+            return self.active();
+        }
+        Self::newest_first(
+            self.notes
+                .iter()
+                .filter(|n| !n.archived)
+                .filter(|n| {
+                    n.body.to_lowercase().contains(&needle)
+                        || n.raw.to_lowercase().contains(&needle)
+                })
+                .collect(),
+        )
+    }
+
+    fn newest_first(mut v: Vec<&Note>) -> Vec<&Note> {
         v.sort_by(|a, b| b.created.cmp(&a.created));
         v
     }
@@ -408,11 +383,64 @@ mod tests {
     }
 
     #[test]
-    fn unknown_color_name_falls_back_to_purple() {
-        assert_eq!(NoteColor::from_config_name("teal"), NoteColor::Teal);
+    fn search_matches_what_was_said_not_just_what_is_displayed() {
+        let mut store = temp_store("search");
+        let id = store.create("um so call the vet about biscuit".into(), NoteColor::Purple);
+        // A cleanup pass rewrote the body and dropped the filler word.
+        store.set_body(&id, "Call the vet about Biscuit.".into());
+
+        assert_eq!(store.search("biscuit").len(), 1, "matching must be case-insensitive");
+        assert_eq!(store.search("VET").len(), 1);
         assert_eq!(
-            NoteColor::from_config_name("chartreuse"), NoteColor::Purple,
-            "a bad config value must not panic or produce an unrenderable color"
+            store.search("um so").len(),
+            1,
+            "raw is searched too — cleanup can remove the very words you remember saying"
+        );
+        assert!(store.search("mortgage").is_empty());
+    }
+
+    #[test]
+    fn an_empty_query_returns_every_active_note() {
+        let mut store = temp_store("search_empty");
+        store.create("one".into(), NoteColor::Purple);
+        let gone = store.create("two".into(), NoteColor::Teal);
+        store.archive(&gone);
+
+        assert_eq!(store.search("").len(), 1);
+        assert_eq!(store.search("   ").len(), 1, "whitespace is not a query");
+        assert!(
+            store.search("two").is_empty(),
+            "archived notes must stay out of the active board"
         );
     }
+
+    #[test]
+    fn restore_returns_an_archived_note_to_the_board() {
+        let mut store = temp_store("restore");
+        let id = store.create("bring me back".into(), NoteColor::Rose);
+        store.archive(&id);
+        assert_eq!(store.archived().len(), 1);
+        assert!(store.active().is_empty());
+
+        store.restore(&id);
+
+        assert!(store.active().iter().any(|n| n.id == id));
+        assert!(store.archived().is_empty());
+        assert!(
+            !store.get(&id).unwrap().open,
+            "restoring puts a note back on the board; it does not pop a window open"
+        );
+    }
+
+    #[test]
+    fn restoring_a_note_that_is_not_archived_does_nothing() {
+        let mut store = temp_store("restore_noop");
+        let id = store.create("already here".into(), NoteColor::Purple);
+        store.flush_if_dirty();
+
+        store.restore(&id);
+
+        assert!(!store.is_dirty(), "a no-op restore must not schedule a write");
+    }
+
 }

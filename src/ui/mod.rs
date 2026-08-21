@@ -7,6 +7,7 @@ pub mod home;
 pub mod icons;
 mod linux_integration;
 pub mod note_layout;
+pub mod notes_page;
 pub mod pill;
 pub mod settings;
 pub mod shell_indicator;

@@ -750,7 +750,7 @@ body {
 
 .btn-icon:hover {
   background: var(--bg-elevated);
-  color: var(--fg-primary);
+  color: var(--fg);
 }
 
 .btn-icon.remove:hover {
@@ -1114,4 +1114,145 @@ body {
 
 :focus:not(:focus-visible) {
   outline: none;
+}
+
+/* ── Notes board ──────────────────────────────────────────────────────────
+   Deploy Purple surfaces, with the note's own colour carried as a left stripe
+   rather than as the card's background. A board of six pastel blocks would
+   fight the rest of the app; a stripe keeps the colour legible as an index
+   while the card stays a card. */
+
+.notes-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.notes-title {
+  font-family: "DM Mono", "Cascadia Code", monospace;
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.notes-count {
+  font-size: 12px;
+  color: var(--fg-secondary);
+}
+
+.notes-description {
+  font-size: 13px;
+  color: var(--fg-secondary);
+  line-height: 1.5;
+}
+
+.notes-search {
+  width: 100%;
+}
+
+.notes-archived-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.notes-archived-label {
+  font-size: 13px;
+  color: var(--fg-secondary);
+}
+
+.note-card {
+  display: flex;
+  align-items: stretch;
+  gap: 12px;
+  padding: 0;
+  overflow: hidden;
+  background: var(--bg-surface);
+  border: 2px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease),
+              box-shadow var(--duration-fast) var(--ease);
+}
+
+.note-card:hover {
+  background: var(--bg-hover);
+  box-shadow: 4px 6px 0 0 rgba(75, 0, 130, 0.16);
+}
+
+.note-card.archived {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.note-card.archived:hover {
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-card);
+}
+
+.note-stripe {
+  flex: 0 0 6px;
+  align-self: stretch;
+}
+
+.note-stripe-purple { background: #8921E4; }
+.note-stripe-violet { background: #6B6BE4; }
+.note-stripe-amber  { background: #E4A421; }
+.note-stripe-teal   { background: #21C9B0; }
+.note-stripe-rose   { background: #E4216B; }
+.note-stripe-slate  { background: #8A93A0; }
+
+.note-card-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 0;
+}
+
+.note-card-body {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--fg);
+  word-break: break-word;
+}
+
+.note-card-meta {
+  font-family: "DM Mono", "Cascadia Code", monospace;
+  font-size: 11px;
+  color: var(--fg-secondary);
+}
+
+.note-card-actions {
+  display: flex;
+  align-items: center;
+  padding-right: 12px;
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease);
+}
+
+.note-card:hover .note-card-actions,
+.note-card.archived .note-card-actions {
+  opacity: 1;
+}
+
+.note-action-btn {
+  padding: 6px 10px;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--fg-secondary);
+  background: transparent;
+  border: 2px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: color var(--duration-fast) var(--ease),
+              border-color var(--duration-fast) var(--ease);
+}
+
+.note-action-btn:hover {
+  color: var(--accent);
+  border-color: var(--border-strong);
 }

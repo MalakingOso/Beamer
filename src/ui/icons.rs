@@ -110,6 +110,25 @@ pub fn IconBook(props: IconProps) -> Element {
     }
 }
 
+/// Phosphor "note" — a page with a folded corner. Sidebar entry for the notes
+/// board, matching the 256x256 currentColor convention of every icon here.
+#[component]
+pub fn IconNote(props: IconProps) -> Element {
+    let size = props.size.to_string();
+    rsx! {
+        svg {
+            class: "{props.class}",
+            width: "{size}",
+            height: "{size}",
+            view_box: "0 0 256 256",
+            fill: "currentColor",
+            path {
+                d: "M208,32H48A16,16,0,0,0,32,48V208a16,16,0,0,0,16,16H156.69A15.86,15.86,0,0,0,168,219.31L219.31,168A15.86,15.86,0,0,0,224,156.69V48A16,16,0,0,0,208,32ZM48,48H208v96H160a16,16,0,0,0-16,16v48H48ZM160,196.69V160h36.69Z"
+            }
+        }
+    }
+}
+
 #[component]
 pub fn IconMinus(props: IconProps) -> Element {
     let size = props.size.to_string();

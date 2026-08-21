@@ -15,7 +15,10 @@ use crate::ui::linux_integration;
 use crate::ui::history::TranscriptionHistory;
 use crate::ui::history_page::HistoryPage;
 use crate::ui::home::HomePage;
-use crate::ui::icons::{IconBook, IconClockCounterClockwise, IconGear, IconHouse, IconMinus, IconX};
+use crate::ui::icons::{
+    IconBook, IconClockCounterClockwise, IconGear, IconHouse, IconMinus, IconNote, IconX,
+};
+use crate::ui::notes_page::NotesPage;
 use crate::ui::vocab_page::VocabPage;
 use crate::ui::settings::SettingsPage;
 use crate::ui::status_log::StatusLog;
@@ -24,6 +27,7 @@ use crate::ui::status_log::StatusLog;
 pub(super) enum Page {
     Home,
     History,
+    Notes,
     Vocab,
     Settings,
 }
@@ -155,6 +159,11 @@ pub fn App() -> Element {
                             IconClockCounterClockwise {}
                         }
                         button {
+                            class: if page == Page::Notes { "sidebar-icon active" } else { "sidebar-icon" },
+                            onclick: move |_| current_page.set(Page::Notes),
+                            IconNote {}
+                        }
+                        button {
                             class: if page == Page::Vocab { "sidebar-icon active" } else { "sidebar-icon" },
                             onclick: move |_| current_page.set(Page::Vocab),
                             IconBook {}
@@ -212,6 +221,9 @@ pub fn App() -> Element {
                     },
                     Page::History => rsx! {
                         HistoryPage { history }
+                    },
+                    Page::Notes => rsx! {
+                        NotesPage { notes, registry: sticky_registry }
                     },
                     Page::Vocab => rsx! {
                         VocabPage {}
