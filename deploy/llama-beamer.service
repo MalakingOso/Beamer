@@ -1,0 +1,45 @@
+# Beamer's local llama.cpp model server.
+#
+# Beamer does NOT spawn this; it runs standalone and Beamer is a plain HTTP
+# client to 127.0.0.1:8080. Beamer must degrade gracefully when it is absent:
+# the note is still captured, it just is not cleaned.
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   ln -sf ~/Programming/Beamer/deploy/llama-beamer.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now llama-beamer
+#   systemctl --user status llama-beamer
+#   journalctl --user -u llama-beamer -f
+#
+# Backend is SYCL, chosen by measurement (2.35x Vulkan at prompt processing).
+# See docs/superpowers/benchmarks/2026-08-20-b60-llama-vulkan.md
+
+[Unit]
+Description=llama.cpp model server for Beamer (SYCL, Arc Pro B60)
+After=graphical-session.target
+
+[Service]
+Type=simple
+
+# oneAPI must be sourced for the SYCL runtime (libsvml.so and friends), and
+# llama.cpp's own build-sycl/bin must be PREPENDED to what oneAPI sets, not
+# replace it. Overwriting LD_LIBRARY_PATH instead of extending it fails at
+# startup with "libsvml.so: cannot open shared object file".
+ExecStart=/bin/bash -c 'set +u; \
+  source %h/intel/oneapi/2025.3/oneapi-vars.sh --force >/dev/null 2>&1; \
+  export LD_LIBRARY_PATH=%h/Programming/llama.cpp/build-sycl/bin:$LD_LIBRARY_PATH; \
+  exec %h/Programming/llama.cpp/build-sycl/bin/llama-server \
+    --models-dir %h/models/beamer \
+    --models-preset %h/Programming/Beamer/deploy/llama-models.ini \
+    --models-max 2 \
+    --host 127.0.0.1 --port 8080'
+
+Restart=on-failure
+RestartSec=5
+
+# Loading a 4.8 GB model can outlast the default start timeout on a cold cache.
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target

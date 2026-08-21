@@ -1,8 +1,7 @@
 # B60 llama.cpp benchmark — Task 1
 
-> **Status: IN PROGRESS.** Environment findings and the backend comparison are
-> complete. Server-level latency (TTFT, cold start, wake-from-sleep) is not yet
-> measured.
+> **Status: COMPLETE**, except page-cache-cold start, which needs a `sudo`
+> the agent cannot run. Every threshold in the plan now has a measured answer.
 
 **Date:** 2026-08-21
 **Machine:** berkley@CAllisto — Ryzen 9 7950X3D, Intel Arc B570 + Arc Pro B60
@@ -230,9 +229,55 @@ commitments. Both thinking modes extracted exactly the four commitments and
 excluded the aspiration — the behaviour the spec's strict policy requires.
 One sample; indicative only.
 
-### Wake-from-sleep
+### Wake-from-sleep — the number the idle-shutdown design rests on
 
-PENDING.
+Measured with `sleep-idle-seconds = 60` (same mechanism as the 300 s default,
+shorter timer). Sleep is confirmed in the child log:
+
+```
+[51689] I que start_loop:  entering sleeping state
+[51689] I srv handle_sleep: server is entering sleeping state
+[51689] I que start_loop:  exiting sleeping state
+```
+
+| State | B60 VRAM free |
+|---|---:|
+| Gemma loaded | 18898 MiB |
+| Gemma sleeping | **21985 MiB** |
+| **Released by sleep** | **3087 MiB** |
+
+| Transition | Wall-clock |
+|---|---:|
+| Cold — process spawn + 4.8 GB load (page cache warm) | 4.06 s |
+| **Wake from sleep** | **1.68 s** |
+| Warm request (awake) | 0.063 s |
+
+Sleep genuinely frees VRAM, and waking is **2.4x cheaper than respawning**
+(1.68 s vs 4.06 s) because the process, its SYCL context and its kernels
+survive — only the model and llama context are rebuilt.
+
+Asymmetry confirmed working: with `sleep-idle-seconds = -1`, S1-mini stayed
+`loaded` through the same idle period in which Gemma went `sleeping`.
+
+#### Finding 6 — polling the server defeats the idle timer
+
+The idle timer did not fire while `GET /v1/models` was being polled every 3 s to
+watch for it. It fired within 100 s of genuine silence. Status reads count as
+activity.
+
+**This is a live constraint on Beamer, not a test artifact.** A naive health
+poll on a short interval will pin the ~3 GB extraction model in VRAM forever and
+silently defeat the idle-shutdown design — with no error and no symptom other
+than VRAM never coming back. Beamer must either poll lazily (only when it is
+about to make a request) or not at all, treating a connection failure as the
+health signal instead.
+
+### Cold start (page cache dropped)
+
+NOT MEASURED — requires `sudo sync && echo 3 > /proc/sys/vm/drop_caches`, which
+needs the user. All load figures above are page-cache-warm. This matters only
+for the first load after a reboot; the design rests on wake-from-sleep, which is
+measured.
 
 ## Verdict
 
@@ -251,5 +296,29 @@ confirmation.** At 14817 t/s prompt and 294 t/s generation, a ~60-word note
 far inside the 1.5 s threshold. This is a projection from throughput, not a
 measurement; the server-level number supersedes it.
 
-**Asymmetric idle shutdown: still unanswered** — needs the wake-from-sleep
-measurement.
+**Asymmetric idle shutdown: CONFIRMED CORRECT.** Wake from sleep is **1.68 s**,
+far inside the >10 s threshold that would have condemned it, and sleep really
+returns 3087 MiB. Keep the default: S1-mini resident (`-1`), Gemma sleeping
+after 300 s.
+
+**Phase 2 (S1-mini cleanup): PASSES.** A ~60-word note cleans in **0.225 s**
+against a 1.5 s threshold — a 6.7x margin. Measured end-to-end over HTTP against
+the real server with the real prompt format, not projected. Phase 2 proceeds as
+specced; no redesign needed.
+
+**Phase 3 (extraction): viable, precision unproven.** 1.11 s per extraction with
+thinking off. The one precision spot-check behaved correctly. Quality remains an
+open question that only the eval corpus can answer, exactly as the spec says.
+
+## Consequences for the plan and spec
+
+1. **Task 1 Step 4's command is wrong** — it omits
+   `--chat-template-kwargs '{"enable_thinking":false}'` and reproduces the
+   `<think>`-and-stop failure. Fix before anyone reruns it.
+2. **Backend flips from Vulkan to SYCL**, on measurement.
+3. **The spawn-and-supervise subsystem is deleted** — standalone server,
+   Beamer is an HTTP client.
+4. **Per-model idle shutdown is configuration, not code** (`deploy/llama-models.ini`).
+5. **Beamer must not poll the server on a timer** (Finding 6).
+6. **Beamer must degrade gracefully** when the server is down: capture the note,
+   skip the cleanup.
