@@ -4,14 +4,16 @@ use futures_util::StreamExt;
 
 use crate::audio::{try_send_reserving, warn_channel_full, AudioPipeline, SendOutcome};
 use crate::config::Config;
-use crate::hotkey::HotkeyEvent;
+use crate::hotkey::{CaptureMode, HotkeyEvent};
 use crate::injection;
+use crate::notes::NoteStore;
 use crate::transcription::{self, TranscriptKind};
 use crate::ui::history::TranscriptionHistory;
 use crate::ui::status_log::{log_status, LogLevel, StatusLog};
 
 mod notify;
 mod session;
+mod sink;
 use notify::{clipboard_only_fallback, show_notification};
 use session::{
     buffer_tail_audio, send_commit_sentinel, stream_tail_audio, StopReason,
@@ -36,13 +38,14 @@ pub async fn run(
     mut last_injection: Signal<String>,
     mut history: Signal<TranscriptionHistory>,
     mut status_log: Signal<StatusLog>,
+    mut notes: Signal<NoteStore>,
 ) {
     tracing::info!("Orchestrator started, waiting for hotkey events");
     log_status(&mut status_log, LogLevel::Info, "Orchestrator ready");
 
     while let Some(event) = hotkey_rx.next().await {
         match event {
-            HotkeyEvent::RecordStart(_) => {
+            HotkeyEvent::RecordStart(capture_mode) => {
                 if let Err(e) = handle_recording(
                     &config,
                     &mut rec_state,
@@ -50,6 +53,8 @@ pub async fn run(
                     &mut history,
                     &mut hotkey_rx,
                     &mut status_log,
+                    &mut notes,
+                    capture_mode,
                 )
                 .await
                 {
@@ -73,6 +78,8 @@ async fn handle_recording(
     history: &mut Signal<TranscriptionHistory>,
     hotkey_rx: &mut UnboundedReceiver<HotkeyEvent>,
     status_log: &mut Signal<StatusLog>,
+    notes: &mut Signal<NoteStore>,
+    capture_mode: CaptureMode,
 ) -> Result<()> {
     let cfg = config.read().clone();
     let backend = &cfg.transcription.backend;
@@ -94,8 +101,9 @@ async fn handle_recording(
 
     if backend == "elevenlabs_batch" || backend == "voxtral_batch" {
         return handle_batch_recording(
-            backend, &api_key, language, &backends, &cfg,
+            backend, &api_key, language, &backends, &cfg, config,
             rec_state, last_injection, history, hotkey_rx, status_log,
+            notes, capture_mode,
         ).await;
     }
 
@@ -175,7 +183,8 @@ async fn handle_recording(
                             if !ev.text.trim().is_empty() {
                                 tracing::info!("[final] {}", ev.text);
                                 log_status(status_log, LogLevel::Info, format!("[final] {}", ev.text));
-                                do_injection(&ev.text, &backends, &paste_shortcut, last_injection, history, status_log).await;
+                                deliver(&ev.text, capture_mode, &backends, &paste_shortcut,
+                                        last_injection, history, status_log, notes, config).await;
                             }
                         }
                         TranscriptKind::Partial => {
@@ -222,6 +231,7 @@ async fn handle_recording(
     log_status(status_log, LogLevel::Info, "Sent commit, waiting for final transcript...");
     drain_final_transcripts(
         &mut session, &backends, &paste_shortcut, last_injection, history, status_log,
+        notes, config, capture_mode,
     )
     .await;
 
@@ -238,6 +248,9 @@ async fn drain_final_transcripts(
     last_injection: &mut Signal<String>,
     history: &mut Signal<TranscriptionHistory>,
     status_log: &mut Signal<StatusLog>,
+    notes: &mut Signal<NoteStore>,
+    config: &Signal<Config>,
+    capture_mode: CaptureMode,
 ) {
     let deadline = tokio::time::Instant::now()
         + tokio::time::Duration::from_millis(FINAL_TRANSCRIPT_TIMEOUT_MS);
@@ -250,7 +263,8 @@ async fn drain_final_transcripts(
                             if !ev.text.trim().is_empty() {
                                 tracing::info!("[final] {}", ev.text);
                                 log_status(status_log, LogLevel::Info, format!("[final] {}", ev.text));
-                                do_injection(&ev.text, backends, paste_shortcut, last_injection, history, status_log).await;
+                                deliver(&ev.text, capture_mode, backends, paste_shortcut,
+                                        last_injection, history, status_log, notes, config).await;
                             }
                         }
                     }
@@ -269,11 +283,14 @@ async fn handle_batch_recording(
     language: &str,
     backends: &[String],
     cfg: &Config,
+    config: &Signal<Config>,
     rec_state: &mut Signal<RecordingState>,
     last_injection: &mut Signal<String>,
     history: &mut Signal<TranscriptionHistory>,
     hotkey_rx: &mut UnboundedReceiver<HotkeyEvent>,
     status_log: &mut Signal<StatusLog>,
+    notes: &mut Signal<NoteStore>,
+    capture_mode: CaptureMode,
 ) -> Result<()> {
     let pipeline = match AudioPipeline::new() {
         Ok(p) => p,
@@ -384,7 +401,8 @@ async fn handle_batch_recording(
                 format!("[batch] {:.1}s round-trip: {}", elapsed.as_secs_f64(), text),
             );
             if !text.trim().is_empty() {
-                do_injection(&text, backends, &cfg.injection.paste_shortcut, last_injection, history, status_log).await;
+                deliver(&text, capture_mode, backends, &cfg.injection.paste_shortcut,
+                        last_injection, history, status_log, notes, config).await;
             }
         }
         Err(e) => {
@@ -396,6 +414,32 @@ async fn handle_batch_recording(
 
     log_status(status_log, LogLevel::Info, "Recording stopped");
     Ok(())
+}
+
+/// Route one finished transcript to the sink its capture mode selects.
+///
+/// Every path that produced a final transcript funnels through here, so the
+/// inject-vs-note decision is made in exactly one place rather than repeated at
+/// each of the three `TranscriptKind::Final` sites.
+#[allow(clippy::too_many_arguments)]
+async fn deliver(
+    text: &str,
+    capture_mode: CaptureMode,
+    backends: &[String],
+    paste_shortcut: &str,
+    last_injection: &mut Signal<String>,
+    history: &mut Signal<TranscriptionHistory>,
+    status_log: &mut Signal<StatusLog>,
+    notes: &mut Signal<NoteStore>,
+    config: &Signal<Config>,
+) {
+    if sink::sink_injects(capture_mode) {
+        do_injection(text, backends, paste_shortcut, last_injection, history, status_log).await;
+    } else if let Some(id) = sink::do_note_capture(text, notes, config, status_log).await {
+        // The window itself is opened by the reconciling effect in `app.rs`,
+        // which watches the store — see `ui::sticky`.
+        tracing::info!("note {} created", id);
+    }
 }
 
 /// Inject transcribed text into the focused window using the configured fallback chain.

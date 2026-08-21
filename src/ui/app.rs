@@ -5,6 +5,7 @@ use dioxus::prelude::*;
 
 use crate::config::Config;
 use crate::hotkey::{start_ll_hook, HotkeyConfig, HotkeyEvent};
+use crate::notes::NoteStore;
 use crate::orchestrator::{self, RecordingState};
 use crate::update::UpdateStatus;
 use crate::ui::app_setup;
@@ -45,6 +46,7 @@ pub fn App() -> Element {
     let rec_state = use_signal(RecordingState::default);
     let last_injection = use_signal(|| "No injection yet".to_string());
     let history = use_signal(TranscriptionHistory::load);
+    let notes = use_signal(NoteStore::load);
     let config = use_signal(|| Config::load().unwrap_or_default());
     let status_log = use_signal(StatusLog::new);
     let update_status = use_signal(UpdateStatus::default);
@@ -70,6 +72,7 @@ pub fn App() -> Element {
             last_injection,
             history,
             status_log,
+            notes,
         )
     });
 
