@@ -57,7 +57,7 @@ RUST_LOG=beamer=debug cargo run  # Run with debug logging
 **Read `agent_docs/sticky_notes.md` first.** It carries everything below in
 durable form, plus the facts that cost real time to learn.
 
-Phase 1 is **built and committed** on `feat/sticky-notes`. **158 tests pass**,
+Phase 1 is **built and committed** on `feat/sticky-notes`. **165 tests pass**,
 up from a 101 baseline (121 at the end of Batches A–C). Zero build warnings.
 
 ## ⚠️ The one remaining action: LOG OUT OF GNOME
@@ -104,8 +104,15 @@ the two agree, so a clean read is confirmation, not proof.
 
 ### End-to-end checklist
 
-⚠️ **Set `note_hotkey` in `config.toml` first.** Empty means note capture is off
-entirely, by design, so the dictation hotkey can never be silently diverted.
+⚠️ **Turn on "Note capture" in Settings → Recording first.** Empty
+`note_hotkey` means note capture is off entirely, by design, so the dictation
+hotkey can never be silently diverted. The switch proposes **Ctrl+Alt+Space**;
+the picker below it edits the chord, and both re-register live (no restart).
+
+⚠️ **Do not pick `Ctrl+Super+<key>` for notes.** Two reasons, both verified:
+`HotkeyConfig` has no Meta modifier field, so Super is silently dropped; and
+even with that fixed, dictation's `Ctrl+Super` is a strict *prefix* — pressing
+Ctrl then Super fires `RecordStart(Inject)` before the key is reached.
 
 1. Dictation hotkey → text injects as before. *(The regression that matters most.)*
 2. Note hotkey → sticky appears, pill shows the **purple note ring**, and the

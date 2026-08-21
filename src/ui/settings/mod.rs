@@ -1,6 +1,7 @@
 pub mod api_keys_card;
 pub mod appearance_card;
 pub mod debug_card;
+pub mod hotkey_picker;
 pub mod injection_card;
 pub mod local_ai_card;
 pub mod recording_card;
@@ -53,6 +54,8 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                 hotkey: config.read().recording.hotkey.clone(),
                 mode: config.read().recording.mode.clone(),
                 pause_media: config.read().recording.pause_media,
+                note_hotkey: config.read().recording.note_hotkey.clone(),
+                note_mode: config.read().recording.note_mode.clone(),
                 on_hotkey_change: move |hotkey: String| {
                     save_config(config, |c| c.recording.hotkey = hotkey);
                 },
@@ -61,6 +64,12 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                 },
                 on_pause_media_change: move |v: bool| {
                     save_config(config, |c| c.recording.pause_media = v);
+                },
+                on_note_hotkey_change: move |hotkey: String| {
+                    save_config(config, |c| c.recording.note_hotkey = hotkey);
+                },
+                on_note_mode_change: move |mode: String| {
+                    save_config(config, |c| c.recording.note_mode = mode);
                 },
             }
 

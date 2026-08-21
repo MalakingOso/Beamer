@@ -196,7 +196,24 @@ Apache 2.0 plus a binding term requiring the exact string
 ## Gotchas
 
 - **`note_hotkey = ""` means note capture is off entirely**, by design, so the
-  dictation hotkey can never be silently diverted. Set one before testing.
+  dictation hotkey can never be silently diverted. Set one before testing —
+  Settings → Recording → "Note capture" flips it on and proposes
+  `Ctrl+Alt+Space`. Switching it off writes `""` back rather than remembering
+  the chord, because `""` is the only value the hotkey layer reads as unbound.
+- **The note chord must not be a prefix of the dictation chord.**
+  `matching_binding` compares the modifier set held *at the instant the trigger
+  goes down*, so with dictation on `Ctrl+Super` (trigger `VK_LWIN`), a note
+  chord of `Ctrl+Super+Space` fires dictation at Super-down — before Space is
+  ever pressed. Compounding that, `HotkeyConfig` has no Meta modifier field at
+  all, so `Ctrl+Super+Space` parses to plain `Ctrl+Space` anyway (see todo.md).
+  `Ctrl+Alt+Space` is the default precisely because it shares no trigger with
+  `Ctrl+Super`. Pinned by `recording_card::tests`.
+- **One string format, two parsers.** `settings/hotkey_picker.rs` renders and
+  reassembles chords; `HotkeyConfig::parse` registers them. Nothing in the type
+  system keeps them in step, so
+  `hotkey_picker::tests::what_the_picker_emits_is_what_the_engine_registers`
+  pins the round trip. Both dictation and note rows share the one picker
+  component so the two chords can never diverge in interpretation.
 - Notes are **not** always-on-top, deliberately. They sit in the normal
   stacking order.
 - `with_exits_when_last_window_closes(false)` on sticky windows is
