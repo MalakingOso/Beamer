@@ -6,6 +6,7 @@ mod injection;
 #[cfg(not(target_os = "windows"))]
 mod install;
 mod media;
+mod notes;
 mod orchestrator;
 mod sounds;
 mod tray;
