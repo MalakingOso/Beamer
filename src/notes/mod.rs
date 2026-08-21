@@ -168,14 +168,6 @@ impl NoteStore {
         }
     }
 
-    pub fn set_geometry(&mut self, id: &str, pos: (i32, i32), size: (u32, u32)) {
-        if let Some(note) = self.touch(id) {
-            note.pos = Some(pos);
-            note.size = Some(size);
-            self.dirty = true;
-        }
-    }
-
     /// Record whether a note's window is showing.
     ///
     /// A no-op when the value is unchanged. The guard matters because the
@@ -338,7 +330,17 @@ mod tests {
     fn notes_round_trip_through_disk() {
         let mut store = temp_store("roundtrip");
         let id = store.create("first".into(), NoteColor::Amber);
-        store.set_geometry(&id, (100, 200), (320, 240));
+        // Set directly rather than through a setter. `pos` and `size` are part
+        // of the persisted schema and must survive a round trip, but nothing
+        // writes `pos` from window geometry any more and nothing should — see
+        // the field's doc comment. A `set_geometry` that did exist would be a
+        // trap for the next person, so it was removed with the scope change
+        // that dropped position persistence.
+        {
+            let note = store.notes.iter_mut().find(|n| n.id == id).unwrap();
+            note.pos = Some((100, 200));
+            note.size = Some((320, 240));
+        }
         store.flush_if_dirty();
 
         let text = std::fs::read_to_string(&store.path).unwrap();
