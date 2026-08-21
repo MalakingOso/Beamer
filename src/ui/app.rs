@@ -4,7 +4,7 @@ use dioxus::desktop::use_window;
 use dioxus::prelude::*;
 
 use crate::config::Config;
-use crate::hotkey::{start_ll_hook, HotkeyConfig, HotkeyEvent};
+use crate::hotkey::{start_ll_hook, CaptureMode, HotkeyConfig, HotkeyEvent};
 use crate::notes::NoteStore;
 use crate::orchestrator::{self, RecordingState};
 use crate::update::UpdateStatus;
@@ -55,6 +55,8 @@ pub fn App() -> Element {
     let config = use_signal(|| Config::load().unwrap_or_default());
     let status_log = use_signal(StatusLog::new);
     let update_status = use_signal(UpdateStatus::default);
+    // Which hotkey started the current recording, so the pill can say so.
+    let active_mode = use_signal(CaptureMode::default);
 
     // Recording pill window — small, transparent, click-through, always-on-top.
     // Linux: the pill is replaced by an AppIndicator tray-icon swap (see
@@ -67,7 +69,7 @@ pub fn App() -> Element {
     // Linux: swap the tray icon to reflect recording state and pump levels
     // into the shell pill (mirrors Handy's behavior).
     #[cfg(target_os = "linux")]
-    linux_integration::setup_linux_integration(rec_state, config);
+    linux_integration::setup_linux_integration(rec_state, active_mode, config);
 
     let coroutine = use_coroutine(move |rx: UnboundedReceiver<HotkeyEvent>| {
         orchestrator::run(
@@ -78,6 +80,7 @@ pub fn App() -> Element {
             history,
             status_log,
             notes,
+            active_mode,
         )
     });
 

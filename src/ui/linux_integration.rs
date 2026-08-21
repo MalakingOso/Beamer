@@ -11,10 +11,36 @@
 use dioxus::prelude::*;
 
 use crate::config::Config;
+use crate::hotkey::CaptureMode;
 use crate::orchestrator::RecordingState;
 use crate::tray;
 
-pub(super) fn setup_linux_integration(rec_state: Signal<RecordingState>, config: Signal<Config>) {
+/// Which shell-pill style a recording state and capture mode select, or `None`
+/// to hide the pill.
+///
+/// Factored out of the effect below purely so it can be tested: the effect
+/// itself needs a live Dioxus runtime and a D-Bus connection, while this — the
+/// part that can actually be wrong — needs neither.
+///
+/// The state names are a contract with `indicator.js`; unknown values there
+/// fall through to a labelled idle sweep rather than erroring, so a typo here
+/// would look like a working pill that simply ignores your microphone.
+pub(super) fn pill_state(state: RecordingState, mode: CaptureMode) -> Option<&'static str> {
+    match (state, mode) {
+        (RecordingState::Idle, _) => None,
+        (RecordingState::Recording, CaptureMode::Note) => Some("note"),
+        (RecordingState::Recording, CaptureMode::Inject) => Some("recording"),
+        // Transcribing looks the same either way. The destination is already
+        // decided by this point and the pill's only job is to say "working".
+        (RecordingState::Processing, _) => Some("processing"),
+    }
+}
+
+pub(super) fn setup_linux_integration(
+    rec_state: Signal<RecordingState>,
+    active_mode: Signal<CaptureMode>,
+    config: Signal<Config>,
+) {
     use dioxus::desktop::trayicon::use_tray_icon;
     let tray_handle = use_tray_icon();
     use_effect(move || {
@@ -29,15 +55,13 @@ pub(super) fn setup_linux_integration(rec_state: Signal<RecordingState>, config:
             let _ = tray.set_icon(Some(icon));
         }
 
+        // Read, not peek: the mode is part of what this effect renders, so a
+        // mode change has to re-run it.
+        let mode = *active_mode.read();
         let pill_enabled = config.peek().appearance.pill_enabled;
-        match state {
-            RecordingState::Recording if pill_enabled => {
-                crate::ui::shell_indicator::show("recording")
-            }
-            RecordingState::Processing if pill_enabled => {
-                crate::ui::shell_indicator::show("processing")
-            }
-            _ => crate::ui::shell_indicator::hide(),
+        match pill_state(state, mode).filter(|_| pill_enabled) {
+            Some(style) => crate::ui::shell_indicator::show(style),
+            None => crate::ui::shell_indicator::hide(),
         }
     });
 
@@ -72,4 +96,57 @@ pub(super) fn setup_linux_integration(rec_state: Signal<RecordingState>, config:
             }
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn note_capture_gets_its_own_pill_style() {
+        assert_eq!(
+            pill_state(RecordingState::Recording, CaptureMode::Note),
+            Some("note"),
+            "dictating into a note instead of the focused field must never be a surprise"
+        );
+        assert_eq!(
+            pill_state(RecordingState::Recording, CaptureMode::Inject),
+            Some("recording")
+        );
+    }
+
+    #[test]
+    fn transcribing_looks_the_same_whatever_the_destination() {
+        assert_eq!(
+            pill_state(RecordingState::Processing, CaptureMode::Note),
+            Some("processing")
+        );
+        assert_eq!(
+            pill_state(RecordingState::Processing, CaptureMode::Inject),
+            Some("processing")
+        );
+    }
+
+    #[test]
+    fn idle_hides_the_pill_in_either_mode() {
+        assert_eq!(pill_state(RecordingState::Idle, CaptureMode::Note), None);
+        assert_eq!(pill_state(RecordingState::Idle, CaptureMode::Inject), None);
+    }
+
+    #[test]
+    fn every_style_is_one_the_extension_knows() {
+        // indicator.js branches on these exact strings and silently treats an
+        // unknown one as "not recording" — a labelled idle sweep that ignores
+        // the microphone. That failure has no error and no log line.
+        for state in [RecordingState::Idle, RecordingState::Recording, RecordingState::Processing] {
+            for mode in [CaptureMode::Inject, CaptureMode::Note] {
+                if let Some(style) = pill_state(state, mode) {
+                    assert!(
+                        matches!(style, "recording" | "processing" | "note"),
+                        "{style:?} is not a state indicator.js handles"
+                    );
+                }
+            }
+        }
+    }
 }

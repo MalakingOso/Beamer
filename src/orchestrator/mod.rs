@@ -38,6 +38,7 @@ pub async fn run(
     mut history: Signal<TranscriptionHistory>,
     mut status_log: Signal<StatusLog>,
     mut notes: Signal<NoteStore>,
+    mut active_mode: Signal<CaptureMode>,
 ) {
     tracing::info!("Orchestrator started, waiting for hotkey events");
     log_status(&mut status_log, LogLevel::Info, "Orchestrator ready");
@@ -45,6 +46,11 @@ pub async fn run(
     while let Some(event) = hotkey_rx.next().await {
         match event {
             HotkeyEvent::RecordStart(capture_mode) => {
+                // Published BEFORE `handle_recording` sets `Recording`, so the
+                // indicator effect reads state and mode together on the same
+                // render. Set after, the pill would flash the dictation style
+                // for one frame before correcting itself.
+                active_mode.set(capture_mode);
                 if let Err(e) = handle_recording(
                     &config,
                     &mut rec_state,
