@@ -243,16 +243,23 @@ quality turns out to be the binding constraint, skip rung 2.
 
 ### VRAM budget
 
-| Item | Size |
-|---|---|
-| `gemma-4-E4B_q4_0-it.gguf` | 5.15 GB |
-| `s1-mini-q4_k_m.gguf` | 0.46 GB |
-| **Weights total** | **5.61 GB** |
-| Available on B60 | 22.7 GB |
-| **Left free for other work on the card** | **~17 GB** |
+> **Measured 2026-08-21.** The estimates below were pessimistic; real resident
+> footprint is smaller. Figures from `llama-server --list-devices` free-VRAM
+> deltas on the B60.
 
-Both models stay resident simultaneously. At rung 3 the total would be
-14.90 GB, leaving ~7.8 GB.
+| Item | On disk | Measured resident |
+|---|---|---|
+| `gemma-4-E4B_q4_0-it.gguf` | 4.80 GiB | ~3.1-3.4 GB |
+| `s1-mini-q4_k_m.gguf` | 462 MiB | ~0.9 GB |
+| **Both loaded** | 5.25 GiB | **~4.3 GB** |
+| Available on B60 | | 22.7 GB |
+| **Left free for other work** | | **~18 GB** |
+
+**Because ~18 GB sits idle, idle shutdown is optional rather than necessary.**
+Setting `sleep-idle-seconds = -1` for the extraction model too removes the
+1.68 s wake entirely at a cost of ~3.4 GB. The default keeps sleeping enabled
+so the card is polite to other GPU work on this machine, but latency-first is a
+one-line change in `deploy/llama-models.ini`.
 
 ### Choosing the extraction model by measurement
 
@@ -983,15 +990,26 @@ the same attribution.
   reworded system prompt or an out-of-set control value produces hallucinated
   or garbled output. It must be treated as a wire format with a test pinning
   it, not as a prompt someone may later "improve".
-- **Vulkan device indices are not stable** across driver updates or card
-  changes. `GGML_VK_VISIBLE_DEVICES=0` may not always mean the B60. The
-  implementation must log the device llama-server actually selected at startup
-  so a mismatch is visible rather than mysterious.
-- **Cold start.** First use after boot reads 5.6 GB from disk (14.9 GB at
-  ladder rung 3). With idle shutdown disabled this happens once per session,
-  but the first note of the day waits on it. Beamer should surface a "loading
-  model" state rather than appearing hung — and note creation itself still must
-  not block.
+- **Device indices are not stable** across driver updates or card changes.
+  Measured 2026-08-21: the B60 is index **1** on both SYCL and Vulkan, and
+  `-dev SYCL1` in `deploy/llama-models.ini` pins it. Two traps here: the index
+  must be *read* (`llama-server --list-devices`), never assumed; and an env
+  mask (`ZE_AFFINITY_MASK`, `GGML_VK_VISIBLE_DEVICES`) *filters* the list, so
+  the surviving device re-indexes to 0 and the mask value stops matching the
+  in-process id. Prefer `-dev`, which selects from the full list. The server
+  logs the device it selected at startup; a mismatch should be visible rather
+  than mysterious.
+- **Cold start, measured.** Loading the extraction model costs **4.06 s**
+  (process spawn + 4.8 GB, page cache warm); waking it from sleep costs
+  **1.68 s**. `load-on-startup = true` moves S1-mini's cost to login rather
+  than to the first note. Beamer should surface a "loading model" state rather
+  than appearing hung — and note creation itself still must not block.
+- **First-request kernel warmup is a separate, larger cost.** The first request
+  after a model loads runs several times slower than steady state (S1-mini:
+  0.938 s vs 0.120 s; E2B: 75 t/s vs 112 t/s) while SYCL compiles kernels for
+  the shapes in play. `load-on-startup` alone does not absorb this — only an
+  actual throwaway request does. Consider a warmup request at server start so
+  the user's first real note does not pay it.
 - **Beamer shares the B60 with other work on this machine.** The 5.6 GB default
   is sized to stay out of the way. Anyone promoting to rung 3 should know they
   are claiming 15 GB of that card for as long as Beamer runs.
