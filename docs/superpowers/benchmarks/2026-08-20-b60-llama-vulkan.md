@@ -162,9 +162,77 @@ large and coopmat2 is unavailable on this driver regardless.
 Server-level numbers (TTFT, wall-clock for a real note, cold start,
 wake-from-sleep) are measured separately below.
 
-### Server-level latency
+### Server-level latency — SYCL, router mode, preset INI
 
-NOT YET TAKEN.
+Measured against the standalone router (`deploy/llama-models.ini`), the same way
+Beamer will call it. Wall-clock is the full HTTP round trip.
+
+#### Stage 1 — S1-mini cleanup (stays resident)
+
+| Case | Wall-clock | Notes |
+|---|---:|---|
+| First request after load | 0.938 s | SYCL kernel warmup; one-off, not representative |
+| Short note (30 tokens out) | **0.120 s** | steady state, 5 runs, +/- 0.001 s |
+| ~60-word note (59 tokens out) | **0.225 s** | the spec's reference size |
+| Filler-only (`um uh hmm`) | **0.049 s** | returns empty string, no hallucination |
+
+Generation holds ~282 t/s across runs. Output quality is correct: fillers
+removed, truecasing applied, `tuesdays` -> `Tuesday's`, and `Structure: lists`
+correctly produces Markdown bullets.
+
+> Note: repeat runs of an identical prompt report `prompt_n=1` — llama.cpp is
+> reusing the KV cache. The honest per-note figure is the first run of a given
+> text (72 prompt tokens at 4175 t/s ~= 17 ms), not the cached repeats.
+
+#### Stage 2 — Gemma 4 E4B extraction (sleeps when idle)
+
+| Case | Wall-clock | Notes |
+|---|---:|---|
+| Load (process spawn + 4.8 GB, page cache warm) | **4.06 s** | reproduced twice |
+| Warm trivial request | **0.063 s** | |
+| Extraction, thinking OFF | **1.11 s** | 57 tokens generated |
+| Extraction, thinking ON | **4.46 s** | 335 tokens, *identical* extraction |
+
+VRAM on the B60: 22317 MiB free idle -> 18898 MiB with Gemma loaded (~3.4 GB).
+
+#### Finding 5 — both models need explicit anti-reasoning configuration
+
+Neither model works correctly out of the box, and they fail differently. This is
+the single highest-risk detail in the whole stack, because both failures look
+like a working server returning a valid response.
+
+**S1-mini** inherits Qwen3's chat template, which defaults thinking ON; the
+model was trained with it OFF. Without `chat-template-kwargs
+{"enable_thinking":false}` it emits `<think>` and stops after 3 tokens. The
+model card also warns the GGUF carries `temp 0.6 / top_p 0.95 / top_k 20`
+inherited from Qwen3-0.6B; S1-mini is trained for greedy decoding. The card
+explicitly says NOT to substitute `reasoning-budget = 0` — it suppresses the
+think block differently and fillers survive into the output.
+
+**The Phase 1 plan's Task 1 Step 4 command is wrong on this point** — it passes
+`--jinja` without `--chat-template-kwargs`, which reproduces the failure exactly.
+
+**Gemma 4** reasons by default, filling `reasoning_content` while `content`
+stays empty. With `max_tokens: 200` the first extraction call returned
+`finish_reason: length` and no content at all, having spent the entire budget
+thinking.
+
+Thinking ON produced identical extraction output to thinking OFF on the one test
+case, at 4x the latency. Default is OFF. Whether reasoning improves *precision*
+on hard cases is a Phase 3 question that needs the eval corpus; n=1 settles
+nothing about quality.
+
+#### Extraction precision spot-check
+
+The test note contained a planted aspiration ("It would be nice if someone
+eventually redesigned the onboarding flow") alongside four first-person
+commitments. Both thinking modes extracted exactly the four commitments and
+excluded the aspiration — the behaviour the spec's strict policy requires.
+One sample; indicative only.
+
+### Wake-from-sleep
+
+PENDING.
 
 ## Verdict
 
