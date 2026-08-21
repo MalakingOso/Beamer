@@ -51,6 +51,9 @@ measured during implementation.
 | llama.cpp backend | **Vulkan** (`GGML_VULKAN:BOOL=ON`, `GGML_SYCL:BOOL=OFF`, `GGML_CUDA:BOOL=OFF`) | `build/CMakeCache.txt` |
 | llama.cpp arch support | includes `gemma4`, `qwen3`, `qwen35`, `qwen35moe`, `lfm2`, `lfm2moe`, `nemotron_h_moe`, `minimax-m2`, `kimi-linear`. **No DeepSeek-V4 arch** — that family cannot run on this build. | `src/llama-arch.cpp` |
 | **MTP unsupported** | `// NextN/MTP tensors are currently ignored (reserved for future MTP support)`. Published `mtp-*.gguf` draft weights are unusable here. Classic `--model-draft` speculative decoding **is** supported. | `src/llama-arch.cpp:757`, `common/arg.cpp` |
+| **llama.cpp router server** | This build has a multi-model router: `--models-dir`, `--models-max` (default 4), `--models-autoload`, with LRU eviction at the cap. HTTP: `GET /models`, `POST /models/load`, `POST /models/unload`. | `tools/server/server-models.cpp`, `server.cpp:164-166` |
+| **llama.cpp build age** | Local checkout is `e97492369`, **2026-04-13** — four months stale as of this spec. | `git log -1` |
+| Desktop | GNOME Shell **50.1**, Wayland session, Mutter 18 | `gnome-shell --version`, `$XDG_SESSION_TYPE` |
 | Running inference servers | none (nothing on 8000/8001/11434, no ollama installed) | `ss -ltnp`, `which` |
 | Disk free | 649 GB | `df -h` |
 | GNOME extension | `beamer-focus@beamer.app` v4, exports `app.beamer.FocusProvider` at `/app/beamer/FocusProvider` | `extension/…/extension.js:20` |
@@ -422,76 +425,101 @@ obvious which hotkey was hit. This is a one-line addition to the existing
 
 Beamer's first non-ASR model client.
 
-### Server lifecycle
+### Runtime: llama.cpp, rebuilt — not Ollama
 
-Beamer supervises `llama-server` child processes rather than requiring the user
-to run them. Two processes, one per model, on two loopback ports (defaults
-8081 for cleanup, 8082 for extraction). Two processes rather than model
-swapping because both fit simultaneously (§3) and swapping models would put a
-multi-second stall in the middle of the pipeline.
+**Decision: keep llama.cpp, but rebuild from current master.** The local
+checkout is from 2026-04-13 and is four months stale.
 
-Startup sequence per model:
+Ollama was evaluated and rejected. Its standard release does not support Intel
+Arc; Intel's supported path is the **IPEX-LLM** fork of Ollama, which is retired
+software — Intel ceased development after PyTorch 2.8 and maintenance ended in
+March 2026, and it is explicitly off-limits on this machine. The remaining
+option is an unofficial community Vulkan build of Ollama, which is strictly
+worse than the working, already-compiled Vulkan llama.cpp sitting on disk.
 
-1. Probe `http://127.0.0.1:<port>/health`. If it answers, use it — this lets a
-   user run their own server and lets Beamer survive its own restart without
+Ollama's genuine advantage was model lifecycle management — load on demand,
+keep-alive, automatic unload. **The llama.cpp router server now provides that
+natively**, which removes the last reason to consider it.
+
+Reasons to rebuild before implementation:
+
+- Four months of Vulkan backend and Gemma 4 / Qwen 3.5 fixes.
+- MTP support may have landed; this build still says *"NextN/MTP tensors are
+  currently ignored"* (§2). If it has, the ladder's rung 3 gets meaningfully
+  faster.
+- The router server itself should be exercised on a current build rather than an
+  April snapshot.
+
+Rebuild with Vulkan as currently configured — do **not** switch to SYCL. Vulkan
+needs no oneAPI environment sourced, which is decisive for a process Beamer
+spawns from a desktop session.
+
+### Server lifecycle: one router process
+
+The earlier draft had Beamer supervising two `llama-server` processes on two
+ports with its own per-model idle timers. The router makes that unnecessary.
+
+**One process, both models, addressed by name:**
+
+```
+llama-server --models-dir ~/models/beamer --models-max 2 \
+             --host 127.0.0.1 --port 8080 -ngl 99 -c 8192 --jinja
+```
+
+with `LD_LIBRARY_PATH` set to the llama.cpp build dir (§2) and
+`GGML_VK_VISIBLE_DEVICES` set to the B60's Vulkan index.
+
+Requests select the model the ordinary OpenAI way:
+
+```json
+{ "model": "s1-mini-q4_k_m", "messages": [...] }
+```
+
+The router loads a model on first request (`--models-autoload`) and evicts the
+least-recently-used one when `--models-max` is exceeded. `--models-max 2` keeps
+both resident, which is what the 5.61 GB budget (§3) assumes.
+
+**Control surface** (`server.cpp:164-166`):
+
+| Endpoint | Use |
+|---|---|
+| `GET /models` | Health and per-model load state — replaces the `/health` polling of the earlier design |
+| `POST /models/load` | Warm S1-mini at startup so the first note is not slow |
+| `POST /models/unload` | Explicitly release the extraction model when idle |
+
+**Asymmetric residency is now explicit rather than inferred.** The router's
+eviction is LRU-at-a-cap, not time-based, so Beamer implements the idle policy
+itself with one HTTP call:
+
+- **S1-mini** — `POST /models/load` at Beamer startup, never unloaded. It is
+  462 MB and it is the stage the user watches.
+- **Extraction model** — loaded on demand by the router; Beamer sends
+  `POST /models/unload` after `idle_shutdown_minutes` with no extraction. It is
+  5.15 GB and nobody is waiting on it.
+
+This is a large simplification: one child process instead of two, one port
+instead of two, `GET /models` instead of hand-rolled health polling, and the
+load/unload logic reduced to two HTTP calls.
+
+**Startup sequence:**
+
+1. `GET http://127.0.0.1:8080/models`. If it answers, use it — a user running
+   their own router is supported, and Beamer survives its own restart without
    respawning.
-2. If not, and `llm.manage_server = true`, spawn:
+2. If not, and `llm.manage_server = true`, spawn the router as above.
+3. Poll `GET /models` until it answers, or time out (30 s — the router starts
+   without loading any model, so this no longer waits on a multi-GB read).
+4. `POST /models/load` for S1-mini.
 
-   ```
-   llama-server -m <gguf> --port <port> --host 127.0.0.1 \
-                -ngl 99 -c <ctx> --jinja
-   ```
+`--jinja` is required: both models ship embedded chat templates, and S1-mini's
+trained input format (§3) depends on its template being applied exactly.
 
-   with `LD_LIBRARY_PATH` set to the llama.cpp build dir (§2) and
-   `GGML_VK_VISIBLE_DEVICES` set to the configured device.
+The child process is killed on Beamer exit; a leaked router holding several GB
+of VRAM would be a nasty failure mode. Step 1 already handles the SIGKILL case
+by adopting an already-listening port rather than fighting it.
 
-   `--jinja` is required: both models ship embedded chat templates, and
-   s1-mini's trained input format (§3) depends on its template being applied
-   exactly.
-3. Poll `/health` until ready or a timeout elapses — 30 s for s1-mini, **120 s
-   for the extraction model**, which must read several GB from disk and upload
-   it to VRAM on a cold start. The timeout is sized for ladder rung 3 (§3) so
-   promoting the model does not require touching it.
-
-Servers are spawned **lazily on first use**, not at Beamer startup.
-
-**Idle shutdown is asymmetric, because the two stages have opposite
-constraints.**
-
-| Model | Lifecycle | Default |
-|---|---|---|
-| S1-mini (462 MB) | Resident once started | `idle_shutdown_minutes = 0` |
-| Extraction (5.15 GB) | Load on demand, unload when idle | `idle_shutdown_minutes = 5` |
-
-S1-mini is the stage the user actually watches — the note visibly rewrites
-itself — so it stays hot. At 462 MB its residency is noise.
-
-The extraction model is the opposite on both axes: it is the VRAM-hungry one
-and the one nobody is waiting on, since its output is a set of suggestions
-reviewed later. It has no business holding 5 GB of a card this machine uses for
-other GPU work.
-
-Reloading it is cheaper than it first appears on this hardware:
-
-- **60 GB RAM with ~49 GB in page cache** means the GGUF stays cached after
-  first read; a reload is a PCIe upload, not a disk read.
-- **`~/.cache/mesa_shader_cache` is populated**, so Vulkan pipeline compilation
-  is paid once per driver version, not once per spawn.
-
-A warm respawn is therefore expected in the low seconds *(estimate — measure it
-in step 1)*, against a pipeline that is asynchronous anyway: the sticky note is
-already on screen with the user's words before any model runs.
-
-Only the first extraction after boot pays the full cold cost.
-
-Child processes are killed on Beamer exit; a leaked `llama-server` holding
-multiple GB of VRAM would be a nasty failure mode. The implementation must handle
-Beamer being SIGKILLed too — on next start, an already-listening port is
-adopted rather than fought over, which step 1 already covers.
-
-All process spawning and the blocking `/health` poll go through
-`tokio::task::spawn_blocking`, per the threading rules in
-`agent_docs/dioxus_architecture.md`.
+All process spawning and blocking HTTP polls go through
+`tokio::task::spawn_blocking`, per `agent_docs/dioxus_architecture.md`.
 
 ### Request shape
 
@@ -624,7 +652,57 @@ decision), initial size restored from the note.
 A `Signal<HashMap<NoteId, DesktopContext>>` registry maps note id to live
 window so notes cannot be double-opened and can be closed programmatically.
 
-### Position persistence on Wayland
+### Why a client cannot know where it is on Wayland
+
+This deserves stating precisely, because the intuitive fix — "just read the
+window position and save it" — is not available, and the API that looks like it
+works lies.
+
+**1. There is no protocol for it.** Core Wayland and `xdg-shell` expose no way
+for a client to learn or set its absolute position. `xdg_surface.set_window_geometry`
+concerns the surface's own bounds within its buffer (shadows, decorations), not
+its place on screen. This is a deliberate design decision: the compositor owns
+placement, and clients are not told about global coordinates at all.
+
+**2. The toolkit API returns a plausible lie.** `tao::Window::outer_position()`
+looks usable — it returns `Ok`, not `Err(NotSupportedError)`. Reading
+`tao-0.34.8/src/platform_impl/linux/window.rs:465` shows why that is worse than
+an error: it returns a **cached atomic**, populated at
+`window.rs:344-352` from GDK's `frame_extents()` on each `configure_event`.
+Under Wayland, GDK has no global coordinates to report, so the cache holds
+`(0, 0)` forever. Code that trusts it silently persists the wrong answer.
+**Beamer must never call `outer_position()` on Wayland.**
+
+**3. The official fix exists but is not usable here yet.**
+`xx-session-management-v1` is the Wayland protocol designed for exactly this
+problem, and its design is itself the clearest statement of the rule: the
+application **never learns coordinates**. It requests an opaque session ID,
+gives each toplevel a name, and later asks the compositor to restore that named
+window — the compositor supplies the position, not the app. Qt 6.10 implements
+it, and SDL added support in March 2026. Mutter's implementation has been gated
+behind `MUTTER_DEBUG_SESSION_MANAGEMENT_PROTOCOL=1`; scanning
+`libmutter-18.so.0` and `/usr/bin/gnome-shell` on this machine (GNOME 50.1)
+found no exported `xx_session_management_v1` symbol, so it cannot be relied on
+today.
+
+**4. Real apps simply give up.** `vixalien/sticky` — the GTK4 sticky-notes app
+this design was modelled on — persists `width`, `height` and `open`, and **no
+x/y at all**. Its notes reappear wherever Mutter decides. That is the honest
+state of the art for a well-built Wayland notes app, and it is the behaviour
+Beamer would inherit by doing nothing.
+
+**5. Beamer can do better only because it already ships a shell extension.**
+Code running inside GNOME Shell is not a Wayland client and is not subject to
+any of the above: `Meta.Window.get_frame_rect()` returns real coordinates and
+`Meta.Window.move_frame()` sets them. Most apps cannot justify shipping an
+extension for this. Beamer already ships one for text injection and the
+recording pill, so the marginal cost is two D-Bus methods.
+
+When Mutter exposes `xx-session-management-v1` without a debug flag, that
+becomes the portable path and this dependency can be dropped. Until then, the
+extension is the only mechanism that works on this machine.
+
+### Position persistence via the shell extension
 
 Wayland gives clients no control over their own window position, and Mutter
 does not implement `wlr-layer-shell`. `src/ui/linux_integration.rs:6` already
@@ -708,23 +786,21 @@ enabled = true
 manage_server = true          # false = connect only, never spawn
 llama_server_path = "/home/berkley/Programming/llama.cpp/build/bin/llama-server"
 llama_lib_dir = "/home/berkley/Programming/llama.cpp/build/bin"
+models_dir = "/home/berkley/models/beamer"
+port = 8080                   # one router process serves both models
+models_max = 2
 vulkan_device = 0             # B60; confirm against `llama-server --list-devices`
-# idle shutdown is per-model — see §7
 
 [llm.cleanup]                 # "S1-mini" by "Superwhisper"
-model_path = "…/s1-mini-q4_k_m.gguf"
-port = 8081
-ctx = 8192
+model = "s1-mini-q4_k_m"      # router model name, not a path
 idle_shutdown_minutes = 0     # resident: latency-critical, only 462 MB
 styling = "semi-formal"       # casual | semi-casual | semi-formal | formal
 structure = "lists"           # prose | lists
 context = "general"           # general | email
 
 [llm.extract]                 # google/gemma-4-E4B-it QAT q4_0 (ladder rung 1)
-model_path = "…/gemma-4-E4B_q4_0-it.gguf"
-port = 8082
-ctx = 8192
-idle_shutdown_minutes = 5     # unload when idle: 5 GB, nobody is waiting
+model = "gemma-4-E4B_q4_0-it"
+idle_shutdown_minutes = 5     # POST /models/unload when idle: 5 GB, nobody waits
 min_confidence = 0.5          # below this, the suggestion is not shown at all
 
 [notes]
