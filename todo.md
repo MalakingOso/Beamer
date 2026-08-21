@@ -16,6 +16,18 @@
       `#[cfg(target_os = "windows")]`, so Linux builds stay green and this is
       invisible here. **Task 4 is now a build fix, not parity work** — and until
       it lands the Windows note hotkey does not exist at all.
+- [ ] **`HotkeyConfig` cannot express Super as a modifier.** It has `ctrl`,
+      `alt` and `shift` fields but no Super/Meta, and `parse()` only maps Super
+      to a trigger key (`VK_LWIN`) when nothing else follows it. So
+      `"Super+N"` parses to `ctrl/alt/shift = false, trigger_vk = 'N'` — the
+      Super is silently dropped and the binding fires on a **bare N keypress**.
+      Verified, not inferred. Any `Super+<key>` chord is a footgun; today the
+      only safe Super chords are those where Super *is* the trigger
+      (`Ctrl+Super`, `Ctrl+Alt+Super`). Either add a `win` field to
+      `HotkeyConfig` and thread it through `Modifiers`/`matching_binding`, or
+      reject `Super+<key>` in `parse()` so it returns `None` instead of a
+      dangerous binding. The second is the smaller fix and fails safe —
+      `note_hotkey_config()` already treats `None` as "unbound".
 - [ ] Note windows are placed but their **size** is never captured, so resizing
       a note is forgotten on restart. `Note::size` is read and honoured; nothing
       writes it. (Position is forgotten *by design* — see

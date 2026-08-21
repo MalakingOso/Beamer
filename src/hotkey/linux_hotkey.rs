@@ -409,6 +409,38 @@ mod tests {
         ]
     }
 
+    /// Two bindings that share a trigger key and differ only by a modifier.
+    ///
+    /// This is the real-world pairing: `Ctrl+Super` dictates, `Ctrl+Alt+Super`
+    /// captures a note. Both resolve to `trigger_vk == VK_LWIN`, because the
+    /// parser can only express Super as a trigger — `HotkeyConfig` has no
+    /// Super/Meta modifier field at all. Nothing separates them except the
+    /// exact modifier comparison in `matching_binding`, so it is worth pinning:
+    /// a future `mods.ctrl >= b.config.ctrl`-style relaxation would make every
+    /// note chord also fire dictation.
+    #[test]
+    fn chords_sharing_a_trigger_key_are_told_apart_by_modifiers_alone() {
+        let bindings = vec![
+            BindingConfig {
+                mode: CaptureMode::Inject,
+                config: HotkeyConfig { ctrl: true, alt: false, shift: false, trigger_vk: VK_LWIN, is_toggle: false },
+            },
+            BindingConfig {
+                mode: CaptureMode::Note,
+                config: HotkeyConfig { ctrl: true, alt: true, shift: false, trigger_vk: VK_LWIN, is_toggle: true },
+            },
+        ];
+        let mods = |ctrl, alt| Modifiers { ctrl, alt, shift: false };
+
+        assert_eq!(matching_binding(&bindings, VK_LWIN, mods(true, false)), Some(0));
+        assert_eq!(matching_binding(&bindings, VK_LWIN, mods(true, true)), Some(1));
+        assert_eq!(
+            matching_binding(&bindings, VK_LWIN, mods(false, true)),
+            None,
+            "a chord neither binding asked for must fire neither"
+        );
+    }
+
     #[test]
     fn each_binding_matches_only_its_own_chord() {
         let bindings = two_bindings();
