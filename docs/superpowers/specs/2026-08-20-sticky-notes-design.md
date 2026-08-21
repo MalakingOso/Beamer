@@ -41,34 +41,65 @@ Everything in this section was checked on this machine on 2026-08-20 rather
 than assumed. Numbers marked *(estimate)* were not benchmarked and must be
 measured during implementation.
 
+> **Updated 2026-08-21 after Task 1.** The estimates are now measurements, and
+> two decisions changed as a result: the backend is **SYCL, not Vulkan**, and
+> llama.cpp runs as a **standalone server Beamer does not spawn**. Rows below
+> carry the current values. Full evidence:
+> `docs/superpowers/benchmarks/2026-08-20-b60-llama-vulkan.md`.
+
 | Fact | Value | How verified |
 |---|---|---|
 | GPU 1 | Intel Arc B570 (BMG G21), 10 GB, `0000:03:00.0`, `card1` | `/sys/class/drm`, `vulkaninfo` |
 | GPU 2 | Intel Arc Pro B60 (BMG G21), 22.7 GB, `0000:0a:00.0`, `card2` | same |
 | **Display topology** | **B570 drives both monitors** (`card1-DP-1`, `card1-DP-4` connected). **B60 has zero connected outputs** — headless compute. | `/sys/class/drm/*/status` |
 | Vulkan driver | Mesa 26.1.7 (kisak-mesa PPA), `DRIVER_ID_INTEL_OPEN_SOURCE_MESA`, both Arc cards enumerated | `vulkaninfo --summary` |
-| llama.cpp | built at `/home/berkley/Programming/llama.cpp/build/bin/`, version 8782 (`e97492369`) | `llama-server --version` |
-| llama.cpp backend | **Vulkan** (`GGML_VULKAN:BOOL=ON`, `GGML_SYCL:BOOL=OFF`, `GGML_CUDA:BOOL=OFF`) | `build/CMakeCache.txt` |
+| llama.cpp | rebuilt 2026-08-21 at `/home/berkley/Programming/llama.cpp/build-sycl/bin/`, commit `5a32f7b66` | `llama-server --version` |
+| llama.cpp backend | **SYCL** (`GGML_SYCL=ON`, `GGML_SYCL_F16=ON`, icx/icpx, oneAPI 2025.3). A Vulkan build is kept at `build/` as a fallback. | `build-sycl/CMakeCache.txt` |
+| **Backend choice is measured** | SYCL is **2.35x** Vulkan at prompt processing and **~1.2x** at generation, same commit, same device. | benchmark doc |
+| **B60 device index** | `SYCL1` (and `Vulkan1`). Select with `-dev SYCL1`, **not** an env mask — `ZE_AFFINITY_MASK`/`GGML_VK_VISIBLE_DEVICES` re-index the filtered device to 0. | `llama-server --list-devices` |
 | llama.cpp arch support | includes `gemma4`, `qwen3`, `qwen35`, `qwen35moe`, `lfm2`, `lfm2moe`, `nemotron_h_moe`, `minimax-m2`, `kimi-linear`. **No DeepSeek-V4 arch** — that family cannot run on this build. | `src/llama-arch.cpp` |
 | **MTP unsupported** | `// NextN/MTP tensors are currently ignored (reserved for future MTP support)`. Published `mtp-*.gguf` draft weights are unusable here. Classic `--model-draft` speculative decoding **is** supported. | `src/llama-arch.cpp:757`, `common/arg.cpp` |
-| **llama.cpp router server** | This build has a multi-model router: `--models-dir`, `--models-max` (default 4), `--models-autoload`, with LRU eviction at the cap. HTTP: `GET /models`, `POST /models/load`, `POST /models/unload`. | `tools/server/server-models.cpp`, `server.cpp:164-166` |
-| **llama.cpp build age** | Local checkout is `e97492369`, **2026-04-13** — four months stale as of this spec. | `git log -1` |
+| **llama.cpp router server** | Multi-model router: `--models-dir`, `--models-preset`, `--models-max`. Spawns **one child server per model**, each configured from an INI preset. HTTP: `GET /v1/models`, `POST /models/load`, `POST /models/unload`. | `tools/server/server-models.cpp` |
+| **Per-model idle shutdown is built in** | `sleep-idle-seconds` is a per-model preset key and genuinely frees VRAM (`destroy()`), auto-reloading on the next request. Beamer needs no idle logic. | `server-context.cpp:906`, measured |
+| **Status reads reset the idle timer** | Polling `GET /v1/models` prevents sleep. Beamer must check health lazily, never on a timer. | measured, benchmark doc Finding 6 |
+| **llama.cpp build age** | Was `e97492369` (2026-04-13); **rebuilt 2026-08-21** to `5a32f7b66`. | `git log -1` |
 | Desktop | GNOME Shell **50.1**, Wayland session, Mutter 18 | `gnome-shell --version`, `$XDG_SESSION_TYPE` |
 | Running inference servers | none (nothing on 8000/8001/11434, no ollama installed) | `ss -ltnp`, `which` |
 | Disk free | 649 GB | `df -h` |
 | GNOME extension | `beamer-focus@beamer.app` v4, exports `app.beamer.FocusProvider` at `/app/beamer/FocusProvider` | `extension/…/extension.js:20` |
 | Existing multi-window pattern | `window.new_window(dom, cfg).await` | `src/ui/app_setup.rs:102`, `:194` |
 
-Note the llama-server binary needs `LD_LIBRARY_PATH=<build>/bin` to resolve
-`libmtmd.so.0`; it fails to start without it. Beamer must set this when
-spawning.
+Note the llama-server binary needs `LD_LIBRARY_PATH` to include **both**
+`<build-sycl>/bin` (for `libmtmd.so.0`) and the oneAPI runtime (for
+`libsvml.so`). Setting the variable rather than *extending* what
+`oneapi-vars.sh` exports fails at startup with a `libsvml.so` error that names
+no obvious culprit. Beamer no longer sets this — the service unit does
+(`deploy/llama-beamer.service`).
 
-### Why Vulkan rather than SYCL or vLLM
+### Why SYCL rather than Vulkan or vLLM
 
-The existing build is Vulkan and it works. Vulkan on Arc goes through Mesa,
-which means **no oneAPI environment needs to be sourced** — decisive for a
-process Beamer spawns unattended from a desktop session that has not run
-`oneapi-vars.sh`.
+> **Superseded 2026-08-21.** This section originally chose Vulkan, on the
+> grounds that it needs no oneAPI environment sourced — decisive *for a process
+> Beamer spawns unattended from a desktop session*. That constraint no longer
+> exists: llama.cpp now runs as a standalone service which sets its own
+> environment declaratively. With the operational objection gone, the choice
+> was re-decided on measurement.
+
+**SYCL**, measured on the B60 from the same commit on the same device:
+
+| Model | Metric | Vulkan | SYCL | SYCL advantage |
+|---|---|---:|---:|:--:|
+| s1-mini | pp512 | 6358 | **14817** | **2.33x** |
+| s1-mini | tg128 | 249.7 | **293.7** | **1.18x** |
+| gemma-4-E4B | pp512 | 1190.8 | **2811** | **2.36x** |
+| gemma-4-E4B | tg128 | 61.2 | **77.4** | **1.26x** |
+
+Note also that Vulkan on current llama.cpp selects `KHR_coopmat` on this
+driver, not `NV_coopmat2` — upstream tightened the coopmat2 device-feature
+requirements beyond what Mesa exposes. That is still matrix-core acceleration,
+but it is the v1 path.
+
+Vulkan remains built at `build/` as a fallback requiring no oneAPI runtime.
 
 vLLM (available at `/home/berkley/Programming/vllm`, validated with torch
 `2.12.1+xpu`) was considered and rejected for this use: it is built for
@@ -425,49 +456,58 @@ obvious which hotkey was hit. This is a one-line addition to the existing
 
 Beamer's first non-ASR model client.
 
-### Runtime: llama.cpp, rebuilt — not Ollama
+### Runtime: llama.cpp — rebuilt, SYCL, and standalone
 
-**Decision: keep llama.cpp, but rebuild from current master.** The local
-checkout is from 2026-04-13 and is four months stale.
+**Decision: llama.cpp, rebuilt from master, SYCL backend, run as a standalone
+service that Beamer does not own.**
+
+> **Changed 2026-08-21.** This section originally said "rebuild with Vulkan —
+> do not switch to SYCL," because Vulkan needs no oneAPI environment sourced
+> and Beamer was going to spawn the server. Beamer no longer spawns it, so that
+> reason lapsed, and SYCL won on measurement (§2).
 
 Ollama was evaluated and rejected. Its standard release does not support Intel
 Arc; Intel's supported path is the **IPEX-LLM** fork of Ollama, which is retired
 software — Intel ceased development after PyTorch 2.8 and maintenance ended in
 March 2026, and it is explicitly off-limits on this machine. The remaining
-option is an unofficial community Vulkan build of Ollama, which is strictly
-worse than the working, already-compiled Vulkan llama.cpp sitting on disk.
+option is an unofficial community Vulkan build, strictly worse than the
+llama.cpp already on disk.
 
 Ollama's genuine advantage was model lifecycle management — load on demand,
-keep-alive, automatic unload. **The llama.cpp router server now provides that
-natively**, which removes the last reason to consider it.
+keep-alive, automatic unload. **The llama.cpp router provides that natively**,
+which removes the last reason to consider it.
 
-Reasons to rebuild before implementation:
+The rebuild (2026-04-13 -> 2026-08-21) was worth doing on its own merits and
+surfaced two things a stale build would have hidden: a new `SPIRV-Headers`
+build dependency, and that current master selects `KHR_coopmat` rather than
+`NV_coopmat2` on this driver. Benchmarking the April binary would have produced
+numbers for a code path the shipping build does not take.
 
-- Four months of Vulkan backend and Gemma 4 / Qwen 3.5 fixes.
-- MTP support may have landed; this build still says *"NextN/MTP tensors are
-  currently ignored"* (§2). If it has, the ladder's rung 3 gets meaningfully
-  faster.
-- The router server itself should be exercised on a current build rather than an
-  April snapshot.
+### Server lifecycle: not Beamer's problem
 
-Rebuild with Vulkan as currently configured — do **not** switch to SYCL. Vulkan
-needs no oneAPI environment sourced, which is decisive for a process Beamer
-spawns from a desktop session.
+**The server is a standalone, long-lived local service. Beamer is a plain HTTP
+client to it and never spawns, supervises, or kills it.**
 
-### Server lifecycle: one router process
+> **Replaced 2026-08-21.** The previous design had Beamer spawn the router,
+> poll it to readiness, `POST /models/load` to warm S1-mini, run its own idle
+> timers, `POST /models/unload` the extraction model, and kill the child on
+> exit. **All of that is deleted.** The router's preset system does it, and
+> decoupling means Beamer restarts without touching a 5 GB model.
 
-The earlier draft had Beamer supervising two `llama-server` processes on two
-ports with its own per-model idle timers. The router makes that unnecessary.
+Deployment lives in `deploy/`:
 
-**One process, both models, addressed by name:**
+| File | Role |
+|---|---|
+| `deploy/llama-models.ini` | per-model configuration (router preset) |
+| `deploy/llama-beamer.service` | systemd **user** unit that runs the router |
+
+The unit sources oneAPI, extends `LD_LIBRARY_PATH` (§2), and runs:
 
 ```
-llama-server --models-dir ~/models/beamer --models-max 2 \
-             --host 127.0.0.1 --port 8080 -ngl 99 -c 8192 --jinja
+llama-server --models-dir ~/models/beamer \
+             --models-preset ~/Programming/Beamer/deploy/llama-models.ini \
+             --models-max 2 --host 127.0.0.1 --port 8080
 ```
-
-with `LD_LIBRARY_PATH` set to the llama.cpp build dir (§2) and
-`GGML_VK_VISIBLE_DEVICES` set to the B60's Vulkan index.
 
 Requests select the model the ordinary OpenAI way:
 
@@ -475,51 +515,35 @@ Requests select the model the ordinary OpenAI way:
 { "model": "s1-mini-q4_k_m", "messages": [...] }
 ```
 
-The router loads a model on first request (`--models-autoload`) and evicts the
-least-recently-used one when `--models-max` is exceeded. `--models-max 2` keeps
-both resident, which is what the 5.61 GB budget (§3) assumes.
+**Residency policy is configuration, not code.** Each model is a separate child
+process with its own activity clock, verified independent:
 
-**Control surface** (`server.cpp:164-166`):
+```ini
+[s1-mini-q4_k_m]
+sleep-idle-seconds = -1     ; never sleeps — the stage the user watches
+load-on-startup = true      ; warm before the first note
 
-| Endpoint | Use |
-|---|---|
-| `GET /models` | Health and per-model load state — replaces the `/health` polling of the earlier design |
-| `POST /models/load` | Warm S1-mini at startup so the first note is not slow |
-| `POST /models/unload` | Explicitly release the extraction model when idle |
+[gemma-4-E4B_q4_0-it]
+sleep-idle-seconds = 300    ; frees ~3.1 GB after 5 min idle; wakes in 1.68 s
+```
 
-**Asymmetric residency is now explicit rather than inferred.** The router's
-eviction is LRU-at-a-cap, not time-based, so Beamer implements the idle policy
-itself with one HTTP call:
+Measured: sleep really releases VRAM, and waking is **1.68 s** versus **4.06 s**
+to respawn, because the process and its SYCL context survive.
 
-- **S1-mini** — `POST /models/load` at Beamer startup, never unloaded. It is
-  462 MB and it is the stage the user watches.
-- **Extraction model** — loaded on demand by the router; Beamer sends
-  `POST /models/unload` after `idle_shutdown_minutes` with no extraction. It is
-  5.15 GB and nobody is waiting on it.
+**Two rules Beamer must honour:**
 
-This is a large simplification: one child process instead of two, one port
-instead of two, `GET /models` instead of hand-rolled health polling, and the
-load/unload logic reduced to two HTTP calls.
+1. **Never poll the server on a timer.** Status reads count as activity and
+   will pin the extraction model in VRAM permanently, with no error and no
+   symptom other than VRAM never returning (§2, Finding 6). Check health only
+   on demand — when the user presses "Test connection", or immediately before a
+   request that was going to be made anyway.
+2. **Degrade gracefully when the server is absent.** Connection refused is a
+   normal state, not an error condition: capture the note, skip the cleanup,
+   show it as un-cleaned. **A sticky note must never be lost because a model
+   server is down.**
 
-**Startup sequence:**
-
-1. `GET http://127.0.0.1:8080/models`. If it answers, use it — a user running
-   their own router is supported, and Beamer survives its own restart without
-   respawning.
-2. If not, and `llm.manage_server = true`, spawn the router as above.
-3. Poll `GET /models` until it answers, or time out (30 s — the router starts
-   without loading any model, so this no longer waits on a multi-GB read).
-4. `POST /models/load` for S1-mini.
-
-`--jinja` is required: both models ship embedded chat templates, and S1-mini's
-trained input format (§3) depends on its template being applied exactly.
-
-The child process is killed on Beamer exit; a leaked router holding several GB
-of VRAM would be a nasty failure mode. Step 1 already handles the SIGKILL case
-by adopting an already-listening port rather than fighting it.
-
-All process spawning and blocking HTTP polls go through
-`tokio::task::spawn_blocking`, per `agent_docs/dioxus_architecture.md`.
+All blocking HTTP work goes through `tokio::task::spawn_blocking`, per
+`agent_docs/dioxus_architecture.md`.
 
 ### Request shape
 
@@ -777,30 +801,33 @@ Both reuse `Card`, `Toggle` and the other primitives in
 
 ## 10. Config additions
 
+> **Rewritten 2026-08-21.** Beamer no longer spawns or configures the server, so
+> everything describing *how to launch it* is gone: `manage_server`,
+> `llama_server_path`, `llama_lib_dir`, `models_dir`, `port`, `models_max`,
+> `vulkan_device`, and both `idle_shutdown_minutes` keys. Launch settings live
+> in `deploy/llama-beamer.service`; per-model settings, including idle
+> shutdown, live in `deploy/llama-models.ini`. What remains here is only what a
+> **client** needs.
+
 ```toml
 [recording]
 note_hotkey = ""              # unset by default
 
 [llm]
 enabled = true
-manage_server = true          # false = connect only, never spawn
-llama_server_path = "/home/berkley/Programming/llama.cpp/build/bin/llama-server"
-llama_lib_dir = "/home/berkley/Programming/llama.cpp/build/bin"
-models_dir = "/home/berkley/models/beamer"
-port = 8080                   # one router process serves both models
-models_max = 2
-vulkan_device = 0             # B60; confirm against `llama-server --list-devices`
+base_url = "http://127.0.0.1:8080"   # the only connection setting
+request_timeout_ms = 15000           # generous: covers a 4 s wake-from-sleep
 
 [llm.cleanup]                 # "S1-mini" by "Superwhisper"
-model = "s1-mini-q4_k_m"      # router model name, not a path
-idle_shutdown_minutes = 0     # resident: latency-critical, only 462 MB
+enabled = true
+model = "s1-mini-q4_k_m"      # server-side model name, not a path
 styling = "semi-formal"       # casual | semi-casual | semi-formal | formal
 structure = "lists"           # prose | lists
 context = "general"           # general | email
 
 [llm.extract]                 # google/gemma-4-E4B-it QAT q4_0 (ladder rung 1)
+enabled = true
 model = "gemma-4-E4B_q4_0-it"
-idle_shutdown_minutes = 5     # POST /models/unload when idle: 5 GB, nobody waits
 min_confidence = 0.5          # below this, the suggestion is not shown at all
 
 [notes]
@@ -808,12 +835,57 @@ all_workspaces = true         # Mutter: stick() notes across workspaces
 default_color = "purple"
 ```
 
-Model files are **not** downloaded by Beamer. They are fetched manually (or by
-a small documented script committed alongside the spec) and their paths
-configured. Adding a downloader is a separate feature with its own progress UI,
-resumability and disk-space concerns.
+`request_timeout_ms` must exceed the worst realistic first-request latency. The
+extraction model can be asleep, and waking it costs ~1.7 s on top of the request
+(~4 s if the whole server is cold). 15 s is deliberately generous; a timeout
+here means "the note is not cleaned", never "the note is lost".
+
+Model files are **not** downloaded by Beamer. They are fetched manually and
+served by the standalone server. Adding a downloader is a separate feature with
+its own progress UI, resumability and disk-space concerns.
 
 `agent_docs/config_schema.md` must be updated to match.
+
+### The connection settings card
+
+A new card in the settings window, following the existing patterns in
+`src/ui/settings/` and `src/ui/components.rs` (`Card`, `Select`, `Toggle`).
+
+```
++-- Local AI ------------------------------------------+
+|  [x] Enable on-device cleanup and task extraction     |
+|                                                       |
+|  Server URL   [ http://127.0.0.1:8080            ]    |
+|                                                       |
+|  [ Test connection ]   * Connected - 2 models         |
+|                          s1-mini-q4_k_m      loaded   |
+|                          gemma-4-E4B_q4_0-it sleeping |
+|                                                       |
+|  Cleanup model    [ s1-mini-q4_k_m        v ]         |
+|  Extraction model [ gemma-4-E4B_q4_0-it   v ]         |
++-------------------------------------------------------+
+```
+
+Behaviour:
+
+- **Test connection** issues one `GET {base_url}/v1/models` and renders the
+  result: reachable or not, and each model's id and state.
+- **The two model pickers are populated from that response**, so the user picks
+  from what the server actually serves instead of typing a name that must match
+  a GGUF filename stem exactly. Until a successful probe they fall back to
+  free text seeded with the configured value.
+- Showing per-model state (`loaded` / `sleeping` / `unloaded`) makes the
+  residency policy visible, which otherwise has no user-facing surface at all.
+
+**The probe is on-demand only** — on button press, and once when the settings
+window opens. **Never on a timer, and never a background health poll.** Status
+reads reset the server's idle clock, so a periodic check would pin the
+extraction model in VRAM forever (§2, Finding 6). This is a correctness
+constraint, not a performance preference.
+
+Failure states are plain: connection refused reads "Server not running", a
+non-200 reads the status line, and a timeout reads "No response". Each is
+accompanied by the fact that notes are still captured without cleanup.
 
 ## 11. Testing
 

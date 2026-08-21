@@ -48,18 +48,32 @@ RUST_LOG=beamer=debug cargo run  # Run with debug logging
 
 ---
 
-# 🚧 PICK UP HERE — Sticky Notes feature (paused 2026-08-20)
+# 🚧 PICK UP HERE — Sticky Notes feature (Task 1 done 2026-08-21)
 
-Design and planning are **done and committed**. No feature code written yet.
-Read these two documents first, in order:
+Read these three documents first, in order:
 
 1. **Spec:** `docs/superpowers/specs/2026-08-20-sticky-notes-design.md`
 2. **Plan:** `docs/superpowers/plans/2026-08-20-sticky-notes-phase1.md` (13 tasks)
+3. **Benchmarks:** `docs/superpowers/benchmarks/2026-08-20-b60-llama-vulkan.md`
 
-**Next action:** execute **Task 1** of the Phase 1 plan — download the models and
-benchmark them on the B60. Everything else waits on those numbers. Task 1 needs
-the user present: it downloads ~5.6 GB and uses `sudo` to drop page cache for a
-cold-start measurement.
+**Task 1 is complete.** Models downloaded, backend chosen by measurement, server
+standing. Every latency estimate in the spec is now a measurement, and two
+decisions changed as a result (below).
+
+**Next action:** execute **Task 2** — thread `CaptureMode` through `HotkeyEvent`.
+That is the first task that writes feature code. Branch `feat/sticky-notes`.
+
+**Measured, so stop estimating:**
+
+| Thing | Measured |
+|---|---|
+| S1-mini cleans a ~60-word note | **0.225 s** (threshold was 1.5 s) |
+| Gemma extraction (thinking off) | **1.11 s** |
+| Wake extraction model from sleep | **1.68 s** (threshold was 10 s) |
+| Cold start (spawn + 4.8 GB load) | 4.06 s |
+| Resident VRAM, both models | ~4.3 GB of 22.7 GB |
+
+Phase 2 proceeds as specced. Asymmetric idle shutdown is confirmed correct.
 
 ## What the feature is
 
@@ -71,87 +85,116 @@ unconfirmed. Delivered in three phases; only Phase 1 is planned in detail.
 
 | Phase | Deliverable | Status |
 |---|---|---|
-| 1 | Dictate → sticky note on desktop, persisted, positioned | **Planned, ready to build** |
-| 2 | S1-mini cleanup pass | Plan waits on Task 1 benchmark numbers |
+| 1 | Dictate → sticky note on desktop, persisted, positioned | **Task 1 done; Task 2 next** |
+| 2 | S1-mini cleanup pass | **Unblocked** — numbers measured, 0.225 s |
 | 3 | Task extraction, suggestion chips, Tasks page | Plan waits on an eval corpus from real Phase 1 use |
 
-## ⬇️ Models to download from Hugging Face
+## ⬇️ Models — downloaded, in `~/models/beamer/`
 
-Both are **Apache-2.0**, both are official **QAT / publisher** builds, and
-neither `mmproj` (vision) file is needed — Beamer's use is text-only.
+Both are official **QAT / publisher** builds. Neither `mmproj` (vision) file is
+needed — Beamer's use is text-only.
 
-```bash
-mkdir -p ~/models/beamer
+| File | Size | Role |
+|---|---|---|
+| `s1-mini-q4_k_m.gguf` | 462 MiB | Stage 1 cleanup. 94.8% token accuracy on 7,519 held-out cases, measured on **this** quant — do not substitute f16. |
+| `gemma-4-E4B_q4_0-it.gguf` | 4.80 GiB | Stage 2 extraction. Ladder rung 1. |
 
-# Stage 1 — transcript cleanup. 462 MB.
-# Purpose-built ASR post-processor: punctuation, truecasing, filler removal,
-# inverse text normalization. 94.8% token accuracy on 7,519 held-out cases,
-# measured on THIS quant. Do not substitute f16.
-hf download superwhisper/s1-mini-GGUF s1-mini-q4_k_m.gguf --local-dir ~/models/beamer
-hf download superwhisper/s1-mini-GGUF LICENSE            --local-dir ~/models/beamer
+Licences are in `licenses/`; required attribution is in `README.md`.
 
-# Stage 2 — task extraction. 5.15 GB. Ladder rung 1 (see spec §3).
-hf download google/gemma-4-E4B-it-qat-q4_0-gguf gemma-4-E4B_q4_0-it.gguf \
-  --local-dir ~/models/beamer
-```
-
-**Total resident VRAM: 5.61 GB of the B60's 22.7 GB**, leaving ~17 GB for other
-GPU work on this machine.
+**Measured resident VRAM: ~4.3 GB of the B60's 22.7 GB** — better than the
+5.61 GB the spec estimated. Extraction model alone is ~3.1-3.4 GB.
 
 **Model ladder** — the extraction model is chosen by *measurement against a
 corpus of real notes*, not assertion. Promote only if precision is inadequate;
 all are Google QAT + Apache-2.0, so promotion is a config change and a download:
 
-| Rung | Model | Disk | Read/token |
+| Rung | Model | Disk | Note |
 |---|---|---|---|
-| 1 (default) | `google/gemma-4-E4B-it-qat-q4_0-gguf` | 5.15 GB | ~5.2 GB |
-| 2 | `unsloth/gemma-4-12B-it-qat-GGUF` (UD-Q4_K_XL) | 6.72 GB | ~6.7 GB |
-| 3 | `google/gemma-4-26B-A4B-it-qat-q4_0-gguf` | 14.44 GB | **~2.2 GB (MoE)** |
+| 0 | `google/gemma-4-E2B-it-qat-q4_0-gguf` | 3.12 GiB | Smaller/faster than the default; downgrade option if latency binds |
+| 1 (default) | `google/gemma-4-E4B-it-qat-q4_0-gguf` | 4.80 GiB | |
+| 2 | `unsloth/gemma-4-12B-it-qat-GGUF` (UD-Q4_K_XL) | 6.72 GB | |
+| 3 | `google/gemma-4-26B-A4B-it-qat-q4_0-gguf` | 13.45 GiB | 26B total, only ~4B active — reads far less per token than either dense option |
 
-Note rung 3 is both the **largest and the fastest** — 26B total but only ~4B
-active, so it reads less per token than either dense option. If latency rather
-than quality is the binding constraint, skip rung 2.
+Rung 3 is both the **largest on disk and potentially the fastest per token**.
+Its cost is load time, which residency makes irrelevant: with ~18 GB of the B60
+idle, `sleep-idle-seconds = -1` keeps it resident and load time stops mattering.
 
 ⚠️ **`superwhisper/s1-mini` is Apache 2.0 plus a binding naming term.** Any
 product integrating it must identify it as `"S1-mini" by "Superwhisper"` — that
 exact capitalization. This goes in the README and an in-app credits surface. It
 is a licence condition, not a courtesy.
 
-## ✅ Runtime decision: llama.cpp — rebuild it, don't switch to Ollama
+## ✅ Runtime: llama.cpp, **SYCL**, standalone server — Beamer is a client
 
-**Use llama.cpp. Rebuild from master first** — the local checkout at
-`/home/berkley/Programming/llama.cpp` is `e97492369`, **2026-04-13**, four months
-stale. Keep the existing **Vulkan** configuration (`GGML_VULKAN=ON`,
-`GGML_SYCL=OFF`); Vulkan needs no oneAPI environment sourced, which matters for a
-process Beamer spawns from a desktop session.
+**Two decisions changed on 2026-08-21. Do not revert them from the older text in
+the spec; the spec has been updated to match.**
 
-**Ollama was evaluated and rejected.** Its standard release does not support
-Intel Arc; Intel's supported path is the IPEX-LLM fork, which is retired software
-past end-of-life and off-limits on this machine. The remaining option is an
-unofficial community Vulkan build — strictly worse than the working Vulkan
-llama.cpp already on disk. Ollama's one real advantage was model lifecycle
-management, and that is now moot (below).
+**1. Backend is SYCL, not Vulkan.** The rebuild is done (`e97492369` ->
+`5a32f7b66`). Two build dirs exist:
 
-**Use the llama.cpp router server — one process, both models.** The current build
-already has it (`tools/server/server-models.cpp`), which deleted a whole
-subsystem from the original design:
+- `build-sycl/` — **use this.** `GGML_SYCL=ON`, `GGML_SYCL_F16=ON`, icx/icpx.
+- `build/` — Vulkan fallback, no oneAPI runtime needed.
+- `build.stale-pre-20260821/` — the April binaries, kept for rollback.
+
+Measured, same commit, same device: SYCL is **2.35x** Vulkan at prompt
+processing, **~1.2x** at generation. The original spec chose Vulkan because it
+needs no oneAPI environment — valid only while Beamer spawned the server, which
+it no longer does.
+
+**2. The server is standalone. Beamer never spawns it.** Deployment lives in
+`deploy/`:
 
 ```bash
-llama-server --models-dir ~/models/beamer --models-max 2 \
-             --host 127.0.0.1 --port 8080 -ngl 99 -c 8192 --jinja
+# start it
+systemctl --user enable --now llama-beamer        # deploy/llama-beamer.service
+# or ad hoc — note LD_LIBRARY_PATH must EXTEND oneAPI's, not replace it
+source ~/intel/oneapi/2025.3/oneapi-vars.sh
+export LD_LIBRARY_PATH=~/Programming/llama.cpp/build-sycl/bin:$LD_LIBRARY_PATH
+llama-server --models-dir ~/models/beamer \
+  --models-preset ~/Programming/Beamer/deploy/llama-models.ini \
+  --models-max 2 --host 127.0.0.1 --port 8080
 ```
 
-- Models are addressed by name in the ordinary OpenAI request: `"model": "s1-mini-q4_k_m"`
-- `GET /models` — health and load state (replaces hand-rolled `/health` polling)
-- `POST /models/load` — warm S1-mini at startup
-- `POST /models/unload` — release the 5 GB extraction model when idle
-- Set `LD_LIBRARY_PATH` to the llama.cpp `build/bin` or it fails on `libmtmd.so.0`
-- Set `GGML_VK_VISIBLE_DEVICES` to the **B60's Vulkan index** — read it from
-  `llama-server --list-devices`, do not assume it is 0
+Beamer's whole config for this is `base_url` — see spec §10.
 
-**GPU: the B60 (`0000:0a:00.0`), not the B570.** Verified by display topology, not
-preference — `card1-DP-1` and `card1-DP-4` are connected, so the **B570 drives
-both monitors**; the B60 has zero connected outputs and is pure headless compute.
+### Four traps, each of which cost real time to find
+
+⚠️ **Both models produce garbage unless explicitly told not to reason.** Both
+failures look like a healthy server returning a valid response.
+
+- **S1-mini** inherits Qwen3's template, which defaults thinking ON; it was
+  trained OFF. Without `chat-template-kwargs {"enable_thinking":false}` it emits
+  `<think>` and stops after 3 tokens. Do **not** substitute `reasoning-budget 0`
+  — the model card says output degrades. Also force greedy decoding: the GGUF
+  carries `temp 0.6 / top_p 0.95 / top_k 20` inherited from Qwen3-0.6B.
+- **Gemma 4** reasons by default, filling `reasoning_content` while `content`
+  stays empty. Thinking on cost 4x the latency for identical extraction output.
+
+Both are already set in `deploy/llama-models.ini`.
+
+⚠️ **Never poll the server on a timer.** Status reads reset the per-model idle
+clock. A background health check pins the ~3 GB extraction model in VRAM
+forever, with no error and no symptom. Probe on demand only.
+
+⚠️ **`-dev SYCL1`, not an env mask.** `ZE_AFFINITY_MASK` / `GGML_VK_VISIBLE_DEVICES`
+*filter* the device list, so the B60 re-indexes to 0 and the mask value stops
+matching the in-process id. `-dev` selects from the full list. The B60 is
+index **1** on both backends — verified, not assumed.
+
+⚠️ **`LD_LIBRARY_PATH` must extend oneAPI's, not replace it.** Setting it
+outright drops `libsvml.so` and the server dies naming a library nothing else
+mentions.
+
+### Rejected on measurement — do not re-propose without new evidence
+
+- **n-gram speculative decoding** (`--spec-default`). Looked like a 5x win;
+  that was an artifact of re-running identical text and reading cached output.
+  On unseen notes it does not engage at all, and tuned to shorter matches it
+  accepts ~30% and nets a wash (254-313 t/s vs a ~280 baseline). The cleanup
+  rewrite breaks n-gram matches — near-copy is not exact-copy.
+- **Ollama.** Standard release has no Intel Arc support; Intel's path is the
+  retired IPEX-LLM fork, off-limits on this machine. Its one advantage was model
+  lifecycle management, which the llama.cpp router now does natively.
 
 ## 🪟 Wayland window positioning — the thing that looks broken but isn't
 
