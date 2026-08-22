@@ -100,12 +100,34 @@ fn publish_level(level: f32) {
     let _ = level_channel().0.send(level);
 }
 
-/// Map raw f32 sample RMS (0.0–1.0 domain) to a display level. Quiet mics
-/// produce speech RMS as low as ~0.005, so a strong gain is needed for the
-/// waveform to register at all; the square root then compresses the top of
-/// the range so louder speech doesn't just pin flat at 1.0.
+/// Quietest RMS worth showing at all, and the level that reads as full scale.
+///
+/// A dB window rather than a gain, because loudness is perceived
+/// logarithmically and a linear gain spends almost its whole range on the
+/// quietest sounds. -55 dBFS sits below a typical room's noise floor; -12 dBFS
+/// is loud speech just short of clipping.
+const LEVEL_FLOOR_DBFS: f32 = -55.0;
+const LEVEL_CEIL_DBFS: f32 = -12.0;
+
+/// Map raw f32 sample RMS (0.0–1.0 domain) to a 0.0–1.0 display level.
+///
+/// ⚠️ **Do not "boost" this with a multiplier.** The previous version was
+/// `(rms * 30.0).clamp(0.0, 1.0).sqrt()`, which saturated at RMS 0.033
+/// (-29.5 dBFS). Ordinary speech runs 0.03–0.15 RMS, so essentially every
+/// chunk containing speech pinned to exactly 1.0 and the waveform showed no
+/// variation between talking and silence. The `sqrt` was added to prevent
+/// precisely that, but it ran *after* the clamp — where `sqrt(1.0) == 1.0` —
+/// so it could only lift quiet input, dragging the noise floor up too.
+///
+/// Mapping in the dB domain keeps speech inside a *range* instead of pinned
+/// at its top, which is the whole point of a level meter.
 fn normalize_rms(rms: f32) -> f32 {
-    (rms * 30.0).clamp(0.0, 1.0).sqrt()
+    if rms <= 0.0 {
+        // Also keeps log10 away from -inf.
+        return 0.0;
+    }
+    let dbfs = 20.0 * rms.log10();
+    ((dbfs - LEVEL_FLOOR_DBFS) / (LEVEL_CEIL_DBFS - LEVEL_FLOOR_DBFS)).clamp(0.0, 1.0)
 }
 
 fn chunk_rms(samples: &[f32]) -> f32 {
@@ -139,20 +161,47 @@ mod level_tests {
     }
 
     #[test]
-    fn speech_level_rms_lands_near_full_scale() {
-        // Constant 0.1 amplitude → RMS 0.1 → 3.0 after gain → clamps to 1.0
-        let samples = [0.1_f32; 64];
-        let level = normalize_rms(chunk_rms(&samples));
-        assert!((level - 1.0).abs() < 1e-4, "got {level}");
+    fn normal_speech_leaves_headroom_to_show_variation() {
+        // The regression this replaces asserted RMS 0.1 → *exactly* 1.0, and
+        // passing was the bug: with the meter already at full scale there is
+        // nothing left for louder speech to move.
+        let level = normalize_rms(chunk_rms(&[0.1_f32; 64]));
+        assert!(level > 0.6, "normal speech must be clearly visible, got {level}");
+        assert!(
+            level < 0.95,
+            "normal speech must not consume the whole meter, got {level}"
+        );
+    }
+
+    #[test]
+    fn distinct_speech_levels_produce_distinct_readings() {
+        // The property the old implementation could not satisfy at any gain,
+        // and the one the user actually noticed was missing. Any single
+        // saturating transform collapses these onto each other.
+        let quiet = normalize_rms(0.03);
+        let mid = normalize_rms(0.06);
+        let loud = normalize_rms(0.12);
+        assert!(quiet < mid && mid < loud, "{quiet} {mid} {loud}");
+        assert!(
+            mid - quiet > 0.05 && loud - mid > 0.05,
+            "steps must be visible on a 26px bar, got {quiet} {mid} {loud}"
+        );
     }
 
     #[test]
     fn quiet_speech_still_registers() {
-        // RMS 0.005 (very quiet mic) → 0.15 after gain → ~0.39 after sqrt,
-        // comfortably visible instead of a near-flat line
+        // A quiet mic must not read as silence, or the pill looks broken for
+        // anyone whose input gain is low.
         let level = normalize_rms(0.005);
-        assert!((level - 0.15_f32.sqrt()).abs() < 1e-4, "got {level}");
-        assert!(level > 0.3, "quiet speech should be clearly visible, got {level}");
+        assert!(level > 0.1, "quiet speech should be visible, got {level}");
+        assert!(level < 0.5, "…but clearly below normal speech, got {level}");
+    }
+
+    #[test]
+    fn a_quiet_room_reads_as_silence() {
+        // The other half of the reported symptom: with the old gain, room
+        // noise was lifted toward full scale, so silence looked like speech.
+        assert_eq!(normalize_rms(0.0005), 0.0, "room tone must not drive the meter");
     }
 
     #[test]
