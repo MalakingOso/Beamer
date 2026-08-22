@@ -18,6 +18,7 @@ use crate::config::Config;
 /// in Batch 2; a private module would make it a private-in-public return type.
 pub mod lifecycle;
 mod model;
+pub mod pipeline;
 pub use model::{Note, NoteColor, NoteOrigin, StageState};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -14,6 +14,7 @@ use super::notify::{clipboard_only_fallback, show_notification};
 use crate::config::Config;
 use crate::hotkey::CaptureMode;
 use crate::injection;
+use crate::notes::pipeline::PipelineRequest;
 use crate::notes::{NoteColor, NoteOrigin, NoteStore};
 use crate::ui::history::TranscriptionHistory;
 use crate::ui::status_log::{log_status, LogLevel, StatusLog};
@@ -45,6 +46,7 @@ pub(super) async fn do_note_capture(
     notes: &mut Signal<NoteStore>,
     config: &Signal<Config>,
     status_log: &mut Signal<StatusLog>,
+    note_passes: Coroutine<PipelineRequest>,
 ) -> Option<String> {
     if !should_create_note(text) {
         log_status(status_log, LogLevel::Info, "Nothing captured — no note created");
@@ -65,6 +67,16 @@ pub(super) async fn do_note_capture(
         format!("Note created ({} chars)", text.trim().len()),
     );
 
+    // Ask for the model passes **after** the flush above. The note is on disk
+    // before anything else is attempted, so no failure downstream — server
+    // down, model asleep, GPU busy — can cost the user words.
+    //
+    // This is also the *only* site that triggers a pass automatically, and it
+    // is reachable only from dictation. The rule "typed notes are never
+    // rewritten unasked" is therefore structural rather than a runtime check
+    // somebody could forget: a typed note has no path to this line.
+    note_passes.send(PipelineRequest::for_new_note(&id));
+
     Some(id)
 }
 
@@ -84,10 +96,11 @@ pub(super) async fn deliver(
     status_log: &mut Signal<StatusLog>,
     notes: &mut Signal<NoteStore>,
     config: &Signal<Config>,
+    note_passes: Coroutine<PipelineRequest>,
 ) {
     if sink_injects(capture_mode) {
         do_injection(text, backends, paste_shortcut, last_injection, history, status_log).await;
-    } else if let Some(id) = do_note_capture(text, notes, config, status_log).await {
+    } else if let Some(id) = do_note_capture(text, notes, config, status_log, note_passes).await {
         // Nothing here opens or places a window. The reconciler in
         // `ui::sticky_windows` watches the store and does both.
         tracing::info!("note {} created", id);

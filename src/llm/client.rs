@@ -13,7 +13,11 @@ use serde::Deserialize;
 
 /// Shared client, mirroring `transcription::http_client()`: one connection pool
 /// for the process rather than a fresh one per probe.
-fn http_client() -> &'static reqwest::Client {
+///
+/// Visible to `chat.rs` so completions reuse this pool rather than opening a
+/// second one — a per-request `Client` would discard the kept-alive connection
+/// between the cleanup and extraction passes of the same note.
+pub(super) fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(reqwest::Client::new)
 }

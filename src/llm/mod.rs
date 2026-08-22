@@ -6,6 +6,8 @@
 //! unit file; per-model settings, including idle shutdown, live in
 //! `deploy/llama-models.ini`.
 
+pub mod chat;
+pub mod cleanup;
 pub mod client;
 pub mod prompts;
 

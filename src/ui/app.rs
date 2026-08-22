@@ -5,6 +5,7 @@ use dioxus::prelude::*;
 
 use crate::config::Config;
 use crate::hotkey::{start_ll_hook, CaptureMode, HotkeyConfig, HotkeyEvent};
+use crate::notes::pipeline;
 use crate::notes::NoteStore;
 use crate::orchestrator::{self, RecordingState};
 use crate::update::UpdateStatus;
@@ -71,6 +72,12 @@ pub fn App() -> Element {
     #[cfg(target_os = "linux")]
     linux_integration::setup_linux_integration(rec_state, active_mode, config);
 
+    // The model passes live here rather than in the window that asked for
+    // them: `App()`'s scope outlives every sticky, so closing a note mid-pass
+    // cannot cancel it. Created before the orchestrator so its handle can be
+    // threaded into the capture path.
+    let note_passes = pipeline::use_pipeline(config, notes, status_log);
+
     let coroutine = use_coroutine(move |rx: UnboundedReceiver<HotkeyEvent>| {
         orchestrator::run(
             rx,
@@ -81,6 +88,7 @@ pub fn App() -> Element {
             status_log,
             notes,
             active_mode,
+            note_passes,
         )
     });
 
