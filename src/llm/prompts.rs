@@ -158,6 +158,63 @@ pub fn cleanup_user_message(
     format!("{}\n{}", control_line(styling, structure, context), transcript)
 }
 
+/// Stage 2 — the task-extraction policy.
+///
+/// Unlike [`CLEANUP_SYSTEM`] this is **not** a wire format handed down by a
+/// publisher: Gemma is a general model and this is a prompt, tunable against a
+/// corpus. What is not tunable is its shape, and every part of it is load
+/// bearing:
+///
+/// - **The negative categories are enumerated, with examples.** Naming a
+///   category is what suppresses it. An extraction-shaped instruction ("list
+///   the action items") biases the model toward producing output, which is
+///   precisely the failure to avoid — a note that is pure venting must yield
+///   nothing.
+/// - **It states that empty is normal.** Without that sentence models reliably
+///   invent a task rather than return none.
+/// - **Two of the three exemplars are hard negatives** returning an empty
+///   list. Positive-only exemplars teach the model that output is always
+///   expected, which is the same failure by another route.
+/// - **`evidence` is required to be verbatim.** A task whose evidence is not
+///   in the note is a fabrication, and `extract::parse_tasks` rejects it.
+///
+/// Aspirations are excluded deliberately. They are the largest ambiguous class
+/// and admitting them is what turns a task list into a graveyard of vague
+/// intentions. The policy can be loosened later; a list nobody trusts cannot be
+/// un-poisoned.
+pub const EXTRACT_SYSTEM: &str = r#"You extract tasks from a personal note. You are a strict judge, not a summarizer.
+
+A task is ONLY a concrete future action that the speaker has committed to doing themselves. Everything else is not a task.
+
+These are NOT tasks:
+- Completed or past action - "I called the vet yesterday"
+- Someone else's action - "Sarah is sending the invoice"
+- Hypothetical or conditional - "if the build fails we'd roll back"
+- Opinion, venting, emotion - "I'm so done with this project"
+- Observation or fact - "the API returns 500 on empty payloads"
+- Vague aspiration or idea - "we should think about caching", "it'd be cool to have dark mode"
+- Rhetorical question - "why do I even bother"
+
+Most notes contain no tasks. Returning an empty list is the correct and common answer. When uncertain, return nothing. Prefer omitting a task over inventing one.
+
+Reply with JSON only, in this exact shape:
+{"tasks": [{"text": "Call the vet", "evidence": "I need to call the vet about Milo", "confidence": 0.93}]}
+
+- "text" is a short imperative rewrite of the commitment.
+- "evidence" MUST be copied verbatim from the note, character for character. Never paraphrase it.
+- "confidence" is 0.0 to 1.0.
+
+Examples.
+
+Note: "the deploy went fine this morning, honestly I'm so done with this project, why do I even bother. we should think about caching at some point."
+{"tasks": []}
+
+Note: "Sarah is sending the invoice on Tuesday and the API returns 500 on empty payloads, if that keeps happening we'd roll back."
+{"tasks": []}
+
+Note: "I need to call the vet about Milo tomorrow, and I'll send Tuesday's invoice before Friday."
+{"tasks": [{"text": "Call the vet about Milo", "evidence": "I need to call the vet about Milo tomorrow", "confidence": 0.95}, {"text": "Send Tuesday's invoice", "evidence": "I'll send Tuesday's invoice before Friday", "confidence": 0.92}]}"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,5 +371,53 @@ mod tests {
             "  first line\nsecond line  ",
         );
         assert!(msg.ends_with("\n  first line\nsecond line  "), "got {msg:?}");
+    }
+
+    /// Every category the policy suppresses, in the spec's own words. Written
+    /// out longhand: the point is to fail if one is dropped during an edit,
+    /// and a test that iterated over the prompt's own bullets would not.
+    #[test]
+    fn the_extraction_prompt_names_every_negative_category() {
+        for category in [
+            "Completed or past action",
+            "Someone else's action",
+            "Hypothetical or conditional",
+            "Opinion, venting, emotion",
+            "Observation or fact",
+            "Vague aspiration or idea",
+            "Rhetorical question",
+        ] {
+            assert!(
+                EXTRACT_SYSTEM.contains(category),
+                "naming a category is what suppresses it; `{category}` is missing"
+            );
+        }
+    }
+
+    #[test]
+    fn the_extraction_prompt_says_an_empty_answer_is_normal() {
+        assert!(EXTRACT_SYSTEM
+            .contains("Returning an empty list is the correct and common answer"));
+        assert!(EXTRACT_SYSTEM.contains("When uncertain, return nothing"));
+    }
+
+    #[test]
+    fn the_extraction_prompt_carries_at_least_two_hard_negative_exemplars() {
+        // Positive-only exemplars teach the model that output is always
+        // expected, which is the same over-triggering failure the negative
+        // categories exist to prevent.
+        let empty_answers = EXTRACT_SYSTEM.matches(r#"{"tasks": []}"#).count();
+        assert!(
+            empty_answers >= 2,
+            "expected at least two exemplars answering with an empty list, found {empty_answers}"
+        );
+    }
+
+    #[test]
+    fn the_extraction_prompt_demands_verbatim_evidence() {
+        // The parser rejects evidence that is not in the note. If the prompt
+        // stopped asking for a verbatim span, every proposal would start
+        // failing that check and extraction would silently return nothing.
+        assert!(EXTRACT_SYSTEM.contains("copied verbatim from the note"));
     }
 }

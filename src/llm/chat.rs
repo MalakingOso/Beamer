@@ -50,8 +50,6 @@ pub struct ResponseFormat {
 }
 
 impl ResponseFormat {
-    /// Used by the extraction stage; cleanup deliberately sends none.
-    #[allow(dead_code)]
     pub fn json_object() -> Self {
         Self { kind: "json_object" }
     }

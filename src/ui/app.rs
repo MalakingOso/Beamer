@@ -6,6 +6,7 @@ use dioxus::prelude::*;
 use crate::config::Config;
 use crate::hotkey::{start_ll_hook, CaptureMode, HotkeyConfig, HotkeyEvent};
 use crate::notes::pipeline;
+use crate::notes::task_store::TaskStore;
 use crate::notes::NoteStore;
 use crate::orchestrator::{self, RecordingState};
 use crate::update::UpdateStatus;
@@ -53,6 +54,7 @@ pub fn App() -> Element {
     let last_injection = use_signal(|| "No injection yet".to_string());
     let history = use_signal(TranscriptionHistory::load);
     let notes = use_signal(NoteStore::load);
+    let tasks = use_signal(TaskStore::load);
     let config = use_signal(|| Config::load().unwrap_or_default());
     let status_log = use_signal(StatusLog::new);
     let update_status = use_signal(UpdateStatus::default);
@@ -76,7 +78,7 @@ pub fn App() -> Element {
     // them: `App()`'s scope outlives every sticky, so closing a note mid-pass
     // cannot cancel it. Created before the orchestrator so its handle can be
     // threaded into the capture path.
-    let note_passes = pipeline::use_pipeline(config, notes, status_log);
+    let note_passes = pipeline::use_pipeline(config, notes, tasks, status_log);
 
     let coroutine = use_coroutine(move |rx: UnboundedReceiver<HotkeyEvent>| {
         orchestrator::run(
@@ -132,13 +134,13 @@ pub fn App() -> Element {
     // Coalesce per-keystroke note edits into one write. `do_note_capture`
     // flushes a newly captured transcript immediately — that one must never be
     // lost — so this tick only ever carries body/colour/geometry edits.
-    app_setup::setup_notes_flush(notes);
+    app_setup::setup_notes_flush(notes, tasks);
 
     // Background update check on startup (3s delay to keep launch snappy)
     app_setup::setup_update_check(config, update_status);
 
     // Tray menu clicks + tray icon left-click (toggle window visibility).
-    app_setup::setup_menu_handlers(&items, window.clone(), current_page, last_injection, config, update_status, notes);
+    app_setup::setup_menu_handlers(&items, window.clone(), current_page, last_injection, config, update_status, notes, tasks);
     app_setup::setup_tray_click_handler(window.clone());
 
     let page = *current_page.read();

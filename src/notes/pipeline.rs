@@ -36,8 +36,10 @@ use futures_util::StreamExt;
 
 use crate::config::Config;
 use crate::llm::cleanup::{self, Cleaned};
+use crate::llm::extract;
 use crate::notes::lifecycle::StageOutcome;
-use crate::notes::NoteStore;
+use crate::notes::task_store::TaskStore;
+use crate::notes::{NoteStore, StageState};
 use crate::ui::status_log::{log_status, LogLevel, StatusLog};
 
 /// Which stages a request is asking for.
@@ -74,6 +76,7 @@ impl PipelineRequest {
 pub fn use_pipeline(
     config: Signal<Config>,
     notes: Signal<NoteStore>,
+    tasks: Signal<TaskStore>,
     status_log: Signal<StatusLog>,
 ) -> Coroutine<PipelineRequest> {
     use_coroutine(move |mut rx: UnboundedReceiver<PipelineRequest>| async move {
@@ -94,7 +97,7 @@ pub fn use_pipeline(
                         );
                         continue;
                     }
-                    running.push(run_request(request, config, notes, status_log));
+                    running.push(run_request(request, config, notes, tasks, status_log));
                 }
                 Some(finished) = running.next(), if !running.is_empty() => {
                     in_flight.borrow_mut().remove(&finished);
@@ -106,49 +109,92 @@ pub fn use_pipeline(
 
 /// Run one note's requested stages. Returns the note id so the caller can clear
 /// it from the in-flight set.
+#[allow(clippy::too_many_arguments)]
 async fn run_request(
     request: PipelineRequest,
     config: Signal<Config>,
     mut notes: Signal<NoteStore>,
+    mut tasks: Signal<TaskStore>,
     mut status_log: Signal<StatusLog>,
 ) -> String {
     let id = request.note_id.clone();
 
     // One snapshot, taken up front. `peek`, not `read`: this runs outside any
     // reactive scope and has no business subscribing to the config.
-    let (enabled, base_url, timeout, cleanup_cfg, cleanup_enabled) = {
+    let (enabled, base_url, timeout, cleanup_cfg, extract_cfg) = {
         let cfg = config.peek();
         (
             cfg.llm.enabled,
             cfg.llm.base_url.clone(),
             Duration::from_millis(cfg.llm.request_timeout_ms),
             cfg.llm.cleanup.clone(),
-            cfg.llm.cleanup.enabled,
+            cfg.llm.extract.clone(),
         )
     };
 
     if !enabled {
         // Skipped, not Pending: the user turned the feature off, so there is
         // nothing for a retry affordance to offer.
+        //
+        // Only a stage that has never run is downgraded. Without the guard, a
+        // "Run again" press on a finished note with the feature switched off
+        // would rewrite Done as Skipped and erase the record that the passes
+        // ever ran — a state change caused entirely by asking for nothing.
         let mut store = notes.write();
-        store.mark_clean_skipped(&id);
-        store.mark_extract_skipped(&id);
+        if stage_is_pending(&store, &id, Stage::Clean) {
+            store.mark_clean_skipped(&id);
+        }
+        if stage_is_pending(&store, &id, Stage::Extract) {
+            store.mark_extract_skipped(&id);
+        }
         return id;
     }
 
     if matches!(request.stages, Stages::Both | Stages::CleanOnly) {
-        if cleanup_enabled {
+        if cleanup_cfg.enabled {
             run_cleanup(&id, &base_url, &cleanup_cfg, timeout, &mut notes, &mut status_log).await;
         } else {
-            notes.write().mark_clean_skipped(&id);
+            let mut store = notes.write();
+            if stage_is_pending(&store, &id, Stage::Clean) {
+                store.mark_clean_skipped(&id);
+            }
         }
     }
 
-    // Extraction is Batch 5. Leaving `extract_state` at `Pending` is the
-    // correct interim state — it is exactly what an unrun stage looks like, and
-    // the footer will offer it as soon as there is something to run.
+    if matches!(request.stages, Stages::Both | Stages::ExtractOnly) {
+        if extract_cfg.enabled {
+            run_extraction(
+                &id, &base_url, &extract_cfg, timeout, &mut notes, &mut tasks, &mut status_log,
+            )
+            .await;
+        } else {
+            let mut store = notes.write();
+            if stage_is_pending(&store, &id, Stage::Extract) {
+                store.mark_extract_skipped(&id);
+            }
+        }
+    }
 
     id
+}
+
+#[derive(Clone, Copy)]
+enum Stage {
+    Clean,
+    Extract,
+}
+
+/// Whether a stage has never run. Guards the `Skipped` downgrades: `Skipped`
+/// means "deliberately not run", which is only ever true of a stage that had
+/// not run in the first place.
+fn stage_is_pending(store: &NoteStore, id: &str, stage: Stage) -> bool {
+    store.get(id).is_some_and(|n| {
+        let state = match stage {
+            Stage::Clean => n.clean_state,
+            Stage::Extract => n.extract_state,
+        };
+        state == StageState::Pending
+    })
 }
 
 async fn run_cleanup(
@@ -199,6 +245,58 @@ async fn run_cleanup(
             notes.write().mark_clean_failed(id);
             tracing::warn!("cleanup failed for note {}: {}", id, e);
             log_status(status_log, LogLevel::Error, format!("Note cleanup failed: {e}"));
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_extraction(
+    id: &str,
+    base_url: &str,
+    cfg: &crate::llm::ExtractConfig,
+    timeout: Duration,
+    notes: &mut Signal<NoteStore>,
+    tasks: &mut Signal<TaskStore>,
+    status_log: &mut Signal<StatusLog>,
+) {
+    // Read the body **after** cleanup, not the text cleanup was given. That
+    // covers all three outcomes with one line: a cleaned note is analysed as
+    // cleaned, a failed cleanup falls back to `raw` (which `body` still equals),
+    // and a cleanup superseded by an edit analyses what the user actually
+    // typed — which is what they would want looked at.
+    let Some(text) = notes.peek().get(id).map(|n| n.body.clone()) else {
+        return;
+    };
+    if text.trim().is_empty() {
+        notes.write().mark_analyzed(id);
+        return;
+    }
+
+    match extract::extract(base_url, cfg, &text, timeout).await {
+        Ok(proposals) => {
+            let count = proposals.len();
+            {
+                let mut store = tasks.write();
+                let rows = proposals
+                    .into_iter()
+                    .map(|p| TaskStore::new_suggestion(id, p.text, p.evidence, p.confidence))
+                    .collect();
+                store.replace_suggestions(id, rows);
+                // Written now rather than on a tick. Nothing else flushes this
+                // store on a timer — the debounce in `app_setup` is notes-only
+                // — so a suggestion left dirty here would live only in memory.
+                store.flush_if_dirty();
+            }
+            // An empty list is a successful answer and the common one. Marking
+            // it Done rather than leaving it Pending is what stops the footer
+            // nagging forever on every ordinary note.
+            notes.write().mark_analyzed(id);
+            tracing::info!("extraction proposed {} task(s) for note {}", count, id);
+        }
+        Err(e) => {
+            notes.write().mark_extract_failed(id);
+            tracing::warn!("extraction failed for note {}: {}", id, e);
+            log_status(status_log, LogLevel::Error, format!("Task extraction failed: {e}"));
         }
     }
 }

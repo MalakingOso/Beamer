@@ -9,6 +9,7 @@
 pub mod chat;
 pub mod cleanup;
 pub mod client;
+pub mod extract;
 pub mod prompts;
 
 use serde::{Deserialize, Serialize};
