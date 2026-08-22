@@ -1257,6 +1257,168 @@ body {
   border-color: var(--border-strong);
 }
 
+.notes-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* The one place a note is made without speaking. Sized to the header's
+   baseline rather than made a primary CTA: dictation is the main gesture and
+   this must not out-shout it. */
+.notes-new-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  color: var(--fg-secondary);
+  background: var(--bg-surface);
+  border: 2px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: color var(--duration-fast) var(--ease),
+              border-color var(--duration-fast) var(--ease),
+              background var(--duration-fast) var(--ease);
+}
+
+.notes-new-btn:hover {
+  color: var(--accent);
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+/* ── Tasks page ───────────────────────────────────────────────────────────
+   Grouped under the note that produced each task, so the same stripe that
+   indexes a card on the notes board indexes a group heading here. Rows are
+   flat — no card per task — because the group is the unit worth boxing. */
+
+.task-group {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg-surface);
+  border: 2px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card);
+}
+
+.task-group-header {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  min-height: 34px;
+  background: var(--bg-recessed);
+  border-bottom: 2px solid var(--border);
+}
+
+.task-group-header.openable {
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease);
+}
+
+.task-group-header.openable:hover {
+  background: var(--accent-subtle);
+}
+
+.task-group-title {
+  flex: 1;
+  min-width: 0;
+  align-self: center;
+  overflow: hidden;
+  font-family: "DM Mono", "Cascadia Code", monospace;
+  font-size: 12px;
+  color: var(--fg);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Says why a heading offers no click, rather than leaving a dead gesture. */
+.task-group-badge {
+  align-self: center;
+  padding-right: 12px;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+.task-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+}
+
+/* Adjacent-sibling rather than `border-top` on every row: the header already
+   carries a bottom border, and `:first-of-type` does not exclude the first row
+   here — the header is itself a div, so it takes that slot and the first row
+   would draw a second 2px line straight under it. */
+.task-row + .task-row {
+  border-top: 2px solid var(--border);
+}
+
+/* De-emphasised, not hidden: a ticked task is still the note's record of what
+   was committed to, and it sorts below the outstanding ones anyway. */
+.task-row.done {
+  opacity: 0.55;
+}
+
+.task-check {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  color: var(--bg-surface);
+  background: var(--bg-surface);
+  border: 2px solid var(--border-strong);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease),
+              border-color var(--duration-fast) var(--ease);
+}
+
+.task-check:hover {
+  border-color: var(--accent);
+}
+
+.task-check.checked {
+  color: #ffffff;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.task-row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.task-text {
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--fg);
+  word-break: break-word;
+}
+
+.task-row.done .task-text {
+  text-decoration: line-through;
+}
+
+/* The evidence span is what makes a wrong extraction obvious at a glance, so
+   it is present on every row — muted and one line, ellipsized with the full
+   span on hover. */
+.task-evidence {
+  overflow: hidden;
+  font-size: 12px;
+  color: var(--fg-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ── Local AI card ────────────────────────────────────────────────────────
    The per-model state list is the only user-facing surface the residency
    policy has: without it, "loaded" vs "sleeping" vs "unloaded" is invisible. */

@@ -20,6 +20,7 @@ pub mod sticky_css;
 pub mod sticky_footer;
 pub mod sticky_windows;
 pub mod status_log;
+pub mod tasks_page;
 pub mod vocab_page;
 
 use std::path::PathBuf;

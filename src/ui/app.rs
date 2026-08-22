@@ -18,9 +18,11 @@ use crate::ui::history::TranscriptionHistory;
 use crate::ui::history_page::HistoryPage;
 use crate::ui::home::HomePage;
 use crate::ui::icons::{
-    IconBook, IconClockCounterClockwise, IconGear, IconHouse, IconMinus, IconNote, IconX,
+    IconBook, IconClockCounterClockwise, IconGear, IconHouse, IconListChecks, IconMinus,
+    IconNote, IconX,
 };
 use crate::ui::notes_page::NotesPage;
+use crate::ui::tasks_page::TasksPage;
 use crate::ui::vocab_page::VocabPage;
 use crate::ui::settings::SettingsPage;
 use crate::ui::status_log::StatusLog;
@@ -30,6 +32,7 @@ pub(super) enum Page {
     Home,
     History,
     Notes,
+    Tasks,
     Vocab,
     Settings,
 }
@@ -177,6 +180,14 @@ pub fn App() -> Element {
                             IconNote {}
                         }
                         button {
+                            // Directly after Notes: a task is only ever reached
+                            // through the note that produced it, so the two
+                            // read as one pair.
+                            class: if page == Page::Tasks { "sidebar-icon active" } else { "sidebar-icon" },
+                            onclick: move |_| current_page.set(Page::Tasks),
+                            IconListChecks {}
+                        }
+                        button {
                             class: if page == Page::Vocab { "sidebar-icon active" } else { "sidebar-icon" },
                             onclick: move |_| current_page.set(Page::Vocab),
                             IconBook {}
@@ -236,7 +247,10 @@ pub fn App() -> Element {
                         HistoryPage { history }
                     },
                     Page::Notes => rsx! {
-                        NotesPage { notes, registry: sticky_registry }
+                        NotesPage { notes, config, registry: sticky_registry }
+                    },
+                    Page::Tasks => rsx! {
+                        TasksPage { notes, tasks, registry: sticky_registry }
                     },
                     Page::Vocab => rsx! {
                         VocabPage {}

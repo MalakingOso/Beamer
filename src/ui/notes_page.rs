@@ -12,13 +12,18 @@
 
 use dioxus::prelude::*;
 
-use crate::notes::{Note, NoteStore};
+use crate::config::Config;
+use crate::notes::{Note, NoteColor, NoteOrigin, NoteStore};
 use crate::ui::components::Toggle;
+use crate::ui::icons::IconPlus;
 use crate::ui::sticky_windows::{self, StickyRegistry};
 
 #[derive(Props, Clone, PartialEq)]
 pub struct NotesPageProps {
     pub notes: Signal<NoteStore>,
+    /// Read only for `notes.default_color`, so a typed note is born the same
+    /// colour a dictated one would be.
+    pub config: Signal<Config>,
     pub registry: StickyRegistry,
 }
 
@@ -47,6 +52,7 @@ fn when(note: &Note) -> String {
 #[component]
 pub fn NotesPage(props: NotesPageProps) -> Element {
     let mut notes = props.notes;
+    let config = props.config;
     let registry = props.registry;
 
     let mut query = use_signal(String::new);
@@ -75,19 +81,51 @@ pub fn NotesPage(props: NotesPageProps) -> Element {
         div { class: "content",
             div { class: "notes-header",
                 h1 { class: "notes-title", "Notes" }
-                {
-                    let label = if showing_archived {
-                        format!("{shown} archived")
-                    } else if shown == active_total() {
-                        match shown {
-                            0 => "No notes".to_string(),
-                            1 => "1 note".to_string(),
-                            n => format!("{n} notes"),
-                        }
-                    } else {
-                        format!("{shown} of {}", active_total())
-                    };
-                    rsx! { span { class: "notes-count", "{label}" } }
+                div { class: "notes-header-actions",
+                    {
+                        let label = if showing_archived {
+                            format!("{shown} archived")
+                        } else if shown == active_total() {
+                            match shown {
+                                0 => "No notes".to_string(),
+                                1 => "1 note".to_string(),
+                                n => format!("{n} notes"),
+                            }
+                        } else {
+                            format!("{shown} of {}", active_total())
+                        };
+                        rsx! { span { class: "notes-count", "{label}" } }
+                    }
+                    button {
+                        class: "notes-new-btn",
+                        title: "New note",
+                        onclick: move |_| {
+                            // No pipeline request, deliberately. The automatic
+                            // trigger lives at exactly one site —
+                            // `do_note_capture`, reachable only from dictation
+                            // — which is what makes "a typed note is never
+                            // rewritten unasked" structural rather than a check
+                            // somebody could forget. S1-mini normalizes
+                            // *transcripts*; typed prose is outside its
+                            // training distribution, quite apart from it being
+                            // presumptuous to rewrite what someone deliberately
+                            // wrote. A typed note reaches a model only when the
+                            // user presses the note's own footer affordance.
+                            //
+                            // No `new_window` call either: `create` sets
+                            // `open: true`, and the reconciler opens a window
+                            // for any note that is open and not archived.
+                            let color =
+                                NoteColor::from_config_name(&config.peek().notes.default_color);
+                            let mut store = notes.write();
+                            store.create(String::new(), color, NoteOrigin::Typed);
+                            // Flushed inline, like `do_note_capture`: a note the
+                            // user is about to type into must not be lost to a
+                            // crash before the debounce tick comes round.
+                            store.flush_if_dirty();
+                        },
+                        IconPlus { size: 14 }
+                    }
                 }
             }
 
