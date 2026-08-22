@@ -11,7 +11,7 @@ use crate::audio::{try_send_reserving, warn_channel_full, SendOutcome};
 use crate::transcription;
 use crate::ui::status_log::{log_status, LogLevel, StatusLog};
 
-/// Why a recording loop exited. Both reasons share the same teardown; they
+/// Why a recording loop exited. All reasons share the same teardown; they
 /// differ only in whether trailing audio is still worth collecting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StopReason {
@@ -19,6 +19,75 @@ pub(super) enum StopReason {
     UserStop,
     /// The mic stopped delivering audio — device unplugged, capture error.
     AudioLost,
+    /// The backend's transcript stream closed while we were still recording.
+    ///
+    /// Only `UserStop` collects trailing audio, which is right here for the
+    /// same reason it is right for `AudioLost`: there is nothing left on the
+    /// other end to send it to.
+    TranscriptLost,
+}
+
+/// Why the backend's transcript stream ended.
+///
+/// A stream that closes without ever having delivered anything is the
+/// signature of a **rejected connection**, not a finished one — and telling
+/// the two apart is the only way that failure can be named for the user.
+///
+/// This matters because of a specific ElevenLabs behaviour, measured rather
+/// than assumed: it accepts the WebSocket upgrade *before* validating the key,
+/// answering `101 Switching Protocols` in ~130ms and only dropping the socket
+/// some seconds later. Mistral answers `401` at the handshake, so its failures
+/// never reach the recording loop at all. Without this distinction a bad
+/// ElevenLabs key looks exactly like a healthy session that happened to
+/// transcribe nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ClosedStream {
+    /// The backend was transcribing, then the stream ended.
+    Interrupted,
+    /// The stream closed before delivering anything at all.
+    NeverStarted,
+}
+
+/// Whether an event proves the backend was really transcribing.
+///
+/// `Info` and `Error` deliberately do not count. The ElevenLabs reader emits
+/// an `Info("WebSocket closed")` on its way out **even when the server
+/// rejected the key and sent nothing else**, so counting every event would
+/// make a rejected connection indistinguishable from a working one — which is
+/// the whole thing [`ClosedStream`] exists to distinguish.
+pub(super) fn proves_session_live(kind: &transcription::TranscriptKind) -> bool {
+    use transcription::TranscriptKind as K;
+    matches!(kind, K::Final | K::Partial | K::SessionStarted(_))
+}
+
+impl ClosedStream {
+    pub(super) fn classify(saw_live_event: bool) -> Self {
+        if saw_live_event {
+            Self::Interrupted
+        } else {
+            Self::NeverStarted
+        }
+    }
+
+    /// A failure the user can act on outranks one they can only note.
+    pub(super) fn level(self) -> LogLevel {
+        match self {
+            Self::Interrupted => LogLevel::Warn,
+            Self::NeverStarted => LogLevel::Error,
+        }
+    }
+
+    pub(super) fn message(self, backend: &str) -> String {
+        match self {
+            Self::Interrupted => {
+                format!("{backend} stopped sending transcripts mid-recording")
+            }
+            Self::NeverStarted => format!(
+                "{backend} closed the connection without transcribing anything — \
+                 check the API key and your plan's limits"
+            ),
+        }
+    }
 }
 
 /// How long to keep capturing after the hotkey is released, so a trailing word
@@ -108,5 +177,56 @@ pub(super) fn send_commit_sentinel(
             );
         }
         Err(mpsc::error::TrySendError::Closed(_)) => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transcription::TranscriptKind;
+
+    #[test]
+    fn a_stream_that_closed_before_any_transcript_is_reported_as_a_failure() {
+        // The rejected-key signature. ElevenLabs answers 101 to the upgrade
+        // before it validates anything, so this is the only point at which a
+        // bad key becomes distinguishable from a working session.
+        let closed = ClosedStream::classify(false);
+        assert_eq!(closed, ClosedStream::NeverStarted);
+        assert_eq!(closed.level(), LogLevel::Error);
+        assert!(
+            closed.message("ElevenLabs").contains("API key"),
+            "a user who cannot see the cause cannot fix it: {}",
+            closed.message("ElevenLabs")
+        );
+    }
+
+    #[test]
+    fn a_stream_that_died_mid_recording_is_a_warning_not_a_key_problem() {
+        let closed = ClosedStream::classify(true);
+        assert_eq!(closed, ClosedStream::Interrupted);
+        assert_eq!(closed.level(), LogLevel::Warn);
+        assert!(
+            !closed.message("ElevenLabs").contains("API key"),
+            "the key demonstrably worked — blaming it would send the user the wrong way"
+        );
+    }
+
+    #[test]
+    fn a_closing_info_event_does_not_count_as_a_live_session() {
+        // The trap this rule exists for. `elevenlabs_realtime`'s reader emits
+        // Info("WebSocket closed") on its way out even when the server
+        // rejected the key and sent nothing else. Counting it would make every
+        // rejected connection look like an interrupted one.
+        assert!(!proves_session_live(&TranscriptKind::Info(
+            "WebSocket closed".into()
+        )));
+        assert!(!proves_session_live(&TranscriptKind::Error("nope".into())));
+    }
+
+    #[test]
+    fn real_transcription_activity_counts_as_a_live_session() {
+        assert!(proves_session_live(&TranscriptKind::Final));
+        assert!(proves_session_live(&TranscriptKind::Partial));
+        assert!(proves_session_live(&TranscriptKind::SessionStarted("s1".into())));
     }
 }

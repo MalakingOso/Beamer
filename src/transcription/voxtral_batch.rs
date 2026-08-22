@@ -126,6 +126,7 @@ async fn correct_with_vocab(api_key: &str, text: &str, vocab: &[String]) -> Stri
     match client
         .post("https://api.mistral.ai/v1/chat/completions")
         .header("Authorization", format!("Bearer {}", api_key))
+        .timeout(super::BATCH_REQUEST_TIMEOUT)
         .json(&body)
         .send()
         .await
@@ -194,6 +195,7 @@ pub async fn transcribe_batch(api_key: &str, audio_pcm: Vec<u8>, vocab: &[String
         let resp = client
             .post("https://api.mistral.ai/v1/audio/transcriptions")
             .header("x-api-key", api_key)
+            .timeout(super::BATCH_REQUEST_TIMEOUT)
             .multipart(form)
             .send()
             .await

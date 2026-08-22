@@ -16,8 +16,8 @@ mod session;
 mod sink;
 use notify::show_notification;
 use session::{
-    buffer_tail_audio, send_commit_sentinel, stream_tail_audio, StopReason,
-    FINAL_TRANSCRIPT_TIMEOUT_MS,
+    buffer_tail_audio, proves_session_live, send_commit_sentinel, stream_tail_audio, ClosedStream,
+    StopReason, FINAL_TRANSCRIPT_TIMEOUT_MS,
 };
 
 /// Recording lifecycle state, drives both the pill overlay and home-page status dot.
@@ -96,9 +96,26 @@ async fn handle_recording(
     let backends = cfg.injection.backends.clone();
     let paste_shortcut = cfg.injection.paste_shortcut.clone();
 
+    // Matched exhaustively on purpose, mirroring `warmup.rs`. A `_ =>` here
+    // meant that any unrecognised backend string — a typo in config.toml, a
+    // name from a newer build — silently became ElevenLabs realtime, which is
+    // both a surprising destination and the one that used to freeze the app.
     let (key_name, display_name) = match backend.as_str() {
         "voxtral" | "voxtral_batch" => ("mistral_api_key", "Voxtral"),
-        _ => ("elevenlabs_api_key", "ElevenLabs"),
+        "elevenlabs" | "elevenlabs_batch" => ("elevenlabs_api_key", "ElevenLabs"),
+        other => {
+            tracing::error!("Unknown transcription backend '{}'", other);
+            log_status(
+                status_log,
+                LogLevel::Error,
+                format!("Unknown transcription backend '{other}' — check Settings"),
+            );
+            show_notification(
+                "Beamer",
+                &format!("Unknown transcription backend '{other}'. Open Settings to pick one."),
+            );
+            return Ok(());
+        }
     };
     let api_key = crate::config::load_api_key(key_name);
     if api_key.is_empty() {
@@ -119,7 +136,13 @@ async fn handle_recording(
     log_status(status_log, LogLevel::Info, format!("Connecting to {} realtime...", display_name));
     let session_result = match backend.as_str() {
         "voxtral" => transcription::start_voxtral_session(&api_key).await,
-        _ => transcription::start_elevenlabs_session(&api_key, language).await,
+        "elevenlabs" => transcription::start_elevenlabs_session(&api_key, language).await,
+        // Unreachable today — the match above rejects unknown names and the
+        // batch backends were routed away. Spelled out rather than `_ =>` so
+        // that adding a backend fails here instead of quietly becoming
+        // ElevenLabs, and returned rather than panicked so a mistake costs a
+        // recording rather than the process.
+        other => Err(anyhow::anyhow!("'{other}' is not a realtime backend")),
     };
     let mut session = match session_result {
         Ok(s) => {
@@ -156,6 +179,10 @@ async fn handle_recording(
     };
     crate::sounds::play_start_sound();
 
+    // Tracks whether the backend ever really transcribed, so a stream that
+    // closes having delivered nothing can be named as the rejected connection
+    // it almost certainly is. See `ClosedStream`.
+    let mut saw_live_event = false;
     let mut stop_reason = StopReason::UserStop;
     loop {
         tokio::select! {
@@ -186,34 +213,63 @@ async fn handle_recording(
             }
 
             event = session.transcript_rx.recv() => {
-                if let Some(ev) = event {
-                    match ev.kind {
-                        TranscriptKind::Final => {
-                            if !ev.text.trim().is_empty() {
-                                tracing::info!("[final] {}", ev.text);
-                                log_status(status_log, LogLevel::Info, format!("[final] {}", ev.text));
-                                sink::deliver(&ev.text, capture_mode, &backends, &paste_shortcut,
-                                        last_injection, history, status_log, notes, config,
-                                        note_passes).await;
-                            }
+                // ⚠️ The `None` arm is load-bearing, not defensive. `recv()` on
+                // a closed channel returns `Ready(None)` immediately and
+                // forever, so falling through here leaves this `select!` with
+                // no await point at all: it completes instantly every
+                // iteration and spins the loop hot.
+                //
+                // That is worse here than anywhere else the same hazard
+                // appears (see the audio arm above and `stream_tail_audio`),
+                // because this loop has no deadline to escape by. `run` is a
+                // `use_coroutine` polled on the main thread, so the spin
+                // starves the Dioxus scheduler — including the task that
+                // bridges hotkey events in, which is the only thing that could
+                // have stopped it. The result is a frozen app that has to be
+                // killed. Any backend whose socket dies mid-recording lands
+                // here; ElevenLabs simply reaches it far more often, because
+                // it accepts the WebSocket upgrade before validating the key.
+                let Some(ev) = event else {
+                    let closed = ClosedStream::classify(saw_live_event);
+                    let message = closed.message(display_name);
+                    tracing::warn!("{}", message);
+                    log_status(status_log, closed.level(), message.clone());
+                    if closed == ClosedStream::NeverStarted {
+                        // The connection was refused in all but name. Without
+                        // a notification this reads as a recording that just
+                        // produced nothing.
+                        show_notification("Beamer", &message);
+                    }
+                    stop_reason = StopReason::TranscriptLost;
+                    break;
+                };
+                saw_live_event |= proves_session_live(&ev.kind);
+                match ev.kind {
+                    TranscriptKind::Final => {
+                        if !ev.text.trim().is_empty() {
+                            tracing::info!("[final] {}", ev.text);
+                            log_status(status_log, LogLevel::Info, format!("[final] {}", ev.text));
+                            sink::deliver(&ev.text, capture_mode, &backends, &paste_shortcut,
+                                    last_injection, history, status_log, notes, config,
+                                    note_passes).await;
                         }
-                        TranscriptKind::Partial => {
-                            if !ev.text.is_empty() {
-                                tracing::debug!("[partial] {}", ev.text);
-                            }
+                    }
+                    TranscriptKind::Partial => {
+                        if !ev.text.is_empty() {
+                            tracing::debug!("[partial] {}", ev.text);
                         }
-                        TranscriptKind::SessionStarted(ref sid) => {
-                            tracing::info!("[session] started: {}", sid);
-                            log_status(status_log, LogLevel::Info, format!("Session started: {}", sid));
-                        }
-                        TranscriptKind::Error(ref msg) => {
-                            tracing::error!("[error] {}", msg);
-                            log_status(status_log, LogLevel::Error, format!("Transcription error: {}", msg));
-                        }
-                        TranscriptKind::Info(ref msg) => {
-                            tracing::info!("[info] {}", msg);
-                            log_status(status_log, LogLevel::Info, msg.clone());
-                        }
+                    }
+                    TranscriptKind::SessionStarted(ref sid) => {
+                        tracing::info!("[session] started: {}", sid);
+                        log_status(status_log, LogLevel::Info, format!("Session started: {}", sid));
+                    }
+                    TranscriptKind::Error(ref msg) => {
+                        tracing::error!("[error] {}", msg);
+                        log_status(status_log, LogLevel::Error, format!("Transcription error: {}", msg));
+                    }
+                    TranscriptKind::Info(ref msg) => {
+                        tracing::info!("[info] {}", msg);
+                        log_status(status_log, LogLevel::Info, msg.clone());
                     }
                 }
             }

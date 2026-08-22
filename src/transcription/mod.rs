@@ -10,7 +10,31 @@ pub use voxtral_batch::transcribe_batch as transcribe_voxtral_batch;
 pub use voxtral_realtime::start_realtime_session as start_voxtral_session;
 
 use std::sync::OnceLock;
+use std::time::Duration;
 use tokio::sync::mpsc;
+
+/// How long to wait for TCP + TLS to a backend's API host.
+///
+/// None of the four backends had any timeout at all before this: a stalled
+/// connect left the orchestrator's recording loop awaiting forever, and
+/// because that loop owns the hotkey receiver, *no further hotkey was ever
+/// processed*. The app stayed painted but stopped responding to dictation.
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Ceiling on one batch transcription request, end to end.
+///
+/// Deliberately generous rather than snappy: this covers uploading a whole
+/// recording *and* transcribing it, so it is sized for a long dictation on a
+/// slow link. It exists to bound a stall, not to enforce a latency target —
+/// erring long costs a slow transcript, erring short costs the transcript.
+pub(crate) const BATCH_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How long to wait for a realtime WebSocket handshake.
+///
+/// Applied inside each `start_*_session`, so the startup warmup preconnect is
+/// covered too — that one runs behind the splash while the main window is
+/// still hidden, where a stall means an app that never appears at all.
+pub(crate) const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Bounded capacity for a realtime backend's outbound PCM channel
 /// (`RealtimeSession::audio_tx`). `orchestrator.rs` forwards
@@ -41,7 +65,15 @@ pub(crate) const TRANSCRIPT_CHANNEL_CAPACITY: usize = 1_200;
 /// Avoids rebuilding connection pools and TLS contexts on every request.
 pub(crate) fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(reqwest::Client::new)
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .build()
+            // A builder failure here means TLS init failed; the plain
+            // constructor is no more likely to work, but falling back keeps a
+            // transcription attempt possible instead of panicking at startup.
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
 }
 
 /// Warm DNS, TLS and the shared client's connection pool for a batch
@@ -61,7 +93,7 @@ pub async fn preconnect_batch_host(backend: &str) -> anyhow::Result<()> {
     };
     http_client()
         .get(url)
-        .timeout(std::time::Duration::from_secs(5))
+        .timeout(Duration::from_secs(5))
         .send()
         .await?;
     Ok(())

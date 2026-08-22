@@ -61,9 +61,22 @@ pub async fn start_realtime_session(
         .body(())
         .context("Failed to build WebSocket request")?;
 
-    let (ws_stream, _) = tokio_tungstenite::connect_async(request)
-        .await
-        .context("WebSocket connection failed")?;
+    // Bounded, because `connect_async` imposes no timeout at any layer and a
+    // stalled handshake would strand both callers: the recording loop, which
+    // owns the hotkey receiver, and the startup warmup, which runs behind the
+    // splash while the main window is still hidden.
+    let (ws_stream, _) = tokio::time::timeout(
+        super::WS_CONNECT_TIMEOUT,
+        tokio_tungstenite::connect_async(request),
+    )
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "ElevenLabs did not answer the WebSocket handshake within {}s",
+            super::WS_CONNECT_TIMEOUT.as_secs()
+        )
+    })?
+    .context("WebSocket connection failed")?;
 
     let (mut write, mut read) = ws_stream.split();
 

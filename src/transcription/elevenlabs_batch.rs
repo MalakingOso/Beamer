@@ -43,6 +43,10 @@ pub async fn transcribe_batch(
         let resp = client
             .post("https://api.elevenlabs.io/v1/speech-to-text")
             .header("xi-api-key", api_key)
+            // Without this the request is unbounded, and a stalled upload
+            // strands the orchestrator's recording loop — which owns the
+            // hotkey receiver, so dictation stops working entirely.
+            .timeout(super::BATCH_REQUEST_TIMEOUT)
             .multipart(form)
             .send()
             .await
