@@ -67,7 +67,13 @@ context = "general"          # general | email
 [llm.extract]                # google/gemma-4-E4B-it QAT q4_0 (ladder rung 1)
 enabled = true
 model = "gemma-4-E4B_q4_0-it"
-min_confidence = 0.5         # Below this a suggestion is not shown at all
+min_confidence = 0.5         # Below this a suggestion is not shown at all,
+                             # and is not written to tasks.json either — a row
+                             # nobody sees is not a labelled example.
+                             # ⚠️ A backstop, not the precision mechanism.
+                             # Measured, the model reports 0.90-0.98 whatever
+                             # the note, so this filters ~nothing. Accept/dismiss
+                             # is what makes extraction trustworthy.
 
 [advanced]
 vad_aggressiveness = 2       # 1-3, higher = fewer false positives

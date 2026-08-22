@@ -1,11 +1,43 @@
 # Sticky Notes
 
 A second global hotkey dictates into a **sticky note** on the desktop instead of
-injecting into the focused field. Phase 1 — capture, persist, place, find — is
-complete. Phases 2 (cleanup pass) and 3 (task extraction) are not built.
+injecting into the focused field. All three phases are built: capture, persist,
+place and find (1); an S1-mini cleanup pass (2); and task suggestions the user
+accepts or dismisses (3).
 
+This document is about the **windows** — placement, cross-window state, and the
+things about Wayland that look broken and are not. The two model passes have
+their own document.
+
+- Model passes: **`agent_docs/local_inference.md`** — read it before touching
+  `src/llm/` or `src/notes/pipeline.rs`.
 - Spec: `docs/superpowers/specs/2026-08-20-sticky-notes-design.md`
 - Plan: `docs/superpowers/plans/2026-08-20-sticky-notes-phase1.md`
+
+## Note state is two fields, not one
+
+`NoteState` is gone. A note carries `clean_state` and `extract_state`, each a
+`StageState { Pending, Done, Failed, Skipped }`, because a note can legitimately
+be cleanup-failed *and* extraction-succeeded at once — a failed cleanup is meant
+to leave extraction to run against `raw`. One linear enum could not say that,
+and a successful extraction would erase the record a retry affordance keys off.
+
+`Skipped` is not `Pending`. `Pending` has something to retry; `Skipped` means
+the user turned the pass off, and the footer offers nothing for it.
+
+Migration was free and must stay free: `Note` has no `deny_unknown_fields`, so
+an older `notes.json` carrying `"state": "raw"` loads with the stale key ignored
+and both new fields defaulting to `Pending`.
+
+`NoteOrigin` records whether a note was dictated or typed. It is passed
+explicitly to `create` rather than defaulted, because it is corpus provenance
+and a silent default is exactly what corrupts a corpus.
+
+⚠️ **Only `notes/lifecycle.rs` writes a stage result.** Its methods are machine
+writes: none bump `modified` (that is user-facing ordering) and none touch
+`raw`. `apply_cleanup` is a compare-and-swap on the body captured at send time —
+**body equality, not a timestamp**, because `set_color` and `set_open` bump
+`modified` for things that are not edits.
 
 ## Read this first: extensions do not hot-reload on Wayland
 

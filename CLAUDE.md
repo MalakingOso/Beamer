@@ -10,13 +10,19 @@ Windows system-tray dictation app. Captures mic audio, transcribes via cloud API
 - `src/injection/` — Text injection fallback chain (UIA → SendInput → clipboard)
 - `src/hotkey/` — Global hotkey registration (hold-to-talk + toggle modes)
 - `src/config/` — TOML config + vocabulary management
-- `src/notes/` — Sticky note store (`mod.rs`) + data types (`model.rs`)
-- `src/llm/` — Client for the standalone llama.cpp server (Beamer never spawns it)
+- `src/notes/` — Note store (`mod.rs`) + types (`model.rs`), stage transitions
+  (`lifecycle.rs`), the model-pass coroutine (`pipeline.rs`), task suggestions
+  (`task.rs`, `task_store.rs`)
+- `src/llm/` — Client for the standalone llama.cpp server (Beamer never spawns
+  it). Cleanup (`cleanup.rs`) and extraction (`extract.rs`) over `chat.rs`;
+  `prompts.rs` holds both models' input contracts.
+  ⚠️ **No crate-rooted paths in this directory** — `src/bin/task_eval.rs`
+  `#[path]`-includes it, and there is no `src/lib.rs`.
 - `src/tray/` — System tray icon + menu
 - `src/ui/` — Dioxus desktop: settings window, overlay, screen edge glow
   - `src/ui/settings/` — One file per card section (recording, transcription, api_keys, etc.)
   - `src/ui/sticky*.rs`, `note_layout.rs`, `shell_window.rs` — Sticky note windows, placement
-  - `src/ui/notes_page.rs` — All-notes board
+  - `src/ui/notes_page.rs` — All-notes board; `tasks_page.rs` — accepted tasks
   - `src/ui/components.rs` — Shared: Card, Select, Toggle, MaskedInput, TagChip
 
 ## Commands
@@ -26,6 +32,7 @@ cargo build                    # Dev build
 cargo build --release          # Release (use for injection testing)
 cargo run                      # Run
 RUST_LOG=beamer=debug cargo run  # Run with debug logging
+cargo run --bin task_eval -- --limit 20   # Measure extraction against your own decisions
 ```
 
 ## Code Constraints
@@ -50,6 +57,7 @@ RUST_LOG=beamer=debug cargo run  # Run with debug logging
 - `agent_docs/dioxus_architecture.md` — Threading model, multi-window, tray integration
 - `agent_docs/design_system.md` — Color tokens, typography, Mica setup, component patterns
 - `agent_docs/sticky_notes.md` — Note windows, Wayland placement, cross-window state (CRITICAL for multi-window work)
+- `agent_docs/local_inference.md` — The two model passes, the pipeline coroutine, and the failures that return HTTP 200 (CRITICAL before touching `src/llm/`)
 
 ---
 # 🚧 PICK UP HERE — Sticky Notes Phase 1 (complete except one log out)
@@ -144,8 +152,10 @@ and replaced it with a pure, tested function. Recorded in the spec §8 and
   fix**, not parity work. See `todo.md`.
 - Note **size** is never captured, so resizing is forgotten. Unlike position,
   this has no design justification.
-- Phase 2 (S1-mini cleanup) is **unblocked** — 0.225 s, measured. Phase 3 waits
-  on an eval corpus from real Phase 1 use.
+- Phases 2 and 3 are **built** — see `agent_docs/local_inference.md`. Phase 3's
+  prompt is untuned: it was spot-checked against the live model, not measured
+  against a corpus, because none existed. Precision rests on accept/dismiss and
+  evidence grounding, not on the prompt being right first time.
 
 **Measured, so stop estimating:**
 
@@ -167,9 +177,9 @@ unconfirmed. Delivered in three phases; only Phase 1 is planned in detail.
 
 | Phase | Deliverable | Status |
 |---|---|---|
-| 1 | Dictate → sticky note on desktop, persisted, positioned | **Tasks 1–3, 5–8 done; Task 9 (positioning) next** |
-| 2 | S1-mini cleanup pass | **Unblocked** — numbers measured, 0.225 s |
-| 3 | Task extraction, suggestion chips, Tasks page | Plan waits on an eval corpus from real Phase 1 use |
+| 1 | Dictate → sticky note on desktop, persisted, positioned | **Done** |
+| 2 | S1-mini cleanup pass | **Done** — dictate and the note tidies itself |
+| 3 | Task extraction, suggestion chips, Tasks page | **Built, untuned.** No eval corpus existed, so the prompt landed on a spot-check. `cargo run --bin task_eval` measures it against your own accept/dismiss decisions as they accumulate. |
 
 ## ⬇️ Models — downloaded, in `~/models/beamer/`
 
@@ -195,11 +205,15 @@ all are Google QAT + Apache-2.0, so promotion is a config change and a download:
 | 0 | `google/gemma-4-E2B-it-qat-q4_0-gguf` | 3.12 GiB | Smaller/faster than the default; downgrade option if latency binds |
 | 1 (default) | `google/gemma-4-E4B-it-qat-q4_0-gguf` | 4.80 GiB | |
 | 2 | `unsloth/gemma-4-12B-it-qat-GGUF` (UD-Q4_K_XL) | 6.72 GB | |
-| 3 | `google/gemma-4-26B-A4B-it-qat-q4_0-gguf` | 13.45 GiB | 26B total, only ~4B active — reads far less per token than either dense option |
+| 3 | `google/gemma-4-26B-A4B-it-qat-q4_0-gguf` | 13.45 GiB | **The slowest measured**, 43.6 t/s — see below |
 
-Rung 3 is both the **largest on disk and potentially the fastest per token**.
-Its cost is load time, which residency makes irrelevant: with ~18 GB of the B60
-idle, `sleep-idle-seconds = -1` keeps it resident and load time stops mattering.
+⚠️ **Corrected on measurement.** An earlier version of this file claimed rung 3
+was "potentially the fastest per token", reasoning from bytes read per token.
+Measured on the B60 it is the **slowest**: 43.6 t/s against E4B's 77.3 and
+E2B's 116.0. The read-per-token argument assumes bandwidth-bound decoding, and
+expert routing and gather overhead dominate here. On this hardware the ladder
+is monotonic in size — **smaller is faster** — so rung 3 is a *quality* option
+only, never a speed play.
 
 ⚠️ **`superwhisper/s1-mini` is Apache 2.0 plus a binding naming term.** Any
 product integrating it must identify it as `"S1-mini" by "Superwhisper"` — that
@@ -252,7 +266,14 @@ failures look like a healthy server returning a valid response.
 - **Gemma 4** reasons by default, filling `reasoning_content` while `content`
   stays empty. Thinking on cost 4x the latency for identical extraction output.
 
-Both are already set in `deploy/llama-models.ini`.
+Both are now set in `deploy/llama-models.ini`. ⚠️ **This file previously
+claimed they both already were, and only s1-mini's was.** Gemma had been
+reasoning on every request since the preset was written. Nothing showed it —
+200, valid JSON, byte-identical extracted tasks — but it cost 306 predicted
+tokens / 4069 ms against 64 tokens / 842 ms with thinking off. Measured
+2026-08-22. If you add a model to the preset, its thinking switch is not
+optional, and no test can catch its absence for you: Beamer deliberately sends
+no template parameters of its own, so the preset is the only owner.
 
 ⚠️ **Never poll the server on a timer.** Status reads reset the per-model idle
 clock. A background health check pins the ~3 GB extraction model in VRAM
