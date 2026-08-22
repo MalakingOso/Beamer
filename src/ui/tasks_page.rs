@@ -19,7 +19,7 @@
 
 use dioxus::prelude::*;
 
-use crate::notes::task::{Task, TaskStatus};
+use crate::notes::task::Task;
 use crate::notes::task_store::TaskStore;
 use crate::notes::{Note, NoteStore};
 use crate::ui::icons::IconCheck;
@@ -98,23 +98,20 @@ fn heading_for(note: Option<&Note>) -> Heading {
     }
 }
 
-/// Accepted tasks, grouped by their note, newest note first.
+/// Group already-accepted, already-sorted rows by their note.
 ///
-/// Filtering happens **in here** rather than at the call site so the rule that
-/// dismissed and undecided rows never reach this page is one testable place.
+/// The filter and the newest-first sort belong to `TaskStore::accepted`, not
+/// here. This used to repeat both, with a comment saying it matched the store —
+/// two implementations of one rule, and a comment is not a mechanism to keep
+/// them in step. `rows` arrives filtered; grouping is all that is left, and it
+/// is the part worth testing.
 ///
 /// Done tasks sink to the bottom of their group rather than to a separate
 /// section: the group is the note, and splitting a note's tasks across two
 /// places would cost the provenance this page exists for. The sort is stable,
 /// so ticking a box moves one row down and leaves everything else where the
 /// eye last saw it.
-fn group_accepted(tasks: &[Task]) -> Vec<(String, Vec<Task>)> {
-    let mut rows: Vec<Task> =
-        tasks.iter().filter(|t| t.status == TaskStatus::Accepted).cloned().collect();
-    // Newest first, matching `TaskStore::accepted`. Group order then follows
-    // first appearance, so the note you last accepted from sits at the top.
-    rows.sort_by(|a, b| b.created.cmp(&a.created));
-
+fn group_accepted(rows: Vec<Task>) -> Vec<(String, Vec<Task>)> {
     let mut groups: Vec<(String, Vec<Task>)> = Vec::new();
     for task in rows {
         match groups.iter_mut().find(|(id, _)| *id == task.note_id) {
@@ -138,9 +135,10 @@ pub fn TasksPage(props: TasksPageProps) -> Element {
     // capture their ids in click handlers, which cannot outlive a `read()`
     // guard on the store. Same reasoning as `notes_page`.
     let groups = use_memo(move || {
-        let all = tasks.read().tasks.clone();
+        let accepted: Vec<Task> =
+            tasks.read().accepted().into_iter().cloned().collect();
         let store = notes.read();
-        group_accepted(&all)
+        group_accepted(accepted)
             .into_iter()
             .map(|(id, rows)| {
                 let heading = heading_for(store.get(&id));
@@ -248,6 +246,7 @@ pub fn TasksPage(props: TasksPageProps) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::notes::task::TaskStatus;
     use crate::notes::{NoteColor, NoteOrigin};
 
     fn task(note_id: &str, text: &str, created: &str, status: TaskStatus, done: bool) -> Task {
@@ -268,29 +267,28 @@ mod tests {
         groups.iter().flat_map(|(_, rows)| rows).map(|t| t.text.as_str()).collect()
     }
 
+    /// Which rows reach this page is `TaskStore::accepted`'s rule, pinned by
+    /// `accepted_excludes_suggested_and_dismissed_rows`. What is pinned here is
+    /// that grouping does not quietly re-sort what it was handed — the caller
+    /// owns newest-first order, and a sort re-added here would fight it.
     #[test]
-    fn dismissed_and_undecided_rows_never_reach_the_tasks_page() {
+    fn grouping_preserves_the_order_it_was_given() {
         let rows = vec![
-            task("n1", "Call the vet", "2026-08-22T10:00:00+01:00", TaskStatus::Accepted, false),
-            task("n1", "Learn the piano", "2026-08-22T10:01:00+01:00", TaskStatus::Dismissed, false),
-            task("n1", "Undecided", "2026-08-22T10:02:00+01:00", TaskStatus::Suggested, false),
+            task("n1", "Newest", "2026-08-22T12:00:00+01:00", TaskStatus::Accepted, false),
+            task("n1", "Oldest", "2026-08-22T09:00:00+01:00", TaskStatus::Accepted, false),
         ];
-        assert_eq!(
-            texts(&group_accepted(&rows)),
-            vec!["Call the vet"],
-            "a dismissed row is a labelled negative kept for the eval corpus, not a task; \
-             an undecided one is a proposal the user has not confirmed"
-        );
+        assert_eq!(texts(&group_accepted(rows)), vec!["Newest", "Oldest"]);
     }
 
     #[test]
     fn tasks_are_grouped_under_the_note_that_produced_them() {
+        // Newest first, which is the order `TaskStore::accepted` hands over.
         let rows = vec![
-            task("n1", "Call the vet", "2026-08-22T10:00:00+01:00", TaskStatus::Accepted, false),
             task("n2", "Send the invoice", "2026-08-22T11:00:00+01:00", TaskStatus::Accepted, false),
             task("n1", "Book a table", "2026-08-22T10:30:00+01:00", TaskStatus::Accepted, false),
+            task("n1", "Call the vet", "2026-08-22T10:00:00+01:00", TaskStatus::Accepted, false),
         ];
-        let groups = group_accepted(&rows);
+        let groups = group_accepted(rows);
         assert_eq!(groups.len(), 2, "one group per source note, not one row per task");
         assert_eq!(
             groups[0].0, "n2",
@@ -307,7 +305,7 @@ mod tests {
             task("n1", "Still to do", "2026-08-22T10:00:00+01:00", TaskStatus::Accepted, false),
         ];
         assert_eq!(
-            texts(&group_accepted(&rows)),
+            texts(&group_accepted(rows)),
             vec!["Still to do", "Done early"],
             "a ticked row must stop competing for attention with work that is left"
         );
@@ -316,10 +314,10 @@ mod tests {
     #[test]
     fn a_ticked_task_stays_inside_its_own_note_group() {
         let rows = vec![
-            task("n1", "Done", "2026-08-22T10:00:00+01:00", TaskStatus::Accepted, true),
             task("n2", "Open", "2026-08-22T11:00:00+01:00", TaskStatus::Accepted, false),
+            task("n1", "Done", "2026-08-22T10:00:00+01:00", TaskStatus::Accepted, true),
         ];
-        let groups = group_accepted(&rows);
+        let groups = group_accepted(rows);
         assert_eq!(groups.len(), 2);
         assert_eq!(
             texts(&groups[1..]),

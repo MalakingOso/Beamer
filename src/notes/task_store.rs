@@ -22,7 +22,6 @@ use crate::config::Config;
 
 /// No caller until the suggestion chips land in the UI batch; the store is
 /// built and tested first so the extraction pass has somewhere to write.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TaskStore {
     pub tasks: Vec<Task>,
@@ -41,7 +40,6 @@ impl Default for TaskStore {
 /// No caller until the suggestion chips land in the UI batch. Every method in
 /// this block is in the same position, so the allow sits on the block rather
 /// than being repeated per item.
-#[allow(dead_code)]
 impl TaskStore {
     fn storage_path() -> PathBuf {
         Config::config_dir().join("tasks.json")

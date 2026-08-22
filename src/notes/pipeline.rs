@@ -48,9 +48,6 @@ use crate::ui::status_log::{log_status, LogLevel, StatusLog};
 /// affordance asks for one stage specifically, and re-running a stage that
 /// already succeeded is a legitimate thing to ask for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// The single-stage variants are how the note footer retries one pass without
-// re-running the other. Constructed once that footer exists.
-#[allow(dead_code)]
 pub enum Stages {
     /// Cleanup, then extraction against whatever cleanup left behind. The
     /// automatic path after a dictated capture.

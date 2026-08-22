@@ -63,15 +63,10 @@ impl NoteStore {
         self.set_clean_state(id, StageState::Skipped);
     }
 
-    // The two extraction-result methods below have no caller until the
-    // extraction stage is wired; `mark_extract_skipped` already does, via the
-    // llm-disabled branch in `notes::pipeline`.
-    #[allow(dead_code)]
     pub fn mark_analyzed(&mut self, id: &str) {
         self.set_extract_state(id, StageState::Done);
     }
 
-    #[allow(dead_code)]
     pub fn mark_extract_failed(&mut self, id: &str) {
         self.set_extract_state(id, StageState::Failed);
     }
