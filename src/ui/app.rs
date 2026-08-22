@@ -129,7 +129,7 @@ pub fn App() -> Element {
     // Sticky note windows: one effect keeps the set of open windows matching
     // the set of notes that should be showing. Covers both a note dictated just
     // now and notes restored from disk at startup.
-    let sticky_registry = sticky_windows::setup_sticky_windows(window.clone(), notes, config);
+    let sticky_registry = sticky_windows::setup_sticky_windows(window.clone(), notes, tasks, note_passes, config);
 
     // Coalesce per-keystroke note edits into one write. `do_note_capture`
     // flushes a newly captured transcript immediately — that one must never be

@@ -21,7 +21,12 @@ use dioxus::desktop::tao::event::{Event, WindowEvent};
 use dioxus::desktop::{use_window, use_wry_event_handler};
 use dioxus::prelude::*;
 
+use crate::notes::pipeline::PipelineRequest;
+use crate::notes::task_store::TaskStore;
 use crate::notes::{NoteColor, NoteStore};
+use crate::ui::icons::{IconAsterisk, IconCheck};
+use crate::ui::sticky_chips::StickyChips;
+use crate::ui::sticky_footer::{self, FooterIcon};
 
 pub const TITLE_PREFIX: &str = "Beamer Note ";
 
@@ -43,11 +48,17 @@ pub const PALETTE: [NoteColor; 6] = [
 pub struct StickyNoteProps {
     pub id: String,
     pub notes: Signal<NoteStore>,
+    pub tasks: Signal<TaskStore>,
+    /// Handle on the App-scoped pipeline. `Coroutine<T>` is `Copy` and its
+    /// channel is not tied to a scope, so it crosses the VirtualDom boundary
+    /// for the same reason a `Signal` does — and a pass asked for here still
+    /// completes if this window is closed while it runs.
+    pub passes: Coroutine<PipelineRequest>,
 }
 
 #[component]
 pub fn StickyNote(props: StickyNoteProps) -> Element {
-    let StickyNoteProps { id, mut notes } = props;
+    let StickyNoteProps { id, mut notes, tasks, passes } = props;
 
     // Wayland gives a client no way to set its own position, but it may ask the
     // compositor to take over an interactive move — `drag()` wraps tao's
@@ -99,6 +110,13 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
     let color_class = format!("sticky sticky-{}", note.color.css_class());
     let edit_id = id.clone();
     let archive_id = id.clone();
+    let chips_id = id.clone();
+    let pass_id = id.clone();
+
+    // Keyed to the stage fields, not to how the note was created. A dictated
+    // note whose cleanup was superseded by an edit has spent its automatic
+    // trigger; reading the stages is what leaves it a way back.
+    let footer = sticky_footer::footer(note.clean_state, note.extract_state);
 
     rsx! {
         div { class: "{color_class}",
@@ -139,101 +157,34 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
                 value: "{body}",
                 oninput: move |e| { notes.write().set_body(&edit_id, e.value()); },
             }
+            StickyChips { note_id: chips_id, tasks }
+            div { class: "sticky-footer",
+                button {
+                    class: if footer.icon == FooterIcon::Check {
+                        "sticky-pass sticky-pass-done"
+                    } else {
+                        "sticky-pass"
+                    },
+                    title: "{footer.tooltip}",
+                    onclick: move |_| {
+                        passes.send(PipelineRequest {
+                            note_id: pass_id.clone(),
+                            stages: footer.stages,
+                        });
+                    },
+                    if footer.icon == FooterIcon::Check {
+                        IconCheck { size: 13 }
+                    } else {
+                        IconAsterisk { size: 13 }
+                    }
+                }
+                if let Some(message) = footer.error {
+                    span { class: "sticky-pass-error", "{message}" }
+                }
+            }
         }
     }
 }
-
-/// Sticky note styling, in Deploy Purple.
-///
-/// Injected as an inline `<style>` per window, so it must be self-contained —
-/// it cannot `@import` the app stylesheet. `embedded_font_css()` is prepended
-/// at window creation to supply the faces this references.
-///
-/// Corner radius is 8px because `agent_docs/design_system.md` caps it there
-/// ("Sharp system: 4px base, 6px cards, 8px max. Never rounder."). Notes take
-/// the maximum, which makes them the softest surface in the app without
-/// leaving its language.
-pub const STICKY_CSS: &str = r#"
-:root {
-  /* Mirrors the app tokens in assets/styles.css. Duplicated, not imported:
-     an inline <style> has no access to the main stylesheet. */
-  --ink:#0f152a;
-  --ink-soft:#64708b;
-  --accent:#4B0082;
-  --danger:#DC2626;
-  --note-border:rgba(75,0,130,0.28);
-  --note-shadow:rgba(75,0,130,0.18);
-  --note-chrome:rgba(255,255,255,0.42);
-  --radius-lg:8px;
-  --duration-fast:150ms;
-  --ease:cubic-bezier(0.25,1,0.5,1);
-}
-
-*, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
-
-/* Transparent all the way down. The window is built with_transparent(true)
-   and a (0,0,0,0) background color; without these the webview still paints an
-   opaque white sheet and the rounded corners show it as square white nubs. */
-html, body, #main { height:100%; overflow:hidden; background:transparent; }
-
-body { font-family:"Recursive","Segoe UI Variable","Segoe UI",system-ui,sans-serif;
-  -webkit-font-smoothing:antialiased; }
-
-/* Room for the hard-offset shadow to render inside the window. Without this
-   the shadow is clipped by the window edge and simply never appears. */
-#main { padding:0 5px 5px 0; }
-
-.sticky { display:flex; flex-direction:column; height:100%;
-  border:2px solid var(--note-border);
-  border-radius:var(--radius-lg);
-  /* Clips the bar's fill and border-bottom to the rounded top corners —
-     without it the bar squares them off again. */
-  overflow:hidden;
-  box-shadow:3px 4px 0 0 var(--note-shadow); }
-
-.sticky-purple { background:#EDE4FB; } .sticky-violet { background:#E4E6FB; }
-.sticky-amber  { background:#FBF1DC; } .sticky-teal   { background:#DCF5F0; }
-.sticky-rose   { background:#FBE1E8; } .sticky-slate  { background:#E7E9EC; }
-
-/* The title bar. `cursor:grab` and `user-select:none` are the affordance for
-   the window drag wired up in StickyNote — a bar that selects text on
-   press-and-move reads as broken even when the drag works. */
-.sticky-bar { display:flex; align-items:center; justify-content:space-between;
-  padding:7px 9px; border-bottom:2px solid var(--note-border);
-  background:var(--note-chrome);
-  cursor:grab; user-select:none; -webkit-user-select:none; }
-.sticky-bar:active { cursor:grabbing; }
-
-.sticky-dots { display:flex; gap:6px; }
-.sticky-dot { width:12px; height:12px; border:1.5px solid var(--note-border);
-  border-radius:50%; cursor:pointer; padding:0;
-  transition:transform var(--duration-fast) var(--ease); }
-.sticky-dot:hover { transform:scale(1.18); }
-.sticky-dot-purple{background:#8921E4} .sticky-dot-violet{background:#6B6BE4}
-.sticky-dot-amber {background:#E4A421} .sticky-dot-teal  {background:#21C9B0}
-.sticky-dot-rose  {background:#E4216B} .sticky-dot-slate {background:#8A93A0}
-
-/* Close hover goes danger red, per the custom-title-bar spec. */
-.sticky-archive { background:none; border:none; cursor:pointer;
-  font-family:"DM Mono","Cascadia Code",monospace;
-  font-size:16px; line-height:1; color:var(--ink-soft); padding:2px 5px;
-  border-radius:var(--radius-lg);
-  transition:color var(--duration-fast) var(--ease),
-             background var(--duration-fast) var(--ease); }
-.sticky-archive:hover { color:var(--danger); background:rgba(220,38,38,0.10); }
-
-.sticky-body { flex:1; width:100%; resize:none; border:none; outline:none;
-  background:transparent; padding:12px; font-family:inherit; font-size:14px;
-  line-height:1.5; color:var(--ink); caret-color:var(--accent); }
-.sticky-body::selection { background:rgba(75,0,130,0.18); }
-.sticky-body::placeholder { color:#94a0b8; }
-
-.sticky-gone { display:flex; align-items:center; justify-content:center;
-  height:100%; padding:16px; text-align:center;
-  font-size:13px; color:var(--ink-soft);
-  background:#E7E9EC; border:2px solid var(--note-border);
-  border-radius:var(--radius-lg); }
-"#;
 
 #[cfg(test)]
 mod tests {

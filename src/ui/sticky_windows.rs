@@ -37,9 +37,12 @@ use dioxus::desktop::{Config as DesktopConfig, DesktopContext, WeakDesktopContex
 use dioxus::prelude::*;
 
 use crate::config::Config;
+use crate::notes::pipeline::PipelineRequest;
+use crate::notes::task_store::TaskStore;
 use crate::notes::{Note, NoteStore};
 use crate::ui::note_layout::{self, Rect};
-use crate::ui::sticky::{window_title, StickyNote, StickyNoteProps, STICKY_CSS};
+use crate::ui::sticky::{window_title, StickyNote, StickyNoteProps};
+use crate::ui::sticky_css::STICKY_CSS;
 
 /// Size a note gets when it has none of its own.
 pub const DEFAULT_NOTE_SIZE: (u32, u32) = (320, 260);
@@ -113,10 +116,13 @@ pub type StickyRegistry = Signal<HashMap<String, StickySlot>>;
 /// Assumes the caller has already reserved `note.id` in the registry, and
 /// computed `pos` at that same moment — see `setup_sticky_windows` for why the
 /// two cannot be separated.
+#[allow(clippy::too_many_arguments)]
 async fn open_note_window(
     window: DesktopContext,
     mut registry: StickyRegistry,
     notes: Signal<NoteStore>,
+    tasks: Signal<TaskStore>,
+    passes: Coroutine<PipelineRequest>,
     note: Note,
     pos: (i32, i32),
     all_workspaces: bool,
@@ -158,7 +164,7 @@ async fn open_note_window(
 
     let dom = VirtualDom::new_with_props(
         StickyNote,
-        StickyNoteProps { id: note.id.clone(), notes },
+        StickyNoteProps { id: note.id.clone(), notes, tasks, passes },
     );
 
     let ctx: DesktopContext = window.new_window(dom, cfg).await;
@@ -289,6 +295,8 @@ pub fn reopen_note(mut registry: StickyRegistry, mut notes: Signal<NoteStore>, i
 pub fn setup_sticky_windows(
     window: DesktopContext,
     notes: Signal<NoteStore>,
+    tasks: Signal<TaskStore>,
+    passes: Coroutine<PipelineRequest>,
     config: Signal<Config>,
 ) -> StickyRegistry {
     let registry: StickyRegistry = use_signal(HashMap::new);
@@ -354,7 +362,8 @@ pub fn setup_sticky_windows(
 
             let window = window.clone();
             spawn(async move {
-                open_note_window(window, reg, notes, note, pos, all_workspaces).await;
+                open_note_window(window, reg, notes, tasks, passes, note, pos, all_workspaces)
+                    .await;
             });
         }
     });
