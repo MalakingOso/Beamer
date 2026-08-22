@@ -109,7 +109,6 @@ pub fn use_pipeline(
 
 /// Run one note's requested stages. Returns the note id so the caller can clear
 /// it from the in-flight set.
-#[allow(clippy::too_many_arguments)]
 async fn run_request(
     request: PipelineRequest,
     config: Signal<Config>,
@@ -249,7 +248,6 @@ async fn run_cleanup(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_extraction(
     id: &str,
     base_url: &str,

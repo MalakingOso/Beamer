@@ -26,49 +26,35 @@
 pub const CLEANUP_SYSTEM: &str = "You are a text normalizer for speech-to-text transcripts. The input begins with a control line specifying the styling, structure, and context settings; clean the transcript to match those settings and output only the cleaned text.";
 
 /// How formal the cleaned text should read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Styling {
     Casual,
     SemiCasual,
+    /// The publisher's suggested default: standard written English,
+    /// contractions kept, colloquialisms smoothed.
+    #[default]
     SemiFormal,
     Formal,
 }
 
 /// Whether the model may turn an enumeration into bullets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Structure {
     Prose,
+    /// The default. A dictated note that enumerates things should become
+    /// bullets — though in practice the model is conservative enough that it
+    /// usually returns prose anyway. See `agent_docs/local_inference.md`.
+    #[default]
     Lists,
 }
 
 /// Named `NoteContext` rather than `Context` so it does not collide with
 /// `anyhow::Context`, which is imported across this crate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NoteContext {
+    #[default]
     General,
     Email,
-}
-
-impl Default for Styling {
-    /// The publisher's suggested default: standard written English,
-    /// contractions kept, colloquialisms smoothed.
-    fn default() -> Self {
-        Self::SemiFormal
-    }
-}
-
-impl Default for Structure {
-    /// A dictated note that enumerates things should become bullets. The model
-    /// is conservative about it and wants 3+ items before it will.
-    fn default() -> Self {
-        Self::Lists
-    }
-}
-
-impl Default for NoteContext {
-    fn default() -> Self {
-        Self::General
-    }
 }
 
 impl Styling {
