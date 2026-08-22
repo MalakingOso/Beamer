@@ -2,19 +2,11 @@ use dioxus::prelude::*;
 
 use crate::config::Config;
 use crate::orchestrator::RecordingState;
-use crate::ui::components::{Card, Select};
+use crate::ui::components::{language_options, truncate_chars, Card, Select};
 use crate::ui::history::TranscriptionHistory;
 use crate::ui::icons::{IconCheck, IconCopy};
 
 /// Fixed content — built once as a static slice rather than reconstructed on every render.
-static LANGUAGE_OPTIONS: &[(&str, &str)] = &[
-    ("en", "English"),
-    ("es", "Spanish"),
-    ("fr", "French"),
-    ("de", "German"),
-    ("ja", "Japanese"),
-];
-
 static MODE_OPTIONS: &[(&str, &str)] = &[
     ("hold", "Push to Talk"),
     ("toggle", "Toggle"),
@@ -69,7 +61,7 @@ pub fn HomePage(props: HomePageProps) -> Element {
                     span { class: "card-label", "Language" }
                     Select {
                         value: props.config.read().transcription.language.clone(),
-                        options: LANGUAGE_OPTIONS.iter().map(|(v, l)| (v.to_string(), l.to_string())).collect::<Vec<_>>(),
+                        options: language_options(),
                         onchange: {
                             let mut config = props.config;
                             move |lang: String| {
@@ -112,11 +104,7 @@ fn RecentEntry(props: RecentEntryProps) -> Element {
         .map(|dt| dt.with_timezone(&chrono::Local).format("%H:%M").to_string())
         .unwrap_or_else(|_| "??:??".to_string());
 
-    let truncated = if props.text.len() > 80 {
-        format!("{}...", &props.text[..80])
-    } else {
-        props.text.clone()
-    };
+    let truncated = truncate_chars(&props.text, 80);
 
     let text_for_copy = props.text.clone();
 

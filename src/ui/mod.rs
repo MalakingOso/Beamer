@@ -1,16 +1,26 @@
 pub mod app;
 mod app_setup;
 pub mod components;
+pub mod fonts;
 pub mod history;
 pub mod history_page;
 pub mod home;
 pub mod icons;
 mod linux_integration;
+pub mod note_layout;
+pub mod notes_page;
 pub mod pill;
 pub mod settings;
 pub mod shell_indicator;
+pub mod shell_window;
 pub mod splash;
+pub mod sticky;
+pub mod sticky_chips;
+pub mod sticky_css;
+pub mod sticky_footer;
+pub mod sticky_windows;
 pub mod status_log;
+pub mod tasks_page;
 pub mod vocab_page;
 
 use std::path::PathBuf;

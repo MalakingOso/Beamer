@@ -110,6 +110,25 @@ pub fn IconBook(props: IconProps) -> Element {
     }
 }
 
+/// Phosphor "note" — a page with a folded corner. Sidebar entry for the notes
+/// board, matching the 256x256 currentColor convention of every icon here.
+#[component]
+pub fn IconNote(props: IconProps) -> Element {
+    let size = props.size.to_string();
+    rsx! {
+        svg {
+            class: "{props.class}",
+            width: "{size}",
+            height: "{size}",
+            view_box: "0 0 256 256",
+            fill: "currentColor",
+            path {
+                d: "M208,32H48A16,16,0,0,0,32,48V208a16,16,0,0,0,16,16H156.69A15.86,15.86,0,0,0,168,219.31L219.31,168A15.86,15.86,0,0,0,224,156.69V48A16,16,0,0,0,208,32ZM48,48H208v96H160a16,16,0,0,0-16,16v48H48ZM160,196.69V160h36.69Z"
+            }
+        }
+    }
+}
+
 #[component]
 pub fn IconMinus(props: IconProps) -> Element {
     let size = props.size.to_string();
@@ -173,6 +192,66 @@ pub fn IconCheck(props: IconProps) -> Element {
             fill: "currentColor",
             path {
                 d: "M229.66,77.66l-128,128a8,8,0,0,1-11.32,0l-56-56a8,8,0,0,1,11.32-11.32L96,188.69,218.34,66.34a8,8,0,0,1,11.32,11.32Z"
+            }
+        }
+    }
+}
+
+/// Phosphor "asterisk" — the note footer's model-pass affordance.
+///
+/// Deliberately not a wand, a robot or the word "Enhance". The cleanup pass is
+/// ambient: it has already run by the time you look at the note, and this is
+/// the quiet way to ask for it again or to run it on a note that never got it.
+/// A named button would advertise a machine the feature is trying not to put
+/// in front of you.
+#[component]
+pub fn IconAsterisk(props: IconProps) -> Element {
+    let size = props.size.to_string();
+    rsx! {
+        svg {
+            class: "{props.class}",
+            width: "{size}",
+            height: "{size}",
+            view_box: "0 0 256 256",
+            fill: "currentColor",
+            path {
+                d: "M214.86,180.12a8,8,0,0,1-11,2.74L136,142.13V216a8,8,0,0,1-16,0V142.13L52.12,182.86a8,8,0,1,1-8.23-13.72L112.45,128,43.89,86.86a8,8,0,1,1,8.23-13.72L120,113.87V40a8,8,0,0,1,16,0v73.87l67.88-40.73a8,8,0,1,1,8.23,13.72L143.55,128l68.56,41.14A8,8,0,0,1,214.86,180.12Z"
+            }
+        }
+    }
+}
+
+/// Phosphor "list-checks" — sidebar entry for the Tasks page.
+#[component]
+pub fn IconListChecks(props: IconProps) -> Element {
+    let size = props.size.to_string();
+    rsx! {
+        svg {
+            class: "{props.class}",
+            width: "{size}",
+            height: "{size}",
+            view_box: "0 0 256 256",
+            fill: "currentColor",
+            path {
+                d: "M224,128a8,8,0,0,1-8,8H128a8,8,0,0,1,0-16h88A8,8,0,0,1,224,128ZM128,72h88a8,8,0,0,0,0-16H128a8,8,0,0,0,0,16Zm88,112H128a8,8,0,0,0,0,16h88a8,8,0,0,0,0-16ZM82.34,42.34,56,68.69,45.66,58.34A8,8,0,0,0,34.34,69.66l16,16a8,8,0,0,0,11.32,0l32-32A8,8,0,0,0,82.34,42.34Zm0,64L56,132.69,45.66,122.34a8,8,0,0,0-11.32,11.32l16,16a8,8,0,0,0,11.32,0l32-32a8,8,0,0,0-11.32-11.32Zm0,64L56,196.69,45.66,186.34a8,8,0,0,0-11.32,11.32l16,16a8,8,0,0,0,11.32,0l32-32a8,8,0,0,0-11.32-11.32Z"
+            }
+        }
+    }
+}
+
+/// Phosphor "plus" — the notes board's new-typed-note affordance.
+#[component]
+pub fn IconPlus(props: IconProps) -> Element {
+    let size = props.size.to_string();
+    rsx! {
+        svg {
+            class: "{props.class}",
+            width: "{size}",
+            height: "{size}",
+            view_box: "0 0 256 256",
+            fill: "currentColor",
+            path {
+                d: "M224,128a8,8,0,0,1-8,8H136v80a8,8,0,0,1-16,0V136H40a8,8,0,0,1,0-16h80V40a8,8,0,0,1,16,0v80h80A8,8,0,0,1,224,128Z"
             }
         }
     }

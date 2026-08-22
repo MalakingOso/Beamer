@@ -6,10 +6,9 @@ pub(super) async fn clipboard_only_fallback(text: &str) -> anyhow::Result<()> {
         let mut clipboard = arboard::Clipboard::new()?;
         clipboard.set_text(&text)?;
 
-        // On Wayland, verify with wl-paste
+        // On Wayland, back arboard up with wl-copy
         #[cfg(not(target_os = "windows"))]
         if std::env::var("WAYLAND_DISPLAY").is_ok() {
-            // Also try wl-copy as backup
             if let Ok(mut child) = std::process::Command::new("wl-copy")
                 .arg("--type")
                 .arg("text/plain")
@@ -19,7 +18,10 @@ pub(super) async fn clipboard_only_fallback(text: &str) -> anyhow::Result<()> {
                 if let Some(mut stdin) = child.stdin.take() {
                     use std::io::Write;
                     let _ = stdin.write_all(text.as_bytes());
+                    // Dropping stdin closes the pipe so wl-copy forks.
                 }
+                // Reap the daemonizing parent so it doesn't linger as a zombie.
+                crate::injection::clipboard::reap_daemonized(child, "wl-copy");
             }
         }
 

@@ -1,18 +1,24 @@
 use anyhow::Result;
 use dioxus::prelude::*;
 use futures_util::StreamExt;
-use tokio::sync::mpsc;
 
 use crate::audio::{try_send_reserving, warn_channel_full, AudioPipeline, SendOutcome};
 use crate::config::Config;
-use crate::hotkey::HotkeyEvent;
-use crate::injection;
+use crate::hotkey::{CaptureMode, HotkeyEvent};
+use crate::notes::pipeline::PipelineRequest;
+use crate::notes::NoteStore;
 use crate::transcription::{self, TranscriptKind};
 use crate::ui::history::TranscriptionHistory;
 use crate::ui::status_log::{log_status, LogLevel, StatusLog};
 
 mod notify;
-use notify::{clipboard_only_fallback, show_notification};
+mod session;
+mod sink;
+use notify::show_notification;
+use session::{
+    buffer_tail_audio, send_commit_sentinel, stream_tail_audio, StopReason,
+    FINAL_TRANSCRIPT_TIMEOUT_MS,
+};
 
 /// Recording lifecycle state, drives both the pill overlay and home-page status dot.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -32,13 +38,21 @@ pub async fn run(
     mut last_injection: Signal<String>,
     mut history: Signal<TranscriptionHistory>,
     mut status_log: Signal<StatusLog>,
+    mut notes: Signal<NoteStore>,
+    mut active_mode: Signal<CaptureMode>,
+    note_passes: Coroutine<PipelineRequest>,
 ) {
     tracing::info!("Orchestrator started, waiting for hotkey events");
     log_status(&mut status_log, LogLevel::Info, "Orchestrator ready");
 
     while let Some(event) = hotkey_rx.next().await {
         match event {
-            HotkeyEvent::RecordStart => {
+            HotkeyEvent::RecordStart(capture_mode) => {
+                // Published BEFORE `handle_recording` sets `Recording`, so the
+                // indicator effect reads state and mode together on the same
+                // render. Set after, the pill would flash the dictation style
+                // for one frame before correcting itself.
+                active_mode.set(capture_mode);
                 if let Err(e) = handle_recording(
                     &config,
                     &mut rec_state,
@@ -46,6 +60,9 @@ pub async fn run(
                     &mut history,
                     &mut hotkey_rx,
                     &mut status_log,
+                    &mut notes,
+                    capture_mode,
+                    note_passes,
                 )
                 .await
                 {
@@ -69,6 +86,9 @@ async fn handle_recording(
     history: &mut Signal<TranscriptionHistory>,
     hotkey_rx: &mut UnboundedReceiver<HotkeyEvent>,
     status_log: &mut Signal<StatusLog>,
+    notes: &mut Signal<NoteStore>,
+    capture_mode: CaptureMode,
+    note_passes: Coroutine<PipelineRequest>,
 ) -> Result<()> {
     let cfg = config.read().clone();
     let backend = &cfg.transcription.backend;
@@ -90,8 +110,9 @@ async fn handle_recording(
 
     if backend == "elevenlabs_batch" || backend == "voxtral_batch" {
         return handle_batch_recording(
-            backend, &api_key, language, &backends, &cfg,
+            backend, &api_key, language, &backends, &cfg, config,
             rec_state, last_injection, history, hotkey_rx, status_log,
+            notes, capture_mode, note_passes,
         ).await;
     }
 
@@ -126,97 +147,22 @@ async fn handle_recording(
 
     rec_state.set(RecordingState::Recording);
     log_status(status_log, LogLevel::Info, "Recording started");
-    let did_pause = if cfg.recording.pause_media {
+    // Guard resumes on drop, so playback is restored on every exit path below
+    // — including the audio-lost one, which used to leave media paused.
+    let media_pause = if cfg.recording.pause_media {
         crate::media::pause_media_if_playing()
     } else {
-        false
+        None
     };
     crate::sounds::play_start_sound();
 
+    let mut stop_reason = StopReason::UserStop;
     loop {
         tokio::select! {
             hotkey_event = hotkey_rx.next() => {
                 match hotkey_event {
-                    Some(HotkeyEvent::RecordStop) | None => {
-                        crate::sounds::play_stop_sound();
-                        rec_state.set(RecordingState::Processing);
-                        if did_pause {
-                            crate::media::resume_media();
-                        }
-
-                        // Continue capturing audio briefly so the last word isn't clipped
-                        let tail = tokio::time::Instant::now()
-                            + tokio::time::Duration::from_millis(400);
-                        loop {
-                            tokio::select! {
-                                chunk = audio_rx.recv() => {
-                                    if let Some(bytes) = chunk {
-                                        if !bytes.is_empty() {
-                                            match try_send_reserving(&session.audio_tx, transcription::AUDIO_SENTINEL_RESERVE, bytes) {
-                                                SendOutcome::Sent => {}
-                                                SendOutcome::Full => warn_channel_full(&mut audio_drop_count, "Realtime audio_tx"),
-                                                // WebSocket reader task exited (e.g. connection
-                                                // dropped) — nobody left to receive; normal
-                                                // teardown, not backpressure.
-                                                SendOutcome::Closed => {}
-                                            }
-                                        }
-                                    }
-                                }
-                                _ = tokio::time::sleep_until(tail) => break,
-                            }
-                        }
-
-                        // Empty Vec signals the backend to commit/finalize.
-                        // `AUDIO_SENTINEL_RESERVE` slots are never touched by
-                        // the data path above (see try_send_reserving calls),
-                        // so this should always succeed while the WebSocket
-                        // reader task is still alive, even if the channel
-                        // was saturated with audio data moments ago. A
-                        // `Closed` error just means that task already exited
-                        // (e.g. the WebSocket dropped) — there's no backend
-                        // left to finalize, so it's dropped silently rather
-                        // than surfaced as an error.
-                        match session.audio_tx.try_send(Vec::new()) {
-                            Ok(()) => {}
-                            Err(mpsc::error::TrySendError::Full(_)) => {
-                                tracing::error!(
-                                    "End-of-audio sentinel dropped — audio_tx channel full despite {} reserved slots; backend will not receive a finalize signal",
-                                    transcription::AUDIO_SENTINEL_RESERVE
-                                );
-                                log_status(status_log, LogLevel::Error, "Failed to send end-of-audio signal — transcript may be incomplete");
-                            }
-                            Err(mpsc::error::TrySendError::Closed(_)) => {}
-                        }
-                        log_status(status_log, LogLevel::Info, "Sent commit, waiting for final transcript...");
-
-                        // Drain any remaining final transcripts before closing
-                        let deadline = tokio::time::Instant::now()
-                            + tokio::time::Duration::from_millis(2000);
-                        loop {
-                            tokio::select! {
-                                event = session.transcript_rx.recv() => {
-                                    match event {
-                                        Some(ev) => {
-                                            if let TranscriptKind::Final = ev.kind {
-                                                if !ev.text.trim().is_empty() {
-                                                    tracing::info!("[final] {}", ev.text);
-                                                    log_status(status_log, LogLevel::Info, format!("[final] {}", ev.text));
-                                                    do_injection(&ev.text, &backends, &paste_shortcut, last_injection, history, status_log).await;
-                                                }
-                                            }
-                                        }
-                                        None => break,
-                                    }
-                                }
-                                _ = tokio::time::sleep_until(deadline) => break,
-                            }
-                        }
-
-                        log_status(status_log, LogLevel::Info, "Recording stopped");
-                        break;
-                    }
-                    Some(HotkeyEvent::RecordStart) => {}
+                    Some(HotkeyEvent::RecordStop) | None => break,
+                    Some(HotkeyEvent::RecordStart(_)) => {}
                 }
             }
 
@@ -233,6 +179,7 @@ async fn handle_recording(
                     }
                     _ => {
                         log_status(status_log, LogLevel::Warn, "Audio channel closed");
+                        stop_reason = StopReason::AudioLost;
                         break;
                     }
                 }
@@ -245,7 +192,9 @@ async fn handle_recording(
                             if !ev.text.trim().is_empty() {
                                 tracing::info!("[final] {}", ev.text);
                                 log_status(status_log, LogLevel::Info, format!("[final] {}", ev.text));
-                                do_injection(&ev.text, &backends, &paste_shortcut, last_injection, history, status_log).await;
+                                sink::deliver(&ev.text, capture_mode, &backends, &paste_shortcut,
+                                        last_injection, history, status_log, notes, config,
+                                        note_passes).await;
                             }
                         }
                         TranscriptKind::Partial => {
@@ -271,7 +220,72 @@ async fn handle_recording(
         }
     }
 
+    // ─── Shared teardown ──────────────────────────────────────────────────
+    // Runs for BOTH exit reasons. All of this used to live only inside the
+    // `RecordStop` arm, so losing the mic mid-recording skipped the stop
+    // sound, left the pill stuck on "Recording", never resumed the media the
+    // session had paused, and discarded audio the backend had already
+    // received instead of committing it and injecting the transcript.
+    crate::sounds::play_stop_sound();
+    rec_state.set(RecordingState::Processing);
+    drop(media_pause);
+
+    // Keep capturing briefly so the last word isn't clipped. Pointless when
+    // the audio channel is what died, and `recv()` on a closed channel returns
+    // immediately, which would spin this loop hot for the full 400ms.
+    if stop_reason == StopReason::UserStop {
+        stream_tail_audio(&mut audio_rx, &session.audio_tx, &mut audio_drop_count).await;
+    }
+
+    send_commit_sentinel(&session.audio_tx, status_log);
+    log_status(status_log, LogLevel::Info, "Sent commit, waiting for final transcript...");
+    drain_final_transcripts(
+        &mut session, &backends, &paste_shortcut, last_injection, history, status_log,
+        notes, config, capture_mode, note_passes,
+    )
+    .await;
+
+    log_status(status_log, LogLevel::Info, "Recording stopped");
     Ok(())
+}
+
+/// Inject any remaining final transcripts, up to `FINAL_TRANSCRIPT_TIMEOUT_MS`
+/// or until the backend closes the stream.
+async fn drain_final_transcripts(
+    session: &mut transcription::RealtimeSession,
+    backends: &[String],
+    paste_shortcut: &str,
+    last_injection: &mut Signal<String>,
+    history: &mut Signal<TranscriptionHistory>,
+    status_log: &mut Signal<StatusLog>,
+    notes: &mut Signal<NoteStore>,
+    config: &Signal<Config>,
+    capture_mode: CaptureMode,
+    note_passes: Coroutine<PipelineRequest>,
+) {
+    let deadline = tokio::time::Instant::now()
+        + tokio::time::Duration::from_millis(FINAL_TRANSCRIPT_TIMEOUT_MS);
+    loop {
+        tokio::select! {
+            event = session.transcript_rx.recv() => {
+                match event {
+                    Some(ev) => {
+                        if let TranscriptKind::Final = ev.kind {
+                            if !ev.text.trim().is_empty() {
+                                tracing::info!("[final] {}", ev.text);
+                                log_status(status_log, LogLevel::Info, format!("[final] {}", ev.text));
+                                sink::deliver(&ev.text, capture_mode, backends, paste_shortcut,
+                                        last_injection, history, status_log, notes, config,
+                                        note_passes).await;
+                            }
+                        }
+                    }
+                    None => break,
+                }
+            }
+            _ = tokio::time::sleep_until(deadline) => break,
+        }
+    }
 }
 
 /// Drive one batch recording session: capture mic → buffer all PCM → POST to ElevenLabs batch API.
@@ -281,11 +295,15 @@ async fn handle_batch_recording(
     language: &str,
     backends: &[String],
     cfg: &Config,
+    config: &Signal<Config>,
     rec_state: &mut Signal<RecordingState>,
     last_injection: &mut Signal<String>,
     history: &mut Signal<TranscriptionHistory>,
     hotkey_rx: &mut UnboundedReceiver<HotkeyEvent>,
     status_log: &mut Signal<StatusLog>,
+    notes: &mut Signal<NoteStore>,
+    capture_mode: CaptureMode,
+    note_passes: Coroutine<PipelineRequest>,
 ) -> Result<()> {
     let pipeline = match AudioPipeline::new() {
         Ok(p) => p,
@@ -299,42 +317,23 @@ async fn handle_batch_recording(
 
     rec_state.set(RecordingState::Recording);
     log_status(status_log, LogLevel::Info, "Recording started (batch mode)");
-    let did_pause = if cfg.recording.pause_media {
+    // Guard resumes on drop — see the realtime path for why this isn't a bool.
+    let media_pause = if cfg.recording.pause_media {
         crate::media::pause_media_if_playing()
     } else {
-        false
+        None
     };
     crate::sounds::play_start_sound();
 
     // Collect all PCM audio into a buffer
     let mut pcm_buffer: Vec<u8> = Vec::new();
+    let mut stop_reason = StopReason::UserStop;
     loop {
         tokio::select! {
             hotkey_event = hotkey_rx.next() => {
                 match hotkey_event {
-                    Some(HotkeyEvent::RecordStop) | None => {
-                        crate::sounds::play_stop_sound();
-                        rec_state.set(RecordingState::Processing);
-                        if did_pause {
-                            crate::media::resume_media();
-                        }
-
-                        // Capture 400ms tail audio so the last word isn't clipped
-                        let tail = tokio::time::Instant::now()
-                            + tokio::time::Duration::from_millis(400);
-                        loop {
-                            tokio::select! {
-                                chunk = audio_rx.recv() => {
-                                    if let Some(bytes) = chunk {
-                                        pcm_buffer.extend_from_slice(&bytes);
-                                    }
-                                }
-                                _ = tokio::time::sleep_until(tail) => break,
-                            }
-                        }
-                        break;
-                    }
-                    Some(HotkeyEvent::RecordStart) => {}
+                    Some(HotkeyEvent::RecordStop) | None => break,
+                    Some(HotkeyEvent::RecordStart(_)) => {}
                 }
             }
             chunk = audio_rx.recv() => {
@@ -344,11 +343,23 @@ async fn handle_batch_recording(
                     }
                     _ => {
                         log_status(status_log, LogLevel::Warn, "Audio channel closed");
+                        stop_reason = StopReason::AudioLost;
                         break;
                     }
                 }
             }
         }
+    }
+
+    // Shared teardown — runs for both exit reasons (see the realtime path).
+    crate::sounds::play_stop_sound();
+    rec_state.set(RecordingState::Processing);
+    drop(media_pause);
+
+    // Capture tail audio so the last word isn't clipped. Skipped when the
+    // audio channel is what died — `recv()` would return immediately and spin.
+    if stop_reason == StopReason::UserStop {
+        buffer_tail_audio(&mut audio_rx, &mut pcm_buffer).await;
     }
 
     if pcm_buffer.is_empty() {
@@ -403,7 +414,8 @@ async fn handle_batch_recording(
                 format!("[batch] {:.1}s round-trip: {}", elapsed.as_secs_f64(), text),
             );
             if !text.trim().is_empty() {
-                do_injection(&text, backends, &cfg.injection.paste_shortcut, last_injection, history, status_log).await;
+                sink::deliver(&text, capture_mode, backends, &cfg.injection.paste_shortcut,
+                        last_injection, history, status_log, notes, config, note_passes).await;
             }
         }
         Err(e) => {
@@ -415,43 +427,4 @@ async fn handle_batch_recording(
 
     log_status(status_log, LogLevel::Info, "Recording stopped");
     Ok(())
-}
-
-/// Inject transcribed text into the focused window using the configured fallback chain.
-async fn do_injection(
-    text: &str,
-    backends: &[String],
-    paste_shortcut: &str,
-    last_injection: &mut Signal<String>,
-    history: &mut Signal<TranscriptionHistory>,
-    status_log: &mut Signal<StatusLog>,
-) {
-    match injection::inject_text(text, backends, paste_shortcut).await {
-        Ok(result) => {
-            let status = format!("{}: {}", result.method, result.target_info);
-            tracing::info!("Injected via {}", status);
-            log_status(status_log, LogLevel::Info, format!("Injected via {}", status));
-            last_injection.set(status);
-        }
-        Err(e) => {
-            tracing::error!("Injection failed: {}, trying clipboard-only fallback", e);
-            // Last resort: copy to clipboard and notify user to paste manually
-            match clipboard_only_fallback(text).await {
-                Ok(()) => {
-                    let msg = "Copied to clipboard — press Ctrl+V to paste";
-                    tracing::info!("{}", msg);
-                    log_status(status_log, LogLevel::Info, msg.to_string());
-                    last_injection.set(msg.to_string());
-                    show_notification("Beamer", msg);
-                }
-                Err(cb_err) => {
-                    tracing::error!("Clipboard fallback also failed: {}", cb_err);
-                    log_status(status_log, LogLevel::Error, format!("Injection failed: {}", e));
-                    last_injection.set(format!("Failed: {}", e));
-                }
-            }
-        }
-    }
-
-    history.write().append(text.to_string());
 }

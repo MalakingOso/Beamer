@@ -48,14 +48,24 @@ pub struct UiaResult {
 /// COM is initialized and torn down per call because this runs on a
 /// `spawn_blocking` thread that may be recycled by the tokio thread pool.
 pub fn try_inject_set_value(text: &str) -> Result<UiaResult> {
-    unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED).ok();
+    // `CoUninitialize` must balance exactly the references this call took.
+    // `S_OK` and `S_FALSE` (already initialized in the same apartment) both
+    // increment and so must be released; `RPC_E_CHANGED_MODE` means the thread
+    // is already initialized in a *different* apartment and no reference was
+    // taken — releasing anyway would decrement someone else's, potentially
+    // tearing down COM out from under whoever set up this thread.
+    let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+    let we_initialized = hr.is_ok();
+    if !we_initialized {
+        tracing::debug!("UIA: COM already initialized in another apartment ({:?})", hr);
     }
 
     let result = unsafe { try_set_value_inner(text) };
 
-    unsafe {
-        CoUninitialize();
+    if we_initialized {
+        unsafe {
+            CoUninitialize();
+        }
     }
 
     result

@@ -1,7 +1,9 @@
 pub mod api_keys_card;
 pub mod appearance_card;
 pub mod debug_card;
+pub mod hotkey_picker;
 pub mod injection_card;
+pub mod local_ai_card;
 pub mod recording_card;
 pub mod transcription_card;
 pub mod update_card;
@@ -13,6 +15,7 @@ use self::api_keys_card::ApiKeysCard;
 use self::appearance_card::AppearanceCard;
 use self::debug_card::DebugCard;
 use self::injection_card::InjectionCard;
+use self::local_ai_card::LocalAiCard;
 use self::recording_card::RecordingCard;
 use self::transcription_card::TranscriptionCard;
 use self::update_card::UpdateCard;
@@ -51,6 +54,8 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                 hotkey: config.read().recording.hotkey.clone(),
                 mode: config.read().recording.mode.clone(),
                 pause_media: config.read().recording.pause_media,
+                note_hotkey: config.read().recording.note_hotkey.clone(),
+                note_mode: config.read().recording.note_mode.clone(),
                 on_hotkey_change: move |hotkey: String| {
                     save_config(config, |c| c.recording.hotkey = hotkey);
                 },
@@ -59,6 +64,12 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                 },
                 on_pause_media_change: move |v: bool| {
                     save_config(config, |c| c.recording.pause_media = v);
+                },
+                on_note_hotkey_change: move |hotkey: String| {
+                    save_config(config, |c| c.recording.note_hotkey = hotkey);
+                },
+                on_note_mode_change: move |mode: String| {
+                    save_config(config, |c| c.recording.note_mode = mode);
                 },
             }
 
@@ -83,6 +94,26 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                 mistral_key: mistral_key.read().clone(),
                 on_mistral_change: move |key: String| {
                     mistral_key.set(key);
+                },
+            }
+
+            LocalAiCard {
+                enabled: config.read().llm.enabled,
+                base_url: config.read().llm.base_url.clone(),
+                request_timeout_ms: config.read().llm.request_timeout_ms,
+                cleanup_model: config.read().llm.cleanup.model.clone(),
+                extract_model: config.read().llm.extract.model.clone(),
+                on_enabled_change: move |v: bool| {
+                    save_config(config, |c| c.llm.enabled = v);
+                },
+                on_base_url_change: move |url: String| {
+                    save_config(config, |c| c.llm.base_url = url);
+                },
+                on_cleanup_model_change: move |m: String| {
+                    save_config(config, |c| c.llm.cleanup.model = m);
+                },
+                on_extract_model_change: move |m: String| {
+                    save_config(config, |c| c.llm.extract.model = m);
                 },
             }
 

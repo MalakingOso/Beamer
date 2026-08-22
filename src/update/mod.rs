@@ -60,9 +60,20 @@ pub fn apply_update_blocking() -> Result<()> {
 }
 
 /// Spawn the updated binary and exit the current process.
+///
+/// The single-instance guard is released *before* the spawn: the child runs
+/// `ensure_single_instance()` as the first thing in `main`, and while this
+/// process still held the guard the child would see it (our PID alive in the
+/// lockfile on Linux, `ERROR_ALREADY_EXISTS` on the mutex on Windows), log
+/// "Another instance is already running" and exit. The parent then exited too,
+/// so "Restart Now" made Beamer vanish instead of relaunching.
 pub fn restart_app() -> ! {
     let exe = std::env::current_exe().expect("Failed to get current exe path");
-    let _ = std::process::Command::new(exe).spawn();
+    crate::release_single_instance();
+    match std::process::Command::new(&exe).spawn() {
+        Ok(child) => tracing::info!("Relaunched Beamer as pid {}", child.id()),
+        Err(e) => tracing::error!("Failed to relaunch {:?}: {}", exe, e),
+    }
     std::process::exit(0);
 }
 

@@ -5,7 +5,9 @@ mod hotkey;
 mod injection;
 #[cfg(not(target_os = "windows"))]
 mod install;
+mod llm;
 mod media;
+mod notes;
 mod orchestrator;
 mod sounds;
 mod tray;
@@ -55,6 +57,9 @@ fn main() {
 // ─── Single-instance guard ────────────────────────────────────────────────────
 
 /// Prevent multiple Beamer instances. Returns false if another instance is already running.
+///
+/// The guard this takes is process-wide and must be handed off explicitly
+/// before spawning a successor — see [`release_single_instance`].
 fn ensure_single_instance() -> bool {
     #[cfg(target_os = "windows")]
     {
@@ -66,22 +71,87 @@ fn ensure_single_instance() -> bool {
     }
 }
 
+/// Give up this process's claim on the single-instance guard.
+///
+/// Must be called before spawning a replacement Beamer that will immediately
+/// run `ensure_single_instance()` itself — otherwise the successor sees *this*
+/// process still holding the guard and exits, which is what used to make
+/// "Restart Now" after an update silently kill the app instead of relaunching
+/// it (`update::restart_app` spawns the child while the parent is still
+/// alive). Also called on the tray Quit path so a stale lockfile never
+/// outlives the process.
+///
+/// Idempotent: calling it twice, or without ever having acquired the guard, is
+/// a no-op.
+pub fn release_single_instance() {
+    #[cfg(target_os = "windows")]
+    {
+        release_single_instance_windows();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        release_single_instance_lockfile();
+    }
+}
+
+/// Raw `HANDLE` value for the single-instance mutex, or 0 when not held.
+/// Stored as a plain integer because `HANDLE` is a raw-pointer newtype and so
+/// isn't `Sync`; the value is only ever produced by `CreateMutexW` on the main
+/// thread and consumed by `CloseHandle`, so round-tripping it through an
+/// atomic is sound.
+#[cfg(target_os = "windows")]
+static INSTANCE_MUTEX: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
 #[cfg(target_os = "windows")]
 fn ensure_single_instance_windows() -> bool {
-    use windows::Win32::System::Threading::CreateMutexW;
+    use std::sync::atomic::Ordering;
     use windows::core::w;
+    use windows::Win32::System::Threading::CreateMutexW;
 
     unsafe {
         let result = CreateMutexW(None, true, w!("Beamer_SingleInstance"));
         match result {
-            Ok(_) => {
+            Ok(handle) => {
+                // GetLastError must be read before anything else can clobber it.
                 let last_error = windows::Win32::Foundation::GetLastError();
-                last_error != windows::Win32::Foundation::ERROR_ALREADY_EXISTS
+                if last_error == windows::Win32::Foundation::ERROR_ALREADY_EXISTS {
+                    // Someone else owns it; close our (non-owning) handle so we
+                    // don't leak it, and refuse to start.
+                    let _ = windows::Win32::Foundation::CloseHandle(handle);
+                    false
+                } else {
+                    INSTANCE_MUTEX.store(handle.0 as isize, Ordering::SeqCst);
+                    true
+                }
             }
             Err(_) => false,
         }
     }
 }
+
+#[cfg(target_os = "windows")]
+fn release_single_instance_windows() {
+    use std::sync::atomic::Ordering;
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::System::Threading::ReleaseMutex;
+
+    let raw = INSTANCE_MUTEX.swap(0, Ordering::SeqCst);
+    if raw == 0 {
+        return;
+    }
+    let handle = HANDLE(raw as *mut std::ffi::c_void);
+    unsafe {
+        // Release ownership first (we passed bInitialOwner = true), then close.
+        let _ = ReleaseMutex(handle);
+        let _ = CloseHandle(handle);
+    }
+    tracing::info!("Released single-instance mutex");
+}
+
+/// Path of the lockfile this process owns, or `None` when the guard isn't held.
+#[cfg(not(target_os = "windows"))]
+static INSTANCE_LOCKFILE: std::sync::Mutex<Option<std::path::PathBuf>> =
+    std::sync::Mutex::new(None);
 
 #[cfg(not(target_os = "windows"))]
 fn ensure_single_instance_lockfile() -> bool {
@@ -98,8 +168,34 @@ fn ensure_single_instance_lockfile() -> bool {
     }
 
     // Write our PID — best effort, don't fail startup if this doesn't work
-    let _ = std::fs::write(&lock_path, format!("{}", std::process::id()));
+    if std::fs::write(&lock_path, format!("{}", std::process::id())).is_ok() {
+        *INSTANCE_LOCKFILE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(lock_path);
+    }
     true
+}
+
+#[cfg(not(target_os = "windows"))]
+fn release_single_instance_lockfile() {
+    let taken = INSTANCE_LOCKFILE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+    if let Some(path) = taken {
+        // Only remove it if it's still ours — a successor that already
+        // acquired the guard must not have its lockfile deleted out from
+        // under it.
+        let still_ours = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|c| c.trim().parse::<u32>().ok())
+            .map(|pid| pid == std::process::id())
+            .unwrap_or(false);
+        if still_ours {
+            let _ = std::fs::remove_file(&path);
+            tracing::info!("Released single-instance lockfile at {:?}", path);
+        }
+    }
 }
 
 // ─── Auto-start ───────────────────────────────────────────────────────────────

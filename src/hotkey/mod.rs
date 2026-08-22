@@ -1,7 +1,20 @@
+/// Which sink a recording session's final transcript should reach.
+///
+/// Beamer has two dictation hotkeys that share the entire audio and ASR
+/// pipeline and differ only in what happens to the finished text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CaptureMode {
+    /// Inject into the focused input field — the original behaviour.
+    #[default]
+    Inject,
+    /// Create a sticky note.
+    Note,
+}
+
 /// Sent from the hotkey listener to the orchestrator coroutine.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HotkeyEvent {
-    RecordStart,
+    RecordStart(CaptureMode),
     RecordStop,
 }
 
@@ -116,3 +129,32 @@ mod linux_hotkey;
 #[cfg(not(target_os = "windows"))]
 #[allow(unused_imports)]
 pub use linux_hotkey::{start_ll_hook, HotkeyHandle};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn record_start_carries_its_capture_mode() {
+        let inject = HotkeyEvent::RecordStart(CaptureMode::Inject);
+        let note = HotkeyEvent::RecordStart(CaptureMode::Note);
+
+        assert_ne!(
+            inject, note,
+            "the orchestrator must be able to tell the two hotkeys apart"
+        );
+        match note {
+            HotkeyEvent::RecordStart(mode) => assert_eq!(mode, CaptureMode::Note),
+            HotkeyEvent::RecordStop => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn capture_mode_defaults_to_inject() {
+        assert_eq!(
+            CaptureMode::default(),
+            CaptureMode::Inject,
+            "an unconfigured note hotkey must never silently divert dictation"
+        );
+    }
+}

@@ -3,7 +3,10 @@
     "allow": [
       "Skill(commit-commands:commit)",
       "WebFetch(domain:elevenlabs.io)",
-      "Bash(dbus-send --session --dest=org.freedesktop.DBus --type=method_call --print-reply /org/freedesktop/DBus org.freedesktop.DBus.ListNames)"
+      "Bash(dbus-send --session --dest=org.freedesktop.DBus --type=method_call --print-reply /org/freedesktop/DBus org.freedesktop.DBus.ListNames)",
+      "Bash(python3 -)",
+      "Bash(git add *)",
+      "Bash(git commit *)"
     ]
   }
 }

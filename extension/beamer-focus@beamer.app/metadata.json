@@ -4,5 +4,5 @@
   "description": "Beamer dictation helper: exposes the focused window's app id, types transcribed text via a virtual keyboard, and shows the recording indicator pill. Bundled with the Beamer dictation app.",
   "shell-version": ["48", "49", "50"],
   "url": "https://github.com/berkley/Beamer",
-  "version": 3
+  "version": 5
 }

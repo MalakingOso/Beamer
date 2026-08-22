@@ -264,3 +264,12 @@ Storing API keys in plaintext config files is a common security mistake. Beamer 
 ### Single-instance enforcement
 
 Beamer creates a named Win32 kernel mutex (`Beamer_SingleInstance`) at startup. If the mutex already exists, the process exits immediately. This prevents multiple instances from fighting over the global hotkey registration and tray icon.
+
+## Model credits
+
+Beamer's on-device transcript cleanup uses "S1-mini" by "Superwhisper"
+(https://huggingface.co/superwhisper/s1-mini), used under the Apache License
+2.0 with the additional naming term recorded in `licenses/S1-mini-LICENSE.txt`.
+
+Task extraction uses Google's Gemma 4 (`gemma-4-E4B-it`), used under the terms
+in `licenses/gemma-4-LICENSE.txt`.

@@ -4,16 +4,25 @@ use dioxus::desktop::use_window;
 use dioxus::prelude::*;
 
 use crate::config::Config;
-use crate::hotkey::{start_ll_hook, HotkeyConfig, HotkeyEvent};
+use crate::hotkey::{start_ll_hook, CaptureMode, HotkeyConfig, HotkeyEvent};
+use crate::notes::pipeline;
+use crate::notes::task_store::TaskStore;
+use crate::notes::NoteStore;
 use crate::orchestrator::{self, RecordingState};
 use crate::update::UpdateStatus;
 use crate::ui::app_setup;
+use crate::ui::sticky_windows;
 #[cfg(target_os = "linux")]
 use crate::ui::linux_integration;
 use crate::ui::history::TranscriptionHistory;
 use crate::ui::history_page::HistoryPage;
 use crate::ui::home::HomePage;
-use crate::ui::icons::{IconBook, IconClockCounterClockwise, IconGear, IconHouse, IconMinus, IconX};
+use crate::ui::icons::{
+    IconBook, IconClockCounterClockwise, IconGear, IconHouse, IconListChecks, IconMinus,
+    IconNote, IconX,
+};
+use crate::ui::notes_page::NotesPage;
+use crate::ui::tasks_page::TasksPage;
 use crate::ui::vocab_page::VocabPage;
 use crate::ui::settings::SettingsPage;
 use crate::ui::status_log::StatusLog;
@@ -22,6 +31,8 @@ use crate::ui::status_log::StatusLog;
 pub(super) enum Page {
     Home,
     History,
+    Notes,
+    Tasks,
     Vocab,
     Settings,
 }
@@ -45,9 +56,13 @@ pub fn App() -> Element {
     let rec_state = use_signal(RecordingState::default);
     let last_injection = use_signal(|| "No injection yet".to_string());
     let history = use_signal(TranscriptionHistory::load);
+    let notes = use_signal(NoteStore::load);
+    let tasks = use_signal(TaskStore::load);
     let config = use_signal(|| Config::load().unwrap_or_default());
     let status_log = use_signal(StatusLog::new);
     let update_status = use_signal(UpdateStatus::default);
+    // Which hotkey started the current recording, so the pill can say so.
+    let active_mode = use_signal(CaptureMode::default);
 
     // Recording pill window — small, transparent, click-through, always-on-top.
     // Linux: the pill is replaced by an AppIndicator tray-icon swap (see
@@ -60,7 +75,13 @@ pub fn App() -> Element {
     // Linux: swap the tray icon to reflect recording state and pump levels
     // into the shell pill (mirrors Handy's behavior).
     #[cfg(target_os = "linux")]
-    linux_integration::setup_linux_integration(rec_state, config);
+    linux_integration::setup_linux_integration(rec_state, active_mode, config);
+
+    // The model passes live here rather than in the window that asked for
+    // them: `App()`'s scope outlives every sticky, so closing a note mid-pass
+    // cannot cancel it. Created before the orchestrator so its handle can be
+    // threaded into the capture path.
+    let note_passes = pipeline::use_pipeline(config, notes, tasks, status_log);
 
     let coroutine = use_coroutine(move |rx: UnboundedReceiver<HotkeyEvent>| {
         orchestrator::run(
@@ -70,6 +91,9 @@ pub fn App() -> Element {
             last_injection,
             history,
             status_log,
+            notes,
+            active_mode,
+            note_passes,
         )
     });
 
@@ -80,9 +104,10 @@ pub fn App() -> Element {
         let cfg = config.peek();
         let initial = HotkeyConfig::parse(&cfg.recording.hotkey, cfg.recording.mode == "toggle")
             .unwrap_or_default();
+        let note_binding = cfg.recording.note_hotkey_config();
         drop(cfg);
 
-        let handle = Rc::new(start_ll_hook(initial, hook_tx));
+        let handle = Rc::new(start_ll_hook(initial, note_binding, hook_tx));
 
         // Bridge hook events to the orchestrator coroutine
         spawn(async move {
@@ -100,15 +125,25 @@ pub fn App() -> Element {
         if let Some(new_config) =
             HotkeyConfig::parse(&cfg.recording.hotkey, cfg.recording.mode == "toggle")
         {
-            hotkey_handle.update_config(new_config);
+            hotkey_handle.update_configs(new_config, cfg.recording.note_hotkey_config());
         }
     });
+
+    // Sticky note windows: one effect keeps the set of open windows matching
+    // the set of notes that should be showing. Covers both a note dictated just
+    // now and notes restored from disk at startup.
+    let sticky_registry = sticky_windows::setup_sticky_windows(window.clone(), notes, tasks, note_passes, config);
+
+    // Coalesce per-keystroke note edits into one write. `do_note_capture`
+    // flushes a newly captured transcript immediately — that one must never be
+    // lost — so this tick only ever carries body/colour/geometry edits.
+    app_setup::setup_notes_flush(notes, tasks);
 
     // Background update check on startup (3s delay to keep launch snappy)
     app_setup::setup_update_check(config, update_status);
 
     // Tray menu clicks + tray icon left-click (toggle window visibility).
-    app_setup::setup_menu_handlers(&items, window.clone(), current_page, last_injection, config, update_status);
+    app_setup::setup_menu_handlers(&items, window.clone(), current_page, last_injection, config, update_status, notes, tasks);
     app_setup::setup_tray_click_handler(window.clone());
 
     let page = *current_page.read();
@@ -138,6 +173,19 @@ pub fn App() -> Element {
                             class: if page == Page::History { "sidebar-icon active" } else { "sidebar-icon" },
                             onclick: move |_| current_page.set(Page::History),
                             IconClockCounterClockwise {}
+                        }
+                        button {
+                            class: if page == Page::Notes { "sidebar-icon active" } else { "sidebar-icon" },
+                            onclick: move |_| current_page.set(Page::Notes),
+                            IconNote {}
+                        }
+                        button {
+                            // Directly after Notes: a task is only ever reached
+                            // through the note that produced it, so the two
+                            // read as one pair.
+                            class: if page == Page::Tasks { "sidebar-icon active" } else { "sidebar-icon" },
+                            onclick: move |_| current_page.set(Page::Tasks),
+                            IconListChecks {}
                         }
                         button {
                             class: if page == Page::Vocab { "sidebar-icon active" } else { "sidebar-icon" },
@@ -197,6 +245,12 @@ pub fn App() -> Element {
                     },
                     Page::History => rsx! {
                         HistoryPage { history }
+                    },
+                    Page::Notes => rsx! {
+                        NotesPage { notes, config, registry: sticky_registry }
+                    },
+                    Page::Tasks => rsx! {
+                        TasksPage { notes, tasks, registry: sticky_registry }
                     },
                     Page::Vocab => rsx! {
                         VocabPage {}

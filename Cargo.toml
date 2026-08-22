@@ -15,6 +15,15 @@ path = "src/bin/ws_test.rs"
 name = "voxtral_test"
 path = "src/bin/voxtral_test.rs"
 
+[[bin]]
+name = "task_eval"
+path = "src/bin/task_eval.rs"
+# The `#[path]`-included modules carry their own `#[cfg(test)] mod tests`, so
+# without this `cargo test` compiles and runs them a second time under this
+# binary. Those are duplicates, not coverage, and counting them twice overstates
+# the suite. `cargo build` still type-checks this file.
+test = false
+
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 cpal = "0.15"

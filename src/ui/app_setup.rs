@@ -13,6 +13,8 @@ use dioxus::desktop::{Config as DesktopConfig, DesktopContext, WindowBuilder};
 use dioxus::prelude::*;
 
 use crate::config::Config;
+use crate::notes::task_store::TaskStore;
+use crate::notes::NoteStore;
 #[cfg(not(target_os = "linux"))]
 use crate::orchestrator::RecordingState;
 use crate::tray::{self, TrayMenuItems};
@@ -178,7 +180,16 @@ pub(super) fn setup_recording_pill(
                     .with_data_directory(super::webview_data_dir())
                     .with_window(builder)
                     .with_background_color((0, 0, 0, 0))
-                    .with_custom_head(format!(r#"<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&display=swap" rel="stylesheet"><style>body{{opacity:0;transition:opacity 0.15s ease;}}{}</style><script>{}</script>"#, PILL_CSS, PILL_JS))
+                    // DM Mono is inlined from the bundled woff2 rather than
+                    // fetched from fonts.googleapis.com: no outbound request
+                    // from a local dictation app, and the pill renders in the
+                    // right typeface offline.
+                    .with_custom_head(format!(
+                        r#"<style>{}body{{opacity:0;transition:opacity 0.15s ease;}}{}</style><script>{}</script>"#,
+                        crate::assets::dm_mono_face_css(),
+                        PILL_CSS,
+                        PILL_JS
+                    ))
                     .with_exits_when_last_window_closes(false);
 
                 let dom = VirtualDom::new(RecordingPill);
@@ -239,6 +250,38 @@ pub(super) fn setup_recording_pill(
     });
 }
 
+/// How often the notes store is checked for pending edits.
+///
+/// Note bodies are edited per keystroke; writing the whole file on each one
+/// would be pathological, so edits coalesce into at most one write per tick.
+const NOTES_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Drive the debounced writes for both note stores.
+///
+/// `is_dirty()` is checked through `peek()` rather than `read()` on purpose: a
+/// `write()` on every tick would notify every subscriber — including each open
+/// sticky window — twice a second, whether or not anything had changed.
+///
+/// Tasks ride the same tick. Their two *decisions* flush inline, since a lost
+/// decision is lost eval signal — but ticking a task done does not, and without
+/// this that checkbox would live in memory until some later accept or dismiss
+/// happened to write the file.
+pub(super) fn setup_notes_flush(mut notes: Signal<NoteStore>, mut tasks: Signal<TaskStore>) {
+    use_hook(move || {
+        spawn(async move {
+            loop {
+                tokio::time::sleep(NOTES_FLUSH_INTERVAL).await;
+                if notes.peek().is_dirty() {
+                    notes.write().flush_if_dirty();
+                }
+                if tasks.peek().is_dirty() {
+                    tasks.write().flush_if_dirty();
+                }
+            }
+        });
+    });
+}
+
 /// Background update check on startup (3s delay to keep launch snappy).
 pub(super) fn setup_update_check(config: Signal<Config>, mut update_status: Signal<UpdateStatus>) {
     use_hook({
@@ -286,6 +329,8 @@ pub(super) fn setup_menu_handlers(
     last_injection: Signal<String>,
     config: Signal<Config>,
     mut update_status: Signal<UpdateStatus>,
+    mut notes: Signal<NoteStore>,
+    mut tasks: Signal<TaskStore>,
 ) {
     use_muda_event_handler({
         let home_id = items.home.id().clone();
@@ -299,6 +344,15 @@ pub(super) fn setup_menu_handlers(
         move |event| {
             if event.id == quit_id {
                 tracing::info!("Quit menu item clicked — exiting");
+                // `process::exit` below skips the 500ms flush tick along with
+                // every destructor, so any note edit still sitting in memory
+                // has to be written out here or it dies with the process.
+                notes.write().flush_if_dirty();
+                tasks.write().flush_if_dirty();
+                // `process::exit` skips destructors, so the single-instance
+                // guard has to be handed back explicitly or the lockfile
+                // outlives us.
+                crate::release_single_instance();
                 std::process::exit(0);
             } else if event.id == home_id {
                 current_page.set(Page::Home);

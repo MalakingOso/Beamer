@@ -1,200 +1,53 @@
 use dioxus::prelude::*;
-use crate::ui::components::{Card, Select, Toggle};
+
+use crate::ui::components::{Card, Toggle};
+use crate::ui::settings::hotkey_picker::{CaptureModeRadio, HotkeyPicker};
+
+/// Chord proposed when note capture is switched on from the UI.
+///
+/// Deliberately NOT the serde default for `note_hotkey`, which stays empty so
+/// no chord is ever stolen from another app by a config file appearing. This
+/// is only a starting point for a user who has explicitly asked for the
+/// feature, and it is theirs to change from the picker right below the switch.
+///
+/// Ctrl+Alt+Space, not Ctrl+Super+Space: dictation's `Ctrl+Super` is a strict
+/// prefix of the latter, so pressing Ctrl then Super would start a dictation
+/// recording before Space was ever reached. See `linux_hotkey::matching_binding`.
+const DEFAULT_NOTE_HOTKEY: &str = "Ctrl+Alt+Space";
 
 #[derive(Props, Clone, PartialEq)]
 pub struct RecordingCardProps {
     hotkey: String,
     mode: String,
     pause_media: bool,
+    /// Empty means note capture is off entirely — no binding is registered.
+    note_hotkey: String,
+    note_mode: String,
     on_hotkey_change: EventHandler<String>,
     on_mode_change: EventHandler<String>,
     on_pause_media_change: EventHandler<bool>,
+    on_note_hotkey_change: EventHandler<String>,
+    on_note_mode_change: EventHandler<String>,
 }
-
-/// Split "Ctrl+Space" into (ctrl, alt, shift, win, key).
-fn parse_hotkey_parts(hotkey: &str) -> (bool, bool, bool, bool, String) {
-    let mut ctrl = false;
-    let mut alt = false;
-    let mut shift = false;
-    let mut win = false;
-    let mut key = String::new();
-
-    for part in hotkey.split('+') {
-        match part.trim().to_uppercase().as_str() {
-            "CTRL" | "CONTROL" => ctrl = true,
-            "ALT" | "OPTION" => alt = true,
-            "SHIFT" => shift = true,
-            "SUPER" | "WIN" | "CMD" | "COMMAND" | "META" => win = true,
-            _ => key = normalize_key(part.trim()),
-        }
-    }
-
-    // When Win is active, it IS the trigger — no separate key needed.
-    // Otherwise default to Space.
-    if key.is_empty() && !win {
-        key = "Space".to_string();
-    }
-
-    (ctrl, alt, shift, win, key)
-}
-
-/// Reassemble modifier+key into a hotkey string.
-/// Uses "Super" for Win key. Omits key when Win is the trigger.
-fn format_hotkey(ctrl: bool, alt: bool, shift: bool, win: bool, key: &str) -> String {
-    let mut parts = Vec::new();
-    if ctrl { parts.push("Ctrl"); }
-    if alt { parts.push("Alt"); }
-    if shift { parts.push("Shift"); }
-    if win { parts.push("Super"); }
-    if !key.is_empty() {
-        parts.push(key);
-    }
-    parts.join("+")
-}
-
-/// Normalize long-form key names to what global_hotkey expects.
-fn normalize_key(key: &str) -> String {
-    let upper = key.to_uppercase();
-    match upper.as_str() {
-        "ARROWUP" => "Up".into(),
-        "ARROWDOWN" => "Down".into(),
-        "ARROWLEFT" => "Left".into(),
-        "ARROWRIGHT" => "Right".into(),
-        "PAGEUP" => "PageUp".into(),
-        "PAGEDOWN" => "PageDown".into(),
-        s if s.starts_with("KEY") && s.len() == 4 => s[3..].to_string(),
-        s if s.starts_with("DIGIT") && s.len() == 6 => s[5..].to_string(),
-        _ => {
-            // Title-case: first char upper, rest lower
-            let mut chars = key.chars();
-            match chars.next() {
-                Some(c) => {
-                    let first: String = c.to_uppercase().collect();
-                    let rest: String = chars.collect::<String>().to_lowercase();
-                    format!("{first}{rest}")
-                }
-                None => key.to_string(),
-            }
-        }
-    }
-}
-
-/// Dropdown options for the key selector.
-/// Fixed content — built once as a static slice rather than reconstructed on every render.
-static KEY_OPTIONS: &[(&str, &str)] = &[
-    // Common keys
-    ("Space", "Space"),
-    ("Enter", "Enter"),
-    ("Tab", "Tab"),
-    ("Backspace", "Backspace"),
-    ("Delete", "Delete"),
-    ("Insert", "Insert"),
-    ("Home", "Home"),
-    ("End", "End"),
-    ("PageUp", "PageUp"),
-    ("PageDown", "PageDown"),
-    // Letters A-Z
-    ("A", "A"), ("B", "B"), ("C", "C"), ("D", "D"), ("E", "E"),
-    ("F", "F"), ("G", "G"), ("H", "H"), ("I", "I"), ("J", "J"),
-    ("K", "K"), ("L", "L"), ("M", "M"), ("N", "N"), ("O", "O"),
-    ("P", "P"), ("Q", "Q"), ("R", "R"), ("S", "S"), ("T", "T"),
-    ("U", "U"), ("V", "V"), ("W", "W"), ("X", "X"), ("Y", "Y"),
-    ("Z", "Z"),
-    // Digits 0-9
-    ("0", "0"), ("1", "1"), ("2", "2"), ("3", "3"), ("4", "4"),
-    ("5", "5"), ("6", "6"), ("7", "7"), ("8", "8"), ("9", "9"),
-    // F-keys
-    ("F1", "F1"), ("F2", "F2"), ("F3", "F3"), ("F4", "F4"),
-    ("F5", "F5"), ("F6", "F6"), ("F7", "F7"), ("F8", "F8"),
-    ("F9", "F9"), ("F10", "F10"), ("F11", "F11"), ("F12", "F12"),
-    // Arrows
-    ("Up", "Up"),
-    ("Down", "Down"),
-    ("Left", "Left"),
-    ("Right", "Right"),
-    // Punctuation / symbols
-    ("-", "Minus (-)"),
-    ("=", "Equal (=)"),
-    ("[", "Left Bracket ([)"),
-    ("]", "Right Bracket (])"),
-    ("\\", "Backslash (\\)"),
-    (";", "Semicolon (;)"),
-    ("'", "Quote (')"),
-    (",", "Comma (,)"),
-    (".", "Period (.)"),
-    ("/", "Slash (/)"),
-    ("`", "Backtick (`)"),
-];
 
 #[component]
 pub fn RecordingCard(props: RecordingCardProps) -> Element {
-    let (ctrl, alt, shift, win, key) = parse_hotkey_parts(&props.hotkey);
+    let note_enabled = !props.note_hotkey.trim().is_empty();
 
     rsx! {
         Card { title: "Recording".to_string(),
             div { class: "card-row card-row-top",
                 span { class: "card-label", "Hotkey" }
-                div { class: "hotkey-picker",
-                    div { class: "hotkey-mods",
-                        ModPill { label: "Ctrl", active: ctrl, on_click: {
-                            let key = key.clone();
-                            move |_| {
-                                props.on_hotkey_change.call(format_hotkey(!ctrl, alt, shift, win, &key));
-                            }
-                        }}
-                        ModPill { label: "Alt", active: alt, on_click: {
-                            let key = key.clone();
-                            move |_| {
-                                props.on_hotkey_change.call(format_hotkey(ctrl, !alt, shift, win, &key));
-                            }
-                        }}
-                        ModPill { label: "Shift", active: shift, on_click: {
-                            let key = key.clone();
-                            move |_| {
-                                props.on_hotkey_change.call(format_hotkey(ctrl, alt, !shift, win, &key));
-                            }
-                        }}
-                        ModPill { label: "Win", active: win, on_click: {
-                            let key = key.clone();
-                            move |_| {
-                                let new_win = !win;
-                                // When Win is toggled on, it becomes the trigger (drop key).
-                                // When toggled off, restore Space as default trigger.
-                                let effective_key = if new_win { "" } else if key.is_empty() { "Space" } else { &key };
-                                props.on_hotkey_change.call(format_hotkey(ctrl, alt, shift, new_win, effective_key));
-                            }
-                        }}
-                    }
-                    if !win {
-                        Select {
-                            value: key.clone(),
-                            options: KEY_OPTIONS.iter().map(|(v, l)| (v.to_string(), l.to_string())).collect::<Vec<_>>(),
-                            onchange: move |new_key: String| {
-                                props.on_hotkey_change.call(format_hotkey(ctrl, alt, shift, win, &new_key));
-                            },
-                        }
-                    }
+                HotkeyPicker {
+                    hotkey: props.hotkey.clone(),
+                    on_change: move |h: String| props.on_hotkey_change.call(h),
                 }
             }
             div { class: "card-row",
                 span { class: "card-label", "Mode" }
-                div { class: "radio-group",
-                    div {
-                        class: "radio-option",
-                        onclick: move |_| props.on_mode_change.call("hold".to_string()),
-                        div {
-                            class: if props.mode == "hold" { "radio-dot selected" } else { "radio-dot" },
-                        }
-                        span { "Push to Talk" }
-                    }
-                    div {
-                        class: "radio-option",
-                        onclick: move |_| props.on_mode_change.call("toggle".to_string()),
-                        div {
-                            class: if props.mode == "toggle" { "radio-dot selected" } else { "radio-dot" },
-                        }
-                        span { "Toggle" }
-                    }
+                CaptureModeRadio {
+                    mode: props.mode.clone(),
+                    on_change: move |m: String| props.on_mode_change.call(m),
                 }
             }
             div { class: "card-row",
@@ -204,25 +57,71 @@ pub fn RecordingCard(props: RecordingCardProps) -> Element {
                     ontoggle: move |v| props.on_pause_media_change.call(v),
                 }
             }
+
+            div { class: "card-row",
+                span { class: "card-label", "Note capture" }
+                Toggle {
+                    value: note_enabled,
+                    // Off clears the chord rather than remembering it: an empty
+                    // string is the one state the hotkey layer reads as
+                    // "register nothing", so off must genuinely mean unbound.
+                    ontoggle: move |on: bool| {
+                        let next = if on { DEFAULT_NOTE_HOTKEY } else { "" };
+                        props.on_note_hotkey_change.call(next.to_string());
+                    },
+                }
+            }
+            if note_enabled {
+                div { class: "card-row",
+                    span { class: "card-label", "Note hotkey" }
+                    HotkeyPicker {
+                        hotkey: props.note_hotkey.clone(),
+                        on_change: move |h: String| props.on_note_hotkey_change.call(h),
+                    }
+                }
+                div { class: "card-row",
+                    span { class: "card-label", "Note mode" }
+                    CaptureModeRadio {
+                        mode: props.note_mode.clone(),
+                        on_change: move |m: String| props.on_note_mode_change.call(m),
+                    }
+                }
+            }
         }
     }
 }
 
-#[derive(Props, Clone, PartialEq)]
-struct ModPillProps {
-    label: &'static str,
-    active: bool,
-    on_click: EventHandler<()>,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hotkey::HotkeyConfig;
 
-#[component]
-fn ModPill(props: ModPillProps) -> Element {
-    let class = if props.active { "mod-pill active" } else { "mod-pill" };
-    rsx! {
-        button {
-            class: "{class}",
-            onclick: move |_| props.on_click.call(()),
-            "{props.label}"
-        }
+    /// The chord the switch proposes must be one the engine can actually
+    /// register — an unparseable suggestion would turn the feature on while
+    /// binding nothing, which looks identical to a broken hotkey.
+    #[test]
+    fn the_proposed_note_chord_parses() {
+        let parsed = HotkeyConfig::parse(DEFAULT_NOTE_HOTKEY, true).expect("must parse");
+        assert!(parsed.ctrl && parsed.alt && !parsed.shift);
+        assert_eq!(parsed.trigger_vk, 0x20, "Space");
+    }
+
+    /// Dictation's default chord must not be a prefix of the note chord.
+    ///
+    /// `matching_binding` compares the modifier set held *at the moment the
+    /// trigger goes down*. If the note chord's trigger were reached only after
+    /// passing through the dictation chord's exact state, dictation would fire
+    /// first, every time. This is why the default is not Ctrl+Super+Space.
+    #[test]
+    fn the_proposed_note_chord_does_not_pass_through_the_dictation_chord() {
+        let dictation = HotkeyConfig::parse("Ctrl+Super", false).expect("parses");
+        let note = HotkeyConfig::parse(DEFAULT_NOTE_HOTKEY, true).expect("parses");
+
+        // Distinct triggers is the strong form: no press order can reach the
+        // note trigger via the dictation trigger.
+        assert_ne!(
+            dictation.trigger_vk, note.trigger_vk,
+            "chords sharing a trigger key can only be told apart by modifiers"
+        );
     }
 }

@@ -29,10 +29,19 @@ and targets 16 kHz mono. If the device's native config already matches, it
 captures directly at 16 kHz/1ch. Otherwise it captures at the device's
 **native** rate/channel count and does downmix + resample **inside the cpal
 callback itself**, using closure-owned state (`ResampleState { accumulator,
-last_sample }`, plus reused `mono_buf`/`out_buf` scratch `Vec`s — no
-per-callback allocation).
+last_sample }`, plus reused `float_buf`/`mono_buf`/`out_buf` scratch `Vec`s —
+no per-callback allocation).
 
-- Downmix: average all channels per frame (`data.chunks(native_channels)`).
+- Sample format: `AudioCapture::start()` reads `default_input_config()`
+  **once** and dispatches on `sample_format()` into the generic
+  `build_stream::<T>`, converting each sample to `f32` via cpal's `Sample`
+  trait. F32/I16/U16/I8/U8/I32/U32/F64 are handled; anything else is a clean
+  error. The dispatch happens once at stream construction so the per-callback
+  path stays monomorphic. (Before, the stream was hard-coded to `f32` and the
+  device's real format was only logged — devices that offer integer formats,
+  common on USB interfaces and ALSA `hw:` devices, failed with an opaque
+  backend error.)
+- Downmix: average all channels per frame (`float_buf.chunks(native_channels)`).
 - Resample: hand-rolled **linear interpolation** (`resample_linear`) — no
   `rubato`, no other resampling crate. State persists across callbacks so
   there's no discontinuity at buffer boundaries. Good enough for speech;

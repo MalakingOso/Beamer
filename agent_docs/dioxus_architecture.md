@@ -1,10 +1,16 @@
 # Dioxus Architecture
 
-There is no multi-window overlay/glow system and no Mica backdrop wiring —
-that was never built. What exists: one main window (settings/home UI), an
-optional recording pill window on Windows/macOS, a splash window during
-startup, and (Linux only) an in-shell indicator driven over D-Bus instead of
+There is no Mica backdrop wiring — that was never built. Multi-window is real,
+and grew: one main window (settings/home UI), an optional recording pill window
+on Windows/macOS, a splash window during startup, **one sticky note window per
+open note**, and (Linux only) an in-shell indicator driven over D-Bus instead of
 a Dioxus window at all.
+
+Sticky notes are the only place multiple long-lived `VirtualDom`s share state,
+and the rules for doing that safely are not obvious — `use_context` does not
+cross the boundary, `GlobalSignal` silently diverges per window, and event
+handlers are per-window. **Read `agent_docs/sticky_notes.md` before touching
+multi-window code.**
 
 ## Threading Model
 
@@ -122,3 +128,13 @@ network — paying one-time costs up front so the first recording doesn't
 stall), waits for a 1500ms CSS fill animation to finish, closes the splash
 window, then reveals the main window (except on Windows, which stays hidden
 until a tray click, matching the original tray-app convention).
+
+The network step **matches on the backend name exhaustively**. Realtime
+backends (`elevenlabs`, `voxtral`) open and drop a real session, which is
+what they'd do on the first recording anyway. Batch backends
+(`elevenlabs_batch`, `voxtral_batch`) get
+`transcription::preconnect_batch_host` instead — an unauthenticated GET that
+warms DNS/TLS/the shared client's connection pool with no billable side
+effect. Do not reintroduce a `_ =>` fallback here: it previously routed the
+batch backends into the ElevenLabs *realtime* constructor, so every launch
+opened a metered realtime STT session for users who had never selected one.
