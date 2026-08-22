@@ -19,6 +19,8 @@ use crate::config::Config;
 pub mod lifecycle;
 mod model;
 pub mod pipeline;
+pub mod task;
+pub mod task_store;
 pub use model::{Note, NoteColor, NoteOrigin, StageState};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
