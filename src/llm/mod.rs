@@ -7,6 +7,7 @@
 //! `deploy/llama-models.ini`.
 
 pub mod client;
+pub mod prompts;
 
 use serde::{Deserialize, Serialize};
 
