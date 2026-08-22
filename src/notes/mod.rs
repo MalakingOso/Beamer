@@ -14,8 +14,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::config::Config;
 
+/// Public so `StageOutcome` is nameable from the model-pass callers that arrive
+/// in Batch 2; a private module would make it a private-in-public return type.
+pub mod lifecycle;
 mod model;
-pub use model::{Note, NoteColor, NoteState};
+pub use model::{Note, NoteColor, NoteOrigin, StageState};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NoteStore {
@@ -123,7 +126,9 @@ impl NoteStore {
         self.dirty
     }
 
-    pub fn create(&mut self, raw: String, color: NoteColor) -> String {
+    /// `origin` is passed explicitly rather than defaulted: it is corpus
+    /// provenance, and a silent default is exactly what corrupts a corpus.
+    pub fn create(&mut self, raw: String, color: NoteColor, origin: NoteOrigin) -> String {
         let now = Local::now().to_rfc3339();
         let id = next_id();
         self.notes.push(Note {
@@ -132,7 +137,9 @@ impl NoteStore {
             modified: now,
             body: raw.clone(),
             raw,
-            state: NoteState::Raw,
+            clean_state: StageState::Pending,
+            extract_state: StageState::Pending,
+            origin,
             color,
             pos: None,
             size: None,
@@ -263,22 +270,27 @@ mod tests {
     #[test]
     fn create_returns_a_unique_id_and_seeds_body_from_raw() {
         let mut store = temp_store("create");
-        let a = store.create("call the vet".into(), NoteColor::Purple);
-        let b = store.create("send invoice".into(), NoteColor::Teal);
+        let a = store.create("call the vet".into(), NoteColor::Purple, NoteOrigin::Dictated);
+        let b = store.create("send invoice".into(), NoteColor::Teal, NoteOrigin::Dictated);
 
         assert_ne!(a, b, "ids must be unique even within the same millisecond");
 
         let note = store.get(&a).unwrap();
         assert_eq!(note.raw, "call the vet");
         assert_eq!(note.body, "call the vet", "body starts as a copy of raw");
-        assert_eq!(note.state, NoteState::Raw);
+        assert_eq!(note.clean_state, StageState::Pending);
+        assert_eq!(note.extract_state, StageState::Pending);
+        assert_eq!(
+            note.origin, NoteOrigin::Dictated,
+            "a note created by the capture path is dictated; mislabelling it corrupts provenance"
+        );
         assert!(!note.archived);
     }
 
     #[test]
     fn set_body_never_touches_raw() {
         let mut store = temp_store("raw_immutable");
-        let id = store.create("um so call the vet".into(), NoteColor::Purple);
+        let id = store.create("um so call the vet".into(), NoteColor::Purple, NoteOrigin::Dictated);
 
         store.set_body(&id, "Call the vet.".into());
 
@@ -293,8 +305,8 @@ mod tests {
     #[test]
     fn archive_hides_from_active_but_retains_the_note() {
         let mut store = temp_store("archive");
-        let keep = store.create("keep".into(), NoteColor::Purple);
-        let gone = store.create("archive me".into(), NoteColor::Rose);
+        let keep = store.create("keep".into(), NoteColor::Purple, NoteOrigin::Dictated);
+        let gone = store.create("archive me".into(), NoteColor::Rose, NoteOrigin::Dictated);
 
         store.archive(&gone);
 
@@ -307,7 +319,7 @@ mod tests {
     #[test]
     fn flush_writes_only_when_dirty() {
         let mut store = temp_store("debounce");
-        store.create("something".into(), NoteColor::Purple);
+        store.create("something".into(), NoteColor::Purple, NoteOrigin::Dictated);
 
         assert!(store.flush_if_dirty(), "a pending change must be written");
         assert!(store.path.exists());
@@ -320,7 +332,7 @@ mod tests {
     #[test]
     fn save_leaves_no_temp_file_behind() {
         let mut store = temp_store("atomic");
-        store.create("hello".into(), NoteColor::Purple);
+        store.create("hello".into(), NoteColor::Purple, NoteOrigin::Dictated);
         store.flush_if_dirty();
 
         assert!(!store.path.with_extension("json.tmp").exists());
@@ -329,7 +341,7 @@ mod tests {
     #[test]
     fn notes_round_trip_through_disk() {
         let mut store = temp_store("roundtrip");
-        let id = store.create("first".into(), NoteColor::Amber);
+        let id = store.create("first".into(), NoteColor::Amber, NoteOrigin::Dictated);
         // Set directly rather than through a setter. `pos` and `size` are part
         // of the persisted schema and must survive a round trip, but nothing
         // writes `pos` from window geometry any more and nothing should — see
@@ -355,7 +367,7 @@ mod tests {
     #[test]
     fn set_open_with_an_unchanged_value_does_not_dirty_the_store() {
         let mut store = temp_store("set_open");
-        let id = store.create("hello".into(), NoteColor::Purple);
+        let id = store.create("hello".into(), NoteColor::Purple, NoteOrigin::Dictated);
         store.flush_if_dirty();
         let before = store.get(&id).unwrap().modified.clone();
 
@@ -387,7 +399,7 @@ mod tests {
     #[test]
     fn search_matches_what_was_said_not_just_what_is_displayed() {
         let mut store = temp_store("search");
-        let id = store.create("um so call the vet about biscuit".into(), NoteColor::Purple);
+        let id = store.create("um so call the vet about biscuit".into(), NoteColor::Purple, NoteOrigin::Dictated);
         // A cleanup pass rewrote the body and dropped the filler word.
         store.set_body(&id, "Call the vet about Biscuit.".into());
 
@@ -404,8 +416,8 @@ mod tests {
     #[test]
     fn an_empty_query_returns_every_active_note() {
         let mut store = temp_store("search_empty");
-        store.create("one".into(), NoteColor::Purple);
-        let gone = store.create("two".into(), NoteColor::Teal);
+        store.create("one".into(), NoteColor::Purple, NoteOrigin::Dictated);
+        let gone = store.create("two".into(), NoteColor::Teal, NoteOrigin::Dictated);
         store.archive(&gone);
 
         assert_eq!(store.search("").len(), 1);
@@ -419,7 +431,7 @@ mod tests {
     #[test]
     fn restore_returns_an_archived_note_to_the_board() {
         let mut store = temp_store("restore");
-        let id = store.create("bring me back".into(), NoteColor::Rose);
+        let id = store.create("bring me back".into(), NoteColor::Rose, NoteOrigin::Dictated);
         store.archive(&id);
         assert_eq!(store.archived().len(), 1);
         assert!(store.active().is_empty());
@@ -437,7 +449,7 @@ mod tests {
     #[test]
     fn restoring_a_note_that_is_not_archived_does_nothing() {
         let mut store = temp_store("restore_noop");
-        let id = store.create("already here".into(), NoteColor::Purple);
+        let id = store.create("already here".into(), NoteColor::Purple, NoteOrigin::Dictated);
         store.flush_if_dirty();
 
         store.restore(&id);

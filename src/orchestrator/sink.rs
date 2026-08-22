@@ -14,7 +14,7 @@ use super::notify::{clipboard_only_fallback, show_notification};
 use crate::config::Config;
 use crate::hotkey::CaptureMode;
 use crate::injection;
-use crate::notes::{NoteColor, NoteStore};
+use crate::notes::{NoteColor, NoteOrigin, NoteStore};
 use crate::ui::history::TranscriptionHistory;
 use crate::ui::status_log::{log_status, LogLevel, StatusLog};
 
@@ -54,7 +54,7 @@ pub(super) async fn do_note_capture(
     let color = NoteColor::from_config_name(&config.peek().notes.default_color);
     let id = {
         let mut store = notes.write();
-        let id = store.create(text.to_string(), color);
+        let id = store.create(text.to_string(), color, NoteOrigin::Dictated);
         store.flush_if_dirty();
         id
     };
@@ -64,6 +64,7 @@ pub(super) async fn do_note_capture(
         LogLevel::Info,
         format!("Note created ({} chars)", text.trim().len()),
     );
+
     Some(id)
 }
 

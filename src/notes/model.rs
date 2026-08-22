@@ -6,14 +6,48 @@
 
 use serde::{Deserialize, Serialize};
 
+/// How far one model pass has got on a note.
+///
+/// One field per stage rather than a single linear state: a note can be
+/// cleanup-failed *and* extraction-succeeded at once, which a single enum
+/// cannot express, and each stage needs its own retry affordance in the footer.
+///
+/// `Skipped` means deliberately not run — cleanup disabled in config, or a
+/// typed note that never needed it. That is not `Pending`, which means "not run
+/// yet, and still could be". The UI reads the difference: `Pending` offers a
+/// retry, `Skipped` offers nothing to retry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum NoteState {
-    Raw,
-    Cleaned,
-    CleanFailed,
-    Analyzed,
-    ExtractFailed,
+pub enum StageState {
+    Pending,
+    Done,
+    Failed,
+    Skipped,
+}
+
+impl Default for StageState {
+    fn default() -> Self {
+        Self::Pending
+    }
+}
+
+/// Where a note's text came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoteOrigin {
+    Dictated,
+    Typed,
+}
+
+/// **Must stay `Dictated`.** Every note that exists today was born from
+/// dictation — `Typed` only becomes reachable in a later batch — so a note
+/// loaded from an older `notes.json` with no `origin` key is a dictated note.
+/// Defaulting to `Typed` would silently relabel the entire existing corpus,
+/// which is the labelled data an eval harness later depends on.
+impl Default for NoteOrigin {
+    fn default() -> Self {
+        Self::Dictated
+    }
 }
 
 /// Fixed palette rather than free-form hex: keeps notes inside the Deploy
@@ -63,7 +97,16 @@ pub struct Note {
     pub raw: String,
     /// Display text. Equals `raw` until a cleanup pass replaces it.
     pub body: String,
-    pub state: NoteState,
+    /// Stage fields are `#[serde(default)]` so an older `notes.json` — which
+    /// carries a single `"state"` key instead — loads unchanged. `Note` has no
+    /// `deny_unknown_fields`, so the stale key is ignored rather than fatal,
+    /// and migration stays free. Keep it that way.
+    #[serde(default)]
+    pub clean_state: StageState,
+    #[serde(default)]
+    pub extract_state: StageState,
+    #[serde(default)]
+    pub origin: NoteOrigin,
     pub color: NoteColor,
     /// **Not read on Linux, and never written from window geometry.**
     ///

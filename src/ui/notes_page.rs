@@ -195,11 +195,11 @@ pub fn NotesPage(props: NotesPageProps) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::notes::NoteColor;
+    use crate::notes::{NoteColor, NoteOrigin};
 
     fn note_with(body: &str) -> Note {
         let mut store = NoteStore::default();
-        let id = store.create(body.to_string(), NoteColor::Purple);
+        let id = store.create(body.to_string(), NoteColor::Purple, NoteOrigin::Dictated);
         store.get(&id).unwrap().clone()
     }
 
