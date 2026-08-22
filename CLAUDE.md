@@ -57,7 +57,7 @@ RUST_LOG=beamer=debug cargo run  # Run with debug logging
 **Read `agent_docs/sticky_notes.md` first.** It carries everything below in
 durable form, plus the facts that cost real time to learn.
 
-Phase 1 is **built and committed** on `feat/sticky-notes`. **165 tests pass**,
+Phase 1 is **built and committed** on `feat/sticky-notes`. **168 tests pass**,
 up from a 101 baseline (121 at the end of Batches A–C). Zero build warnings.
 
 ## ✅ The log out has happened — extension v5 is live
@@ -67,9 +67,10 @@ lists both `PlaceWindow` and `GetWindowFrame`. The stale-v3 caveat that used to
 sit here is resolved — notes are placed, and the note pill shows its own state
 rather than "Transcribing…" with an idle sweep.
 
-⚠️ **Still unverified: that `PlaceWindow` actually MOVES a window.** Only the
-method's *existence* was checked. `(true,)` is returned by a no-op just as
-readily as by a real move, so run the check below before trusting placement.
+✅ **`PlaceWindow` verified to actually move a window** (2026-08-21): placed a
+live note at 400,300 and `GetWindowFrame` read back exactly
+`(true, 400, 300, 320, 260)`. At scale 1.0 physical and logical pixels agree,
+so this is confirmation rather than proof against a scaling bug.
 
 ⚠️ Re-check the version after any future extension edit — GNOME extensions do
 not hot-reload on Wayland, so every change still needs a full log out.

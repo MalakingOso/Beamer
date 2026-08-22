@@ -214,6 +214,37 @@ Apache 2.0 plus a binding term requiring the exact string
   `hotkey_picker::tests::what_the_picker_emits_is_what_the_engine_registers`
   pins the round trip. Both dictation and note rows share the one picker
   component so the two chords can never diverge in interpretation.
+- **The title bar IS the drag handle.** Notes are built with
+  `with_decorations(false)`, so there is no compositor titlebar to grab and
+  nothing moves them. `.sticky-bar` calls `window.drag()` on `onmousedown`,
+  which is tao's `drag_window()` → `xdg_toplevel.move` under Mutter: the client
+  asks the compositor to take over an interactive move. This is the *only*
+  client-side way to move a Wayland window, and it does not contradict the
+  no-position rule above — the app still never learns a coordinate.
+  ⚠️ Dioxus discards the `Result` (`_ = self.window.drag_window()`), so a
+  failure is **silent**. If a note stops moving, look there before the CSS.
+- **Every control inside the bar needs `onmousedown: e.stop_propagation()`.**
+  Otherwise the bar's mousedown starts a window drag and the compositor eats
+  the click, so colour swatches and the archive button never fire. The classic
+  custom-titlebar bug.
+- **Rounded corners need a transparent window, not just `border-radius`.**
+  `with_transparent(true)` + `with_background_color((0,0,0,0))` +
+  `html,body,#main{background:transparent}`. Any one of the three missing and
+  the webview paints an opaque sheet that shows through the corners as square
+  nubs. `.sticky` also needs `overflow:hidden` or the bar squares off the top
+  two corners again. Radius is 8px — the documented maximum in
+  `design_system.md` ("Never rounder").
+- **Hard-offset shadows need padding to render into.** `.sticky` fills the
+  window, so `box-shadow` was clipped by the window edge and simply never
+  appeared. `#main` carries `padding:0 5px 5px 0` as shadow room.
+- **Secondary windows do not get the app's fonts for free.** The main window
+  `<link>`s `assets/styles.css` and its `@font-face` rules resolve; stickies,
+  pill and splash inject CSS with `with_custom_head`, which carries none. Every
+  `font-family:"DM Mono"` in those windows fell back to a system font for
+  months and looked like a deliberate style. `ui::fonts::embedded_font_css()`
+  fixes it with `data:` URIs — chosen over an `asset!()` URL because a URI
+  cannot fail to resolve and *can* be unit-tested, where a silent font fallback
+  in a webview cannot. **The pill and splash windows still have this bug.**
 - Notes are **not** always-on-top, deliberately. They sit in the normal
   stacking order.
 - `with_exits_when_last_window_closes(false)` on sticky windows is

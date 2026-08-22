@@ -1,6 +1,7 @@
 pub mod app;
 mod app_setup;
 pub mod components;
+pub mod fonts;
 pub mod history;
 pub mod history_page;
 pub mod home;

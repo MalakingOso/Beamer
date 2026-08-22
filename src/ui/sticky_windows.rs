@@ -127,6 +127,11 @@ async fn open_note_window(
         .with_title(title.clone())
         .with_decorations(false)
         .with_always_on_top(false)
+        // Rounded corners need a transparent window surface, not just a
+        // border-radius: without it the webview paints an opaque sheet and the
+        // corners show through as square nubs. Pairs with the (0,0,0,0)
+        // background color below — same combination the pill window uses.
+        .with_transparent(true)
         .with_inner_size(LogicalSize::new(w as f64, h as f64))
         // Honored natively on Windows; ignored by Mutter, which is why the
         // GNOME extension exists. Set on both so the Windows build needs no
@@ -136,7 +141,17 @@ async fn open_note_window(
     let cfg = DesktopConfig::new()
         .with_data_directory(super::webview_data_dir())
         .with_window(builder)
-        .with_custom_head(format!("<style>{STICKY_CSS}</style>"))
+        // Clears the webview's own opaque backdrop. `with_transparent` alone
+        // only makes the *native* surface transparent.
+        .with_background_color((0, 0, 0, 0))
+        // Fonts first: STICKY_CSS names "Recursive" and "DM Mono", and an
+        // inline <style> carries no @font-face, so without this the note
+        // renders in a system fallback while the rest of the app does not.
+        .with_custom_head(format!(
+            "<style>{}{}</style>",
+            crate::ui::fonts::embedded_font_css(),
+            STICKY_CSS
+        ))
         // Load-bearing for a tray app: without it, archiving the last sticky
         // while the main window is hidden would exit Beamer entirely.
         .with_exits_when_last_window_closes(false);
