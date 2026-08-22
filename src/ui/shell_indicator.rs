@@ -56,10 +56,37 @@ struct Worker {
     /// own per-call timeout — different enough usage patterns that sharing
     /// one cache would mean compromising both.
     proxy: Option<zbus::blocking::Proxy<'static>>,
-    /// Whether the helper answered a v2 GetVersion at the last Show. Gates
-    /// Level/Hide so a missing extension costs one probe per recording, not
-    /// 15 failed D-Bus calls per second.
+    /// Whether the helper answered a v2 GetVersion at the last probe. Gates
+    /// `Level` so a missing extension costs one probe per recording rather
+    /// than 15 failed D-Bus calls a second — which is the whole reason the
+    /// flag exists. See [`needs_probe`] for why `Hide` is not gated the same
+    /// way.
     helper_active: bool,
+}
+
+/// Whether a command has to probe for the helper before it can be sent.
+///
+/// `Show` always probes: it starts an indicator session and its answer is what
+/// gates everything after it.
+///
+/// `Hide` probes **when no session is active**, and that case is the whole
+/// point. A `Hide` with no preceding `Show` is the stale-pill case: a previous
+/// Beamer died without hiding the indicator — a crash, a SIGTERM, a `dx serve`
+/// rebuild — and GNOME Shell is still drawing a pill for a recording that has
+/// no process behind it. The indicator lives inside the shell, so nothing but
+/// Beamer can clear it, and the only moment it can is startup, where
+/// `helper_active` is false by construction. Dropping that `Hide` is exactly
+/// what stranded the pill: `linux_integration`'s effect already sends one on
+/// first render, and it went nowhere.
+///
+/// `Level` never probes. It is the 15Hz flood the gate was built for, and a
+/// dropped level update costs one frame of a waveform.
+fn needs_probe(cmd: &Cmd, helper_active: bool) -> bool {
+    match cmd {
+        Cmd::Show(_) => true,
+        Cmd::Hide => !helper_active,
+        Cmd::Level(_) => false,
+    }
 }
 
 fn worker(rx: mpsc::Receiver<Cmd>) {
@@ -82,23 +109,16 @@ fn worker(rx: mpsc::Receiver<Cmd>) {
 
 impl Worker {
     fn handle(&mut self, cmd: Cmd) {
+        if needs_probe(&cmd, self.helper_active) {
+            self.helper_active = self.probe_v2();
+        }
+        if !self.helper_active {
+            return;
+        }
         match cmd {
-            Cmd::Show(state) => {
-                self.helper_active = self.probe_v2();
-                if self.helper_active {
-                    self.call("ShowIndicator", &(state));
-                }
-            }
-            Cmd::Level(level) => {
-                if self.helper_active {
-                    self.call("UpdateLevel", &(level as f64));
-                }
-            }
-            Cmd::Hide => {
-                if self.helper_active {
-                    self.call("HideIndicator", &());
-                }
-            }
+            Cmd::Show(state) => self.call("ShowIndicator", &(state)),
+            Cmd::Level(level) => self.call("UpdateLevel", &(level as f64)),
+            Cmd::Hide => self.call("HideIndicator", &()),
         }
     }
 
@@ -151,5 +171,40 @@ impl Worker {
             tracing::debug!("shell indicator: {} failed: {}", method, e);
             self.proxy = None;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_hide_with_no_session_probes_rather_than_being_dropped() {
+        // The stale-pill case. A previous Beamer died without hiding the
+        // indicator, so GNOME Shell is still drawing one; the startup Hide
+        // that clears it arrives with helper_active false, and skipping it
+        // leaves the pill on screen with no error to explain it.
+        assert!(needs_probe(&Cmd::Hide, false));
+    }
+
+    #[test]
+    fn a_hide_that_ends_a_live_session_does_not_probe_again() {
+        assert!(!needs_probe(&Cmd::Hide, true));
+    }
+
+    #[test]
+    fn a_level_update_never_probes() {
+        // Levels arrive at ~15Hz. Probing here is what the gate was built to
+        // prevent, and a dropped level costs one frame of a waveform.
+        assert!(!needs_probe(&Cmd::Level(0.5), false));
+        assert!(!needs_probe(&Cmd::Level(0.5), true));
+    }
+
+    #[test]
+    fn a_show_always_probes() {
+        // Show opens the session, and its answer is what gates everything
+        // after it — including whether the extension is there at all.
+        assert!(needs_probe(&Cmd::Show("recording"), false));
+        assert!(needs_probe(&Cmd::Show("recording"), true));
     }
 }
