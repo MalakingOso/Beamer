@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use super::next_id;
-use super::task::{Task, TaskStatus};
+use super::task::{Proposal, Task, TaskStatus};
 use crate::config::Config;
 
 /// No caller until the suggestion chips land in the UI batch; the store is
@@ -238,235 +238,78 @@ impl TaskStore {
         v
     }
 
+    /// Set a due date by hand — the picker beside an unresolved phrase.
+    ///
+    /// The user answering a question the model could not is a decision worth
+    /// keeping, so this flushes inline for the same reason `decide` does.
+    /// `due_phrase` is deliberately **left alone**: it records what the model
+    /// saw, and overwriting it would erase the evidence that it saw something
+    /// it could not resolve — exactly the signal the eval corpus wants.
+    pub fn set_due(&mut self, id: &str, due: Option<String>, all_day: bool) -> bool {
+        let Some(task) = self.tasks.iter_mut().find(|t| t.id == id) else {
+            return false;
+        };
+        if task.due == due && task.due_all_day == all_day {
+            return false;
+        }
+        task.due = due;
+        task.due_all_day = all_day;
+        self.dirty = true;
+        self.flush_if_dirty();
+        true
+    }
+
+    /// Drop every row belonging to a note that was deleted outright.
+    ///
+    /// **A deliberate exception to "dismissed rows are retained as labelled
+    /// negatives".** Everywhere else in this store a decision is permanent
+    /// corpus data and nothing may remove it. Here the user has explicitly
+    /// deleted the note those rows describe, behind a confirm, and an explicit
+    /// delete means gone — keeping the rows would leave the corpus holding
+    /// labels for a note whose text no longer exists to explain them.
+    ///
+    /// Flushed inline: the note's own deletion is written at the same moment,
+    /// and leaving the two out of step across a crash would strand rows whose
+    /// note is already gone.
+    pub fn delete_for_note(&mut self, note_id: &str) -> usize {
+        let before = self.tasks.len();
+        self.tasks.retain(|t| t.note_id != note_id);
+        let removed = before - self.tasks.len();
+        if removed > 0 {
+            self.dirty = true;
+            self.flush_if_dirty();
+        }
+        removed
+    }
+
     /// Build an undecided row. The model pass produces several of these in one
     /// instant, so the id comes from `notes::next_id` — a process-monotonic
     /// counter — rather than a timestamp, which would collide within the
     /// millisecond and give two chips the same identity.
-    pub fn new_suggestion(
-        note_id: &str,
-        text: String,
-        evidence: String,
-        confidence: f32,
-    ) -> Task {
+    ///
+    /// Takes a whole [`Proposal`] rather than loose fields so a row cannot be
+    /// written half-dated: setting `due` after construction is the kind of step
+    /// that gets forgotten at one call site and produces a task whose chip says
+    /// nothing and whose export is empty.
+    pub fn new_suggestion(note_id: &str, proposal: Proposal) -> Task {
         Task {
             id: next_id(),
             note_id: note_id.to_string(),
-            text,
-            evidence,
-            confidence,
+            text: proposal.text,
+            evidence: proposal.evidence,
+            confidence: proposal.confidence,
             status: TaskStatus::Suggested,
             done: false,
             created: Local::now().to_rfc3339(),
             decided: None,
+            due: proposal.due,
+            due_all_day: proposal.due_all_day,
+            due_phrase: proposal.due_phrase,
+            kind: proposal.kind,
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// PID-scoped temp dir, distinct from the notes tests' dir so the two
-    /// cannot collide on a shared tag.
-    fn temp_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("beamer_tasks_test_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    /// Constructed directly rather than via `load()`, which reads a fixed path
-    /// under the real config dir.
-    fn temp_store(tag: &str) -> TaskStore {
-        let path = temp_dir().join(format!("{tag}.json"));
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(path.with_extension("json.corrupt"));
-        TaskStore { tasks: Vec::new(), path, dirty: false }
-    }
-
-    fn suggest(store: &mut TaskStore, note_id: &str, text: &str) -> String {
-        let task = TaskStore::new_suggestion(note_id, text.into(), text.into(), 0.9);
-        let id = task.id.clone();
-        store.tasks.push(task);
-        id
-    }
-
-    #[test]
-    fn dismissed_rows_are_retained_with_a_decided_timestamp() {
-        let mut store = temp_store("dismiss");
-        let id = suggest(&mut store, "note-1", "Call the vet");
-
-        assert!(store.dismiss(&id), "a fresh suggestion must accept a decision");
-
-        let task = store.tasks.iter().find(|t| t.id == id).expect(
-            "dismissing must never delete — the row is the labelled negative the \
-             eval corpus is built from",
-        );
-        assert_eq!(task.status, TaskStatus::Dismissed);
-        assert!(
-            task.decided.is_some(),
-            "a decided row with no decision time cannot be used as a labelled example"
-        );
-        assert!(
-            !store.is_dirty() && store.path.exists(),
-            "a decision must reach disk immediately, not wait for a debounce tick \
-             that a crash could cost us"
-        );
-    }
-
-    #[test]
-    fn replace_suggestions_keeps_decided_rows() {
-        let mut store = temp_store("replace");
-        let decided = suggest(&mut store, "note-1", "Call the vet");
-        let stale = suggest(&mut store, "note-1", "Buy milk maybe");
-        let other = suggest(&mut store, "note-2", "Send the invoice");
-        store.accept(&decided);
-
-        let fresh = TaskStore::new_suggestion("note-1", "Book a table".into(), "book".into(), 0.7);
-        let fresh_id = fresh.id.clone();
-        store.replace_suggestions("note-1", vec![fresh]);
-
-        assert!(
-            store.tasks.iter().any(|t| t.id == decided && t.status == TaskStatus::Accepted),
-            "re-running extraction must not destroy a decision the user already made"
-        );
-        assert!(
-            !store.tasks.iter().any(|t| t.id == stale),
-            "an undecided proposal for this note is superseded, not duplicated"
-        );
-        assert!(
-            store.tasks.iter().any(|t| t.id == other),
-            "another note's chips must be untouched — clearing them would delete \
-             corpus rows for a note nobody re-ran"
-        );
-        assert!(store.tasks.iter().any(|t| t.id == fresh_id));
-        assert_eq!(store.suggested_for("note-1").len(), 1);
-    }
-
-    #[test]
-    fn a_corrupt_tasks_file_is_preserved_not_overwritten() {
-        let path = temp_dir().join("corrupt.json");
-        let backup = path.with_extension("json.corrupt");
-        let _ = std::fs::remove_file(&backup);
-        let garbage = "{ this is not json at all";
-        std::fs::write(&path, garbage).unwrap();
-
-        let store = TaskStore::load_from(path.clone());
-
-        assert!(store.tasks.is_empty());
-        assert!(!path.exists(), "the unreadable file is moved aside, not left to be overwritten");
-        assert_eq!(
-            std::fs::read_to_string(&backup).unwrap(),
-            garbage,
-            "the original bytes must survive verbatim — accepts and dismissals are \
-             not re-derivable, so a lost tasks.json is lost eval signal"
-        );
-    }
-
-    #[test]
-    fn suggestions_made_in_the_same_millisecond_get_distinct_ids() {
-        let a = TaskStore::new_suggestion("note-1", "one".into(), "one".into(), 0.5);
-        let b = TaskStore::new_suggestion("note-1", "two".into(), "two".into(), 0.5);
-        assert_ne!(
-            a.id, b.id,
-            "one extraction pass emits several tasks in a single instant; colliding \
-             ids would make accept hit the wrong chip"
-        );
-    }
-
-    #[test]
-    fn a_redundant_decision_neither_writes_nor_moves_the_timestamp() {
-        let mut store = temp_store("redundant");
-        let id = suggest(&mut store, "note-1", "Call the vet");
-        store.accept(&id);
-        let first = store.tasks[0].decided.clone();
-
-        assert!(!store.dismiss(&id), "accept and dismiss are terminal");
-        assert_eq!(store.tasks[0].status, TaskStatus::Accepted);
-        assert_eq!(
-            store.tasks[0].decided, first,
-            "re-deciding must not rewrite the decision time the corpus depends on"
-        );
-    }
-
-    #[test]
-    fn deciding_a_missing_id_does_not_flush_unrelated_changes() {
-        let mut store = temp_store("missing");
-        suggest(&mut store, "note-1", "Call the vet");
-        store.dirty = true;
-
-        assert!(!store.accept("no-such-task"));
-        assert!(
-            store.is_dirty() && !store.path.exists(),
-            "a no-op decision must not trigger a write of whatever else happened to be pending"
-        );
-    }
-
-    #[test]
-    fn accepted_excludes_suggested_and_dismissed_rows() {
-        let mut store = temp_store("accepted");
-        let yes = suggest(&mut store, "note-1", "Call the vet");
-        let no = suggest(&mut store, "note-1", "Learn the piano");
-        suggest(&mut store, "note-1", "Undecided");
-        store.accept(&yes);
-        store.dismiss(&no);
-
-        let accepted: Vec<&str> = store.accepted().iter().map(|t| t.text.as_str()).collect();
-        assert_eq!(
-            accepted,
-            vec!["Call the vet"],
-            "only confirmed rows are tasks; nothing enters a task list unconfirmed"
-        );
-        assert_eq!(store.suggested_for("note-1").len(), 1);
-    }
-
-    #[test]
-    fn only_an_accepted_task_can_be_marked_done() {
-        let mut store = temp_store("done");
-        let pending = suggest(&mut store, "note-1", "Call the vet");
-        store.flush_if_dirty();
-
-        store.set_done(&pending, true);
-        assert!(
-            !store.tasks[0].done && !store.is_dirty(),
-            "a suggestion is not a task yet, so it cannot be completed"
-        );
-
-        store.accept(&pending);
-        store.set_done(&pending, true);
-        assert!(store.tasks[0].done);
-        assert!(store.is_dirty(), "a checkbox is debounced, not flushed inline");
-
-        store.flush_if_dirty();
-        store.set_done(&pending, true);
-        assert!(!store.is_dirty(), "a redundant set_done must not schedule a write");
-    }
-
-    #[test]
-    fn tasks_round_trip_through_disk() {
-        let mut store = temp_store("roundtrip");
-        let id = suggest(&mut store, "note-7", "Call the vet");
-        store.tasks[0].evidence = "yeah I need to call the vet about Biscuit".into();
-        store.tasks[0].confidence = 0.82;
-        store.dismiss(&id);
-
-        let reloaded = TaskStore::load_from(store.path.clone());
-
-        assert_eq!(reloaded.tasks.len(), 1);
-        assert_eq!(reloaded.tasks[0].note_id, "note-7", "provenance must survive a restart");
-        assert_eq!(reloaded.tasks[0].evidence, "yeah I need to call the vet about Biscuit");
-        assert_eq!(reloaded.tasks[0].confidence, 0.82);
-        assert_eq!(reloaded.tasks[0].status, TaskStatus::Dismissed);
-        assert!(reloaded.tasks[0].decided.is_some());
-        assert!(!store.path.with_extension("json.tmp").exists());
-    }
-
-    #[test]
-    fn confidence_is_stored_as_reported_not_clamped() {
-        let out_of_range = TaskStore::new_suggestion("note-1", "x".into(), "x".into(), 1.7);
-        assert_eq!(
-            out_of_range.confidence, 1.7,
-            "an impossible confidence means the prompt or the parser misfired, and \
-             quietly flattening it hides the one thing the corpus should show"
-        );
-    }
-}
+#[path = "task_store/tests.rs"]
+mod tests;

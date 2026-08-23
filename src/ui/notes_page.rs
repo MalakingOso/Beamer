@@ -13,6 +13,8 @@
 use dioxus::prelude::*;
 
 use crate::config::Config;
+use crate::notes::blocks;
+use crate::notes::task_store::TaskStore;
 use crate::notes::{Note, NoteColor, NoteOrigin, NoteStore};
 use crate::ui::components::Toggle;
 use crate::ui::icons::IconPlus;
@@ -24,14 +26,22 @@ pub struct NotesPageProps {
     /// Read only for `notes.default_color`, so a typed note is born the same
     /// colour a dictated one would be.
     pub config: Signal<Config>,
+    /// Needed only by Delete: a note removed outright takes its rows with it.
+    pub tasks: Signal<TaskStore>,
     pub registry: StickyRegistry,
 }
 
 /// How much of a note's body a card shows before trimming.
 const PREVIEW_CHARS: usize = 180;
 
+/// A card's text, with attachment tokens stripped.
+///
+/// Without `plain_text` a card for a note holding a photo would read
+/// "[[beamer:18f2a…]]", which is both meaningless and the only thing a
+/// picture-only note would show.
 fn preview(note: &Note) -> String {
-    let flat = note.body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let body = blocks::plain_text(&note.body);
+    let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
     if flat.chars().count() <= PREVIEW_CHARS {
         return flat;
     }
@@ -53,10 +63,15 @@ fn when(note: &Note) -> String {
 pub fn NotesPage(props: NotesPageProps) -> Element {
     let mut notes = props.notes;
     let config = props.config;
+    let mut tasks = props.tasks;
     let registry = props.registry;
 
     let mut query = use_signal(String::new);
     let mut show_archived = use_signal(|| false);
+    // Which archived note has been asked about but not yet confirmed. A
+    // two-step button rather than a modal: deletion is permanent and needs a
+    // deliberate second act, and this app has no dialog primitive to borrow.
+    let mut pending_delete: Signal<Option<String>> = use_signal(|| None);
 
     // Cloned into owned `Note`s rather than held as borrows: the rows below
     // capture their ids in click handlers, which cannot outlive a `read()`
@@ -173,6 +188,8 @@ pub fn NotesPage(props: NotesPageProps) -> Element {
                         let text = preview(note);
                         let stamp = when(note);
                         let archived = note.archived;
+                        let clips = note.attachments.len();
+                        let confirming = pending_delete.read().as_deref() == Some(id.as_str());
                         rsx! {
                             div {
                                 key: "{id}",
@@ -189,7 +206,15 @@ pub fn NotesPage(props: NotesPageProps) -> Element {
                                 div { class: "note-stripe note-stripe-{stripe}" }
                                 div { class: "note-card-main",
                                     div { class: "note-card-body", "{text}" }
-                                    div { class: "note-card-meta", "{stamp}" }
+                                    div { class: "note-card-meta",
+                                        "{stamp}"
+                                        if clips > 0 {
+                                            span { class: "note-card-clips",
+                                                title: if clips == 1 { "1 attachment" } else { "attachments" },
+                                                "\u{1F4CE} {clips}"
+                                            }
+                                        }
+                                    }
                                 }
                                 div { class: "note-card-actions",
                                     if archived {
@@ -199,10 +224,50 @@ pub fn NotesPage(props: NotesPageProps) -> Element {
                                                 let id = id.clone();
                                                 move |e: Event<MouseData>| {
                                                     e.stop_propagation();
+                                                    pending_delete.set(None);
                                                     notes.write().restore(&id);
                                                 }
                                             },
                                             "Restore"
+                                        }
+                                        // Delete is offered only on an archived
+                                        // note, and only in two steps. Archive
+                                        // stays the everyday gesture; this is
+                                        // the one that cannot be undone, and it
+                                        // takes the note's task rows with it.
+                                        button {
+                                            class: if confirming {
+                                                "note-action-btn note-action-danger"
+                                            } else {
+                                                "note-action-btn"
+                                            },
+                                            title: if confirming {
+                                                "Deletes the note and its tasks. Your files are never touched."
+                                            } else {
+                                                "Delete permanently"
+                                            },
+                                            onclick: {
+                                                let id = id.clone();
+                                                move |e: Event<MouseData>| {
+                                                    e.stop_propagation();
+                                                    if !confirming {
+                                                        pending_delete.set(Some(id.clone()));
+                                                        return;
+                                                    }
+                                                    pending_delete.set(None);
+                                                    // Rows first: a crash
+                                                    // between the two would
+                                                    // otherwise strand tasks
+                                                    // whose note is gone,
+                                                    // rather than a note whose
+                                                    // rows are.
+                                                    tasks.write().delete_for_note(&id);
+                                                    let mut store = notes.write();
+                                                    store.delete(&id);
+                                                    store.flush_if_dirty();
+                                                }
+                                            },
+                                            if confirming { "Really delete?" } else { "Delete" }
                                         }
                                     } else {
                                         button {

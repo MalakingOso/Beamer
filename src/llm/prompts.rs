@@ -163,12 +163,24 @@ pub fn cleanup_user_message(
 ///   expected, which is the same failure by another route.
 /// - **`evidence` is required to be verbatim.** A task whose evidence is not
 ///   in the note is a fabrication, and `extract::parse_tasks` rejects it.
+/// - **Dates are resolved strictly or not at all.** The prompt names the vague
+///   phrasings explicitly and requires `due: null` for them, because a model
+///   asked for a date will produce one. `due_phrase` is still returned in that
+///   case, which is what turns "I could not resolve this" into a date picker
+///   rather than a shrug.
 ///
 /// Aspirations are excluded deliberately. They are the largest ambiguous class
 /// and admitting them is what turns a task list into a graveyard of vague
 /// intentions. The policy can be loosened later; a list nobody trusts cannot be
 /// un-poisoned.
-pub const EXTRACT_SYSTEM: &str = r#"You extract tasks from a personal note. You are a strict judge, not a summarizer.
+///
+/// Held as a body with `{TODAY}` still to fill in, private, and reached only
+/// through [`extract_system`]. The date is the one part that changes per
+/// request; everything else is fixed text that `prompts/tests.rs` pins category
+/// by category.
+const EXTRACT_BODY: &str = r#"You extract tasks from a personal note. You are a strict judge, not a summarizer.
+
+Today is {TODAY}. Resolve every relative date against that.
 
 A task is ONLY a concrete future action that the speaker has committed to doing themselves. Everything else is not a task.
 
@@ -184,11 +196,16 @@ These are NOT tasks:
 Most notes contain no tasks. Returning an empty list is the correct and common answer. When uncertain, return nothing. Prefer omitting a task over inventing one.
 
 Reply with JSON only, in this exact shape:
-{"tasks": [{"text": "Call the vet", "evidence": "I need to call the vet about Milo", "confidence": 0.93}]}
+{"tasks": [{"text": "Call the vet", "evidence": "I need to call the vet about Milo", "confidence": 0.93, "due": "2026-01-30", "due_all_day": true, "due_phrase": "before Friday", "kind": "todo"}]}
 
 - "text" is a short imperative rewrite of the commitment.
 - "evidence" MUST be copied verbatim from the note, character for character. Never paraphrase it.
 - "confidence" is 0.0 to 1.0.
+- "due" is when it must happen, resolved against today. Use "YYYY-MM-DD" with "due_all_day": true for a day with no time of day. Use a full "YYYY-MM-DDTHH:MM:SS" with "due_all_day": false only when a time was actually said.
+- "due_phrase" is the words the date was read from, copied verbatim from the note, exactly like "evidence". Give it even when "due" is null.
+- "kind" is "event" only for an appointment at a stated time. Everything else, including a deadline, is "todo".
+
+NEVER guess a date. "Sometime next week", "soon", "at some point", "one of these days" and "in a bit" cannot be resolved: return "due": null and "due_all_day": false, and still give the "due_phrase". A note with no timing at all gets "due": null and "due_phrase": null.
 
 Examples.
 
@@ -198,212 +215,29 @@ Note: "the deploy went fine this morning, honestly I'm so done with this project
 Note: "Sarah is sending the invoice on Tuesday and the API returns 500 on empty payloads, if that keeps happening we'd roll back."
 {"tasks": []}
 
-Note: "I need to call the vet about Milo tomorrow, and I'll send Tuesday's invoice before Friday."
-{"tasks": [{"text": "Call the vet about Milo", "evidence": "I need to call the vet about Milo tomorrow", "confidence": 0.95}, {"text": "Send Tuesday's invoice", "evidence": "I'll send Tuesday's invoice before Friday", "confidence": 0.92}]}"#;
+Note: "I need to call the vet about Milo, and I'll sort the garage out sometime next week."
+{"tasks": [{"text": "Call the vet about Milo", "evidence": "I need to call the vet about Milo", "confidence": 0.95, "due": null, "due_all_day": false, "due_phrase": null, "kind": "todo"}, {"text": "Sort the garage out", "evidence": "I'll sort the garage out sometime next week", "confidence": 0.72, "due": null, "due_all_day": false, "due_phrase": "sometime next week", "kind": "todo"}]}"#;
+
+/// The extraction system prompt for a given day.
+///
+/// ⚠️ **The date goes in the system message, never the user message.** The note
+/// is still sent as-is — `extract::build_request` carries it unmodified, and a
+/// test pins that — so nothing about the transcript changes.
+///
+/// ⚠️ **Safe here and only here.** Gemma is a general instruct model and its
+/// prompt is tunable text. The same move against s1-mini would be the exact
+/// out-of-distribution failure the module docs above warn about: cleanup's
+/// prompt is a trained wire format and is not touched.
+///
+/// The **weekday** is included, not just the ISO date. "Before Friday" is not
+/// resolvable from `2026-08-23` alone, and asking a language model to compute a
+/// day of the week is asking it to be wrong.
+pub fn extract_system(today: chrono::NaiveDate) -> String {
+    // `replace`, not `format!`: the prompt is full of JSON braces, and a format
+    // string would have to escape every one of them.
+    EXTRACT_BODY.replace("{TODAY}", &today.format("%A, %-d %B %Y (%Y-%m-%d)").to_string())
+}
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const ALL_STYLINGS: [Styling; 4] = [
-        Styling::Casual,
-        Styling::SemiCasual,
-        Styling::SemiFormal,
-        Styling::Formal,
-    ];
-    const ALL_STRUCTURES: [Structure; 2] = [Structure::Prose, Structure::Lists];
-    const ALL_CONTEXTS: [NoteContext; 2] = [NoteContext::General, NoteContext::Email];
-
-    /// Pull the three values back out of an emitted control line, failing the
-    /// test if the shape is not exactly what the model expects.
-    fn split_values(line: &str) -> (String, String, String) {
-        let inner = line
-            .strip_prefix('[')
-            .and_then(|s| s.strip_suffix(']'))
-            .unwrap_or_else(|| panic!("control line is not bracketed: {line:?}"));
-        let parts: Vec<&str> = inner.split("] [").collect();
-        assert_eq!(parts.len(), 3, "control line must carry exactly three groups: {line:?}");
-        let value = |part: &str, key: &str| -> String {
-            part.strip_prefix(&format!("{key}: "))
-                .unwrap_or_else(|| panic!("expected a {key} group, got {part:?}"))
-                .to_string()
-        };
-        (
-            value(parts[0], "Styling"),
-            value(parts[1], "Structure"),
-            value(parts[2], "Context"),
-        )
-    }
-
-    #[test]
-    fn system_prompt_is_byte_identical_to_the_model_card() {
-        // Spelled out longhand instead of being rebuilt the way the constant is:
-        // a test that composed the string by the same route would happily agree
-        // with a later reflow, which is precisely the change that must fail.
-        let from_the_model_card = "You are a text normalizer for speech-to-text transcripts. The input begins with a control line specifying the styling, structure, and context settings; clean the transcript to match those settings and output only the cleaned text.";
-        assert_eq!(
-            CLEANUP_SYSTEM, from_the_model_card,
-            "s1-mini was trained on this exact sentence; rewording it degrades every \
-             cleanup pass and the server still answers 200"
-        );
-    }
-
-    #[test]
-    fn control_line_only_ever_emits_trained_values() {
-        // The trained sets, written out here rather than read from `wire()` —
-        // comparing the output against the function that produced it would pass
-        // no matter what either of them said.
-        let trained_stylings = ["casual", "semi-casual", "semi-formal", "formal"];
-        let trained_structures = ["prose", "lists"];
-        let trained_contexts = ["general", "email"];
-
-        let mut seen = 0;
-        for styling in ALL_STYLINGS {
-            for structure in ALL_STRUCTURES {
-                for context in ALL_CONTEXTS {
-                    let line = control_line(styling, structure, context);
-                    let (s, t, c) = split_values(&line);
-                    assert!(
-                        trained_stylings.contains(&s.as_str()),
-                        "{s:?} is outside the trained styling set; the model would \
-                         hallucinate and still return 200"
-                    );
-                    assert!(
-                        trained_structures.contains(&t.as_str()),
-                        "{t:?} is outside the trained structure set"
-                    );
-                    assert!(
-                        trained_contexts.contains(&c.as_str()),
-                        "{c:?} is outside the trained context set"
-                    );
-                    seen += 1;
-                }
-            }
-        }
-        assert_eq!(seen, 16, "every combination of the three axes must be covered");
-    }
-
-    #[test]
-    fn the_default_axes_are_the_line_the_spec_prints() {
-        assert_eq!(
-            control_line(Styling::SemiFormal, Structure::Prose, NoteContext::General),
-            "[Styling: semi-formal] [Structure: prose] [Context: general]"
-        );
-    }
-
-    #[test]
-    fn defaults_match_the_configured_ones() {
-        assert_eq!(Styling::default(), Styling::SemiFormal);
-        assert_eq!(Structure::default(), Structure::Lists);
-        assert_eq!(NoteContext::default(), NoteContext::General);
-    }
-
-    #[test]
-    fn an_unrecognized_config_value_falls_back_to_the_trained_default() {
-        // Same rule as `NoteColor::from_config_name`: a typo in the TOML must
-        // not reach the model, because an out-of-set value is not rejected —
-        // it is answered with garbage.
-        assert_eq!(Styling::from_config_name("baroque"), Styling::SemiFormal);
-        assert_eq!(Structure::from_config_name("tables"), Structure::Lists);
-        assert_eq!(NoteContext::from_config_name("sms"), NoteContext::General);
-        assert_eq!(Styling::from_config_name(""), Styling::SemiFormal);
-    }
-
-    #[test]
-    fn config_names_survive_stray_case_and_whitespace() {
-        assert_eq!(Styling::from_config_name("  Semi-Casual \n"), Styling::SemiCasual);
-        assert_eq!(Structure::from_config_name("PROSE"), Structure::Prose);
-        assert_eq!(NoteContext::from_config_name(" Email"), NoteContext::Email);
-    }
-
-    #[test]
-    fn every_config_spelling_round_trips_to_its_wire_token() {
-        // Config spells these with hyphens, and so does the wire format, so the
-        // two agree — but only because each spelling has an explicit arm.
-        for name in ["casual", "semi-casual", "semi-formal", "formal"] {
-            assert_eq!(Styling::from_config_name(name).wire(), name);
-        }
-        for name in ["prose", "lists"] {
-            assert_eq!(Structure::from_config_name(name).wire(), name);
-        }
-        for name in ["general", "email"] {
-            assert_eq!(NoteContext::from_config_name(name).wire(), name);
-        }
-    }
-
-    #[test]
-    fn the_transcript_is_separated_from_the_control_line_by_one_newline() {
-        let msg = cleanup_user_message(
-            Styling::Formal,
-            Structure::Lists,
-            NoteContext::Email,
-            "so uh remind bob about the thing",
-        );
-        assert_eq!(
-            msg,
-            "[Styling: formal] [Structure: lists] [Context: email]\nso uh remind bob about the thing"
-        );
-        assert_eq!(msg.lines().next().unwrap(), control_line(Styling::Formal, Structure::Lists, NoteContext::Email));
-        assert_eq!(msg.matches('\n').count(), 1, "a blank line between the two is off-format");
-    }
-
-    #[test]
-    fn a_multi_line_transcript_is_passed_through_untouched() {
-        // Only the first newline belongs to the format; the rest are the user's.
-        let msg = cleanup_user_message(
-            Styling::default(),
-            Structure::default(),
-            NoteContext::default(),
-            "  first line\nsecond line  ",
-        );
-        assert!(msg.ends_with("\n  first line\nsecond line  "), "got {msg:?}");
-    }
-
-    /// Every category the policy suppresses, in the spec's own words. Written
-    /// out longhand: the point is to fail if one is dropped during an edit,
-    /// and a test that iterated over the prompt's own bullets would not.
-    #[test]
-    fn the_extraction_prompt_names_every_negative_category() {
-        for category in [
-            "Completed or past action",
-            "Someone else's action",
-            "Hypothetical or conditional",
-            "Opinion, venting, emotion",
-            "Observation or fact",
-            "Vague aspiration or idea",
-            "Rhetorical question",
-        ] {
-            assert!(
-                EXTRACT_SYSTEM.contains(category),
-                "naming a category is what suppresses it; `{category}` is missing"
-            );
-        }
-    }
-
-    #[test]
-    fn the_extraction_prompt_says_an_empty_answer_is_normal() {
-        assert!(EXTRACT_SYSTEM
-            .contains("Returning an empty list is the correct and common answer"));
-        assert!(EXTRACT_SYSTEM.contains("When uncertain, return nothing"));
-    }
-
-    #[test]
-    fn the_extraction_prompt_carries_at_least_two_hard_negative_exemplars() {
-        // Positive-only exemplars teach the model that output is always
-        // expected, which is the same over-triggering failure the negative
-        // categories exist to prevent.
-        let empty_answers = EXTRACT_SYSTEM.matches(r#"{"tasks": []}"#).count();
-        assert!(
-            empty_answers >= 2,
-            "expected at least two exemplars answering with an empty list, found {empty_answers}"
-        );
-    }
-
-    #[test]
-    fn the_extraction_prompt_demands_verbatim_evidence() {
-        // The parser rejects evidence that is not in the note. If the prompt
-        // stopped asking for a verbatim span, every proposal would start
-        // failing that check and extraction would silently return nothing.
-        assert!(EXTRACT_SYSTEM.contains("copied verbatim from the note"));
-    }
-}
+#[path = "prompts/tests.rs"]
+mod tests;

@@ -37,6 +37,12 @@
 
 #[path = "../llm/mod.rs"]
 mod llm;
+/// The placeholder-token grammar. Pure std with no crate-rooted paths, so it
+/// includes cleanly — and it has to be here, because a note holding an image
+/// carries `[[beamer:…]]` in its body and grading the model against text it is
+/// never sent would measure the wrong thing.
+#[path = "../notes/blocks.rs"]
+mod blocks;
 #[path = "../notes/model.rs"]
 mod note_model;
 #[path = "../notes/task.rs"]
@@ -221,13 +227,22 @@ async fn main() -> Result<()> {
     for (i, (note, decided)) in gradeable.iter().take(planned).enumerate() {
         print!("── [{}/{planned}] {} ", i + 1, note.id);
         println!("{}", "─".repeat(46usize.saturating_sub(note.id.len())));
-        for line in note.body.trim().lines() {
+        // Exactly what the pipeline sends: tokens stripped, never escaped.
+        let sent = blocks::plain_text(&note.body);
+        for line in sent.trim().lines() {
             println!("   │ {line}");
         }
         let _ = std::io::stdout().flush();
 
+        // The day the note was **captured**, not the day the eval runs. A note
+        // saying "before Friday" only ever meant a Friday relative to when it
+        // was spoken; grading it against today would measure nothing.
+        let today = chrono::DateTime::parse_from_rfc3339(&note.created)
+            .map(|dt| dt.with_timezone(&chrono::Local).date_naive())
+            .unwrap_or_else(|_| chrono::Local::now().date_naive());
+
         let t0 = Instant::now();
-        let proposals = extract::extract(&base_url, &cfg, &note.body, timeout).await;
+        let proposals = extract::extract(&base_url, &cfg, &sent, today, timeout).await;
         let elapsed = t0.elapsed();
 
         let proposals = match proposals {

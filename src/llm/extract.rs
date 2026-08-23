@@ -17,14 +17,32 @@
 //!    never shown to anyone is not a labelled example and must not reach
 //!    `tasks.json`, where it would pollute the eval corpus with a decision
 //!    nobody made.
+//!
+//! Dates get four more gates, in [`resolve_date`]. Every one of them
+//! **downgrades rather than discards**: a date the model got wrong costs the
+//! date, never the task. Losing a real commitment because its date failed to
+//! parse would be the worst possible trade.
 
 use std::time::Duration;
 
+use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, NaiveDateTime};
 use serde::Deserialize;
 
 use super::chat::{self, ChatError, ChatRequest, Message, ResponseFormat};
 use super::prompts;
 use super::ExtractConfig;
+
+/// Whether a dated task is a deadline or an appointment.
+///
+/// Mirrors `notes::task::TaskKind`, and is deliberately a separate type for the
+/// same reason [`ProposedTask`] is: this module cannot reach into the crate (see
+/// the module rule in `prompts.rs`), and the store owns the persisted shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TaskKind {
+    #[default]
+    Todo,
+    Event,
+}
 
 /// One task the model proposed, after grounding and the confidence floor.
 ///
@@ -39,6 +57,14 @@ pub struct ProposedTask {
     /// false positive visible in one glance.
     pub evidence: String,
     pub confidence: f32,
+    /// `YYYY-MM-DD` when `due_all_day`, otherwise `YYYY-MM-DDTHH:MM:SS`.
+    /// `None` when the model found no date, or found one that failed a gate.
+    pub due: Option<String>,
+    pub due_all_day: bool,
+    /// The verbatim span the date was read from. Survives when `due` does not —
+    /// that asymmetry is what lets the UI offer a picker instead of a shrug.
+    pub due_phrase: Option<String>,
+    pub kind: TaskKind,
 }
 
 #[derive(Deserialize)]
@@ -55,6 +81,121 @@ struct RawTask {
     evidence: String,
     #[serde(default)]
     confidence: f32,
+    #[serde(default)]
+    due: Option<String>,
+    /// The model's `due_all_day` flag is deliberately **not** read. Whether a
+    /// value names a day or a moment is decided by the shape of `due` itself in
+    /// [`parse_due`], because the two can contradict each other — a model
+    /// answering `"2026-08-25T09:00:00"` with `due_all_day: true` has said
+    /// something about a time and then denied it, and the value is the half
+    /// that carries the information. Serde ignores the extra key.
+    #[serde(default)]
+    due_phrase: Option<String>,
+    /// Free text, not an enum: an unrecognised value must degrade to `Todo`,
+    /// and a `#[serde(other)]` variant would make that a parse concern rather
+    /// than a validation one — a malformed `kind` would take the whole envelope
+    /// down with it and cost the user every task in the note.
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+/// A validated date, or as much of one as survived.
+#[derive(Debug, Clone, PartialEq, Default)]
+struct ResolvedDate {
+    due: Option<String>,
+    all_day: bool,
+    phrase: Option<String>,
+}
+
+/// Apply the four date gates. Never fails — the worst outcome is no date.
+///
+/// 1. **`due_phrase` must ground in the note**, via the same normalize-and-
+///    contains check `evidence` gets. This is the strongest available guard
+///    against an invented date and it costs nothing new: a model that made the
+///    date up has to have made the phrase up too.
+/// 2. **`due` must parse.** Unparseable keeps the phrase and drops the date.
+/// 3. **`due` may not be more than a day in the past.** A model resolving
+///    "Friday" against the wrong year is the classic failure here, and it is
+///    otherwise completely silent — the task looks fine and is filed under
+///    2025. One day of slack, not zero, so a pass running just after midnight
+///    on something due "today" is not thrown away.
+/// 4. **An unrecognised `kind` becomes `Todo`.** Handled by the caller.
+///
+/// `today` is passed in rather than read from the clock so every gate is
+/// testable without mocking time.
+fn resolve_date(raw: &RawTask, note: &str, today: NaiveDate) -> ResolvedDate {
+    let phrase = raw
+        .due_phrase
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .filter(|p| {
+            let ok = is_grounded(p, note);
+            if !ok {
+                tracing::warn!(
+                    "extraction: dropped ungrounded due_phrase {:?} on {:?}",
+                    p, raw.text
+                );
+            }
+            ok
+        })
+        .map(str::to_string);
+
+    // Gate 1 also gates the date: a date read from a phrase that is not in the
+    // note was read from nothing.
+    if phrase.is_none() {
+        return ResolvedDate::default();
+    }
+
+    let Some(due) = raw.due.as_deref().map(str::trim).filter(|d| !d.is_empty()) else {
+        return ResolvedDate { due: None, all_day: false, phrase };
+    };
+
+    let Some((normalized, all_day, day)) = parse_due(due) else {
+        tracing::warn!("extraction: {:?} is not a date, keeping the phrase only", due);
+        return ResolvedDate { due: None, all_day: false, phrase };
+    };
+
+    if day < today - ChronoDuration::days(1) {
+        tracing::warn!(
+            "extraction: {:?} resolved to {}, which is in the past — keeping the phrase only",
+            phrase, day
+        );
+        return ResolvedDate { due: None, all_day: false, phrase };
+    }
+
+    ResolvedDate { due: Some(normalized), all_day, phrase }
+}
+
+/// Parse the three shapes the model is asked for, plus RFC3339 in case it adds
+/// an offset it was never given.
+///
+/// Returns the value normalized to what the store holds, whether it names a
+/// whole day, and the day it falls on.
+fn parse_due(due: &str) -> Option<(String, bool, NaiveDate)> {
+    if let Ok(date) = NaiveDate::parse_from_str(due, "%Y-%m-%d") {
+        return Some((date.format("%Y-%m-%d").to_string(), true, date));
+    }
+    if let Ok(dt) = DateTime::parse_from_rfc3339(due) {
+        let local = dt.with_timezone(&chrono::Local).naive_local();
+        return Some((local.format("%Y-%m-%dT%H:%M:%S").to_string(), false, local.date()));
+    }
+    let dt = NaiveDateTime::parse_from_str(due, "%Y-%m-%dT%H:%M:%S")
+        .or_else(|_| NaiveDateTime::parse_from_str(due, "%Y-%m-%dT%H:%M"))
+        .ok()?;
+    Some((dt.format("%Y-%m-%dT%H:%M:%S").to_string(), false, dt.date()))
+}
+
+/// Gate 4. Anything the prompt did not ask for is a to-do.
+fn parse_kind(kind: Option<&str>) -> TaskKind {
+    match kind.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("event") => TaskKind::Event,
+        Some("todo") | None => TaskKind::Todo,
+        Some(other) => {
+            tracing::debug!("extraction: unrecognised kind {:?}, treating as a to-do", other);
+            TaskKind::Todo
+        }
+    }
 }
 
 /// Strip a markdown code fence, if the model wrapped its answer in one.
@@ -110,6 +251,7 @@ pub fn parse_tasks(
     body: &str,
     note: &str,
     min_confidence: f32,
+    today: NaiveDate,
 ) -> Result<Vec<ProposedTask>, ChatError> {
     let json = strip_fences(body);
     let envelope: TaskEnvelope =
@@ -137,10 +279,17 @@ pub fn parse_tasks(
             tracing::debug!("extraction: dropped {:?} below the floor", raw.text);
             continue;
         }
+        // The date is resolved last, and can only ever remove itself. By the
+        // time control reaches here the task has already earned its place.
+        let date = resolve_date(&raw, note, today);
         kept.push(ProposedTask {
             text: raw.text.trim().to_string(),
             evidence: raw.evidence.trim().to_string(),
             confidence,
+            due: date.due,
+            due_all_day: date.all_day,
+            due_phrase: date.phrase,
+            kind: parse_kind(raw.kind.as_deref()),
         });
     }
     Ok(kept)
@@ -152,11 +301,14 @@ pub fn parse_tasks(
 /// structurally valid by construction rather than by hope. `strip_fences`
 /// stays anyway — the constraint is not honoured by every server version, and
 /// the eval harness may point at one that is not.
-pub fn build_request(cfg: &ExtractConfig, note: &str) -> ChatRequest {
+/// `today` reaches the model in the **system** message. The note itself is
+/// still sent byte for byte, which is what keeps the transcript the only thing
+/// the user message ever carries.
+pub fn build_request(cfg: &ExtractConfig, note: &str, today: NaiveDate) -> ChatRequest {
     ChatRequest {
         model: cfg.model.clone(),
         messages: vec![
-            Message::system(prompts::EXTRACT_SYSTEM),
+            Message::system(prompts::extract_system(today)),
             Message::user(note),
         ],
         response_format: Some(ResponseFormat::json_object()),
@@ -164,122 +316,22 @@ pub fn build_request(cfg: &ExtractConfig, note: &str) -> ChatRequest {
 }
 
 /// Run one extraction pass.
+/// `today` is a parameter rather than a clock read so the validation gates are
+/// testable without mocking time — and so `task_eval` can grade a note against
+/// the day it was *captured*, which is the only day its relative dates ever
+/// meant anything against.
 pub async fn extract(
     base_url: &str,
     cfg: &ExtractConfig,
     note: &str,
+    today: NaiveDate,
     timeout: Duration,
 ) -> Result<Vec<ProposedTask>, ChatError> {
-    let request = build_request(cfg, note);
+    let request = build_request(cfg, note, today);
     let body = chat::complete(base_url, &request, timeout).await?;
-    parse_tasks(&body, note, cfg.min_confidence)
+    parse_tasks(&body, note, cfg.min_confidence, today)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const NOTE: &str =
-        "I need to call the vet about Milo tomorrow. Sarah is sending the invoice on Tuesday.";
-
-    fn one_task(evidence: &str, confidence: f32) -> String {
-        format!(
-            r#"{{"tasks":[{{"text":"Call the vet","evidence":"{evidence}","confidence":{confidence}}}]}}"#
-        )
-    }
-
-    #[test]
-    fn evidence_not_in_note_is_rejected_as_fabrication() {
-        let body = one_task("I promised to rewire the whole house", 0.99);
-        assert!(
-            parse_tasks(&body, NOTE, 0.5).unwrap().is_empty(),
-            "a task whose span is not in the note is invented, and confidence \
-             says nothing about that — a fabricating model is confident"
-        );
-    }
-
-    #[test]
-    fn empty_evidence_is_not_grounding() {
-        // Every string contains the empty string. Without an explicit guard a
-        // model that simply omitted `evidence` would pass the one check that
-        // does not depend on its judgment.
-        let body = one_task("", 0.99);
-        assert!(parse_tasks(&body, NOTE, 0.5).unwrap().is_empty());
-    }
-
-    #[test]
-    fn an_empty_task_list_is_a_successful_answer_not_an_error() {
-        // The common case. Most notes contain no tasks, and treating that as a
-        // failure would light up a retry affordance on every ordinary note.
-        assert_eq!(parse_tasks(r#"{"tasks":[]}"#, NOTE, 0.5).unwrap(), vec![]);
-        assert_eq!(parse_tasks(r#"{}"#, NOTE, 0.5).unwrap(), vec![]);
-    }
-
-    #[test]
-    fn fenced_json_is_tolerated() {
-        let inner = one_task("I need to call the vet about Milo tomorrow", 0.9);
-        for wrapped in [
-            format!("```json\n{inner}\n```"),
-            format!("```\n{inner}\n```"),
-            format!("  ```json\n{inner}\n```  "),
-        ] {
-            let got = parse_tasks(&wrapped, NOTE, 0.5).unwrap();
-            assert_eq!(got.len(), 1, "failed on: {wrapped}");
-        }
-    }
-
-    #[test]
-    fn a_task_at_exactly_the_floor_is_kept() {
-        let body = one_task("I need to call the vet about Milo tomorrow", 0.5);
-        assert_eq!(parse_tasks(&body, NOTE, 0.5).unwrap().len(), 1);
-
-        let below = one_task("I need to call the vet about Milo tomorrow", 0.49);
-        assert!(parse_tasks(&below, NOTE, 0.5).unwrap().is_empty());
-    }
-
-    #[test]
-    fn the_floor_is_applied_here_and_not_left_to_the_ui() {
-        // A row nobody is ever shown is not a labelled example. Letting it
-        // through to be filtered at render time would put a decision nobody
-        // made into tasks.json and poison the eval corpus.
-        let body = one_task("I need to call the vet about Milo tomorrow", 0.2);
-        assert!(parse_tasks(&body, NOTE, 0.5).unwrap().is_empty());
-    }
-
-    #[test]
-    fn grounding_survives_the_whitespace_a_transcript_carries() {
-        let note = "I need to  call the vet\nabout Milo tomorrow.";
-        let body = one_task("I need to call the vet about milo tomorrow", 0.9);
-        assert_eq!(
-            parse_tasks(&body, note, 0.5).unwrap().len(),
-            1,
-            "a doubled space or a line break in the transcript must not read as a fabrication"
-        );
-    }
-
-    #[test]
-    fn an_out_of_range_confidence_is_clamped_not_fatal() {
-        let body = one_task("I need to call the vet about Milo tomorrow", 4.2);
-        let got = parse_tasks(&body, NOTE, 0.5).unwrap();
-        assert_eq!(got[0].confidence, 1.0);
-    }
-
-    #[test]
-    fn malformed_json_is_an_error_not_an_empty_list() {
-        // These must be distinguishable: an empty list marks the stage Done,
-        // a parse failure marks it Failed and offers a retry.
-        assert!(matches!(
-            parse_tasks("the model said something else entirely", NOTE, 0.5),
-            Err(ChatError::Malformed(_))
-        ));
-    }
-
-    #[test]
-    fn the_extraction_request_asks_the_server_to_constrain_the_grammar() {
-        let req = build_request(&ExtractConfig::default(), NOTE);
-        assert_eq!(req.model, "gemma-4-E4B_q4_0-it");
-        assert!(req.response_format.is_some());
-        assert_eq!(req.messages[0].content, prompts::EXTRACT_SYSTEM);
-        assert_eq!(req.messages[1].content, NOTE, "the note is sent as-is");
-    }
-}
+#[path = "extract/tests.rs"]
+mod tests;

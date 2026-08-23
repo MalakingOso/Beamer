@@ -97,7 +97,10 @@ impl NoteStore {
     /// caller here is a background model pass, not the user. A missing id is a
     /// no-op everywhere in this module and must not dirty the store, matching
     /// `set_open`'s guard.
-    fn find_mut<'a>(notes: &'a mut [Note], id: &str) -> Option<&'a mut Note> {
+    ///
+    /// `pub(super)` so `edit.rs` shares it — its window-event writes are
+    /// machine writes under the same rule.
+    pub(super) fn find_mut<'a>(notes: &'a mut [Note], id: &str) -> Option<&'a mut Note> {
         notes.iter_mut().find(|n| n.id == id)
     }
 }

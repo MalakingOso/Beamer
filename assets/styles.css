@@ -1221,14 +1221,24 @@ body {
 }
 
 .note-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-family: "DM Mono", "Cascadia Code", monospace;
   font-size: 11px;
   color: var(--fg-secondary);
 }
 
+/* A count, not a thumbnail. Rendering the images here would need the board to
+   run its own asset handler for a strip nobody reads at card size. */
+.note-card-clips {
+  font-family: inherit;
+}
+
 .note-card-actions {
   display: flex;
   align-items: center;
+  gap: 6px;
   padding-right: 12px;
   opacity: 0;
   transition: opacity var(--duration-fast) var(--ease);
@@ -1255,6 +1265,15 @@ body {
 .note-action-btn:hover {
   color: var(--accent);
   border-color: var(--border-strong);
+}
+
+/* The second press of the two-step delete. Red only once it is armed: a
+   permanently-red Delete on every archived card would read as a warning about
+   the card rather than about the click. */
+.note-action-danger,
+.note-action-danger:hover {
+  color: var(--danger);
+  border-color: var(--danger);
 }
 
 .notes-header-actions {
@@ -1417,6 +1436,74 @@ body {
   color: var(--fg-muted);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* The dated half of a task row. `Add to calendar` sits beside the chip rather
+   than in a menu: it is one click, per task, and nothing reaches a calendar
+   without it. */
+.task-due-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.task-due {
+  padding: 1px 7px;
+  font-family: "DM Mono", "Cascadia Code", monospace;
+  font-size: 11px;
+  color: var(--fg-secondary);
+  background: var(--accent-subtle);
+  border-radius: var(--radius);
+  white-space: nowrap;
+}
+
+.task-due.overdue {
+  color: var(--danger);
+  background: var(--danger-subtle);
+}
+
+/* The phrase the model saw and would not turn into a date. Quiet and italic:
+   it is a quotation from the note, not a value. */
+.task-due.unresolved {
+  background: transparent;
+  border: 1px dashed var(--border);
+  font-style: italic;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
+
+.task-due-input {
+  padding: 1px 4px;
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--fg-secondary);
+  background: transparent;
+  border: 2px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.task-due-btn {
+  padding: 1px 7px;
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--fg-secondary);
+  background: transparent;
+  border: 2px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease),
+              color var(--duration-fast) var(--ease),
+              border-color var(--duration-fast) var(--ease);
+}
+
+.task-row:hover .task-due-btn { opacity: 1; }
+
+.task-due-btn:hover {
+  color: var(--accent);
+  border-color: var(--border-strong);
 }
 
 /* ── Local AI card ────────────────────────────────────────────────────────
