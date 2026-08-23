@@ -444,6 +444,15 @@ mod tests {
     }
 
     #[test]
+    fn the_token_opener_is_the_literal_the_chat_guard_duplicates() {
+        // `src/llm/chat.rs` cannot reach this module — no crate-rooted paths
+        // are allowed under `src/llm/` — so it spells `[[beamer:` out. This is
+        // the test that catches the two drifting apart.
+        assert_eq!(OPEN, "[[beamer:");
+        assert!(token_for("x").starts_with("[[beamer:"));
+    }
+
+    #[test]
     fn token_for_matches_what_parse_accepts() {
         // One spelling, in one place. A drift between writer and reader would
         // turn every new attachment into literal text.

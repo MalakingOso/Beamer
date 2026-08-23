@@ -272,12 +272,12 @@ pub fn TasksPage(props: TasksPageProps) -> Element {
     // Cloned into owned rows rather than held as borrows: the controls below
     // capture their ids in click handlers, which cannot outlive a `read()`
     // guard on the store. Same reasoning as `notes_page`.
-    // Read once per render rather than per row: every chip and every sort
-    // compares against the same day, and a boundary crossed mid-render would
-    // show two rows disagreeing about what "today" is.
-    let today = chrono::Local::now().date_naive();
-
+    // Read inside the memo, not beside it. A `use_memo` closure is created once
+    // and never recreated, so a date captured out here would freeze at first
+    // render — a page left open across midnight would sort against yesterday
+    // while the chips below labelled against today.
     let groups = use_memo(move || {
+        let today = chrono::Local::now().date_naive();
         let accepted: Vec<Task> =
             tasks.read().accepted().into_iter().cloned().collect();
         let store = notes.read();
@@ -289,6 +289,10 @@ pub fn TasksPage(props: TasksPageProps) -> Element {
             })
             .collect::<Vec<_>>()
     });
+
+    // The render body's own read, for the chips. Same day as the memo's in
+    // every case that matters; both are re-evaluated when the store changes.
+    let today = chrono::Local::now().date_naive();
 
     let outstanding =
         groups.read().iter().flat_map(|(_, _, rows)| rows).filter(|t| !t.done).count();

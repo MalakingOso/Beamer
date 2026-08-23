@@ -185,8 +185,16 @@ also means an `evidence` span can never contain token text, because
 
 The invariant is pinned at the pure layer, in `blocks`'s tests: a two-image body
 yields three text runs and **no run contains `[[beamer:`**. `cleanup::clean` is
-HTTP, so the call count itself is not unit-testable — verify it in
-`RUST_LOG=beamer=debug` instead, where no request body may contain a token.
+HTTP, so the call count itself is not unit-testable — but the wire is guarded at
+runtime: `chat::complete` scans every outgoing message and emits a
+`tracing::warn!` if one carries a token. There is no other symptom, so it warns
+rather than merely logging. Under `RUST_LOG=beamer=debug` each request also logs
+its model, message count and total size, so a segmented pass is visible as three
+lines rather than one.
+
+⚠️ `chat.rs` spells `[[beamer:` out as a literal, because `src/llm/**` may not
+reach `notes::blocks`. `blocks`'s own test pins that literal — that is what
+catches the two drifting apart.
 
 ## Extraction is a precision problem
 

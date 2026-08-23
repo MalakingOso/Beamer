@@ -101,6 +101,13 @@ body { font-family:"Recursive","Segoe UI Variable","Segoe UI",system-ui,sans-ser
   overflow:hidden; background:transparent; padding:6px 12px;
   font-family:inherit; font-size:14px;
   line-height:1.5; color:var(--ink); caret-color:var(--accent); }
+/* The last run fills whatever is left, so a plain note is one big clickable
+   textarea exactly as it was before the stack existed. Without this a
+   two-line note leaves ~100px of dead space that focuses nothing — and a note
+   with no attachments is the common case. `parse` always ends with a text run,
+   so this selector always matches. */
+.sticky-blocks > .sticky-body:last-child { flex:1 0 auto; }
+
 .sticky-body::selection { background:rgba(75,0,130,0.18); }
 .sticky-body::placeholder { color:#94a0b8; }
 
