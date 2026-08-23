@@ -1167,6 +1167,10 @@ body {
   align-items: stretch;
   gap: 12px;
   padding: 0;
+  /* Same reason as `.task-group`: bounded scrolling column plus
+     `overflow: hidden` means a card would otherwise be squashed and clip its
+     own body rather than letting `.content` scroll. */
+  flex: 0 0 auto;
   overflow: hidden;
   background: var(--bg-surface);
   border: 2px solid var(--border);
@@ -1315,6 +1319,12 @@ body {
 .task-group {
   display: flex;
   flex-direction: column;
+  /* `.content` is a bounded flex column, so its children shrink by default —
+     and `overflow: hidden` below cancels the automatic `min-height: auto` that
+     would otherwise stop a box shrinking past its own rows. Without this the
+     groups squash instead of the page scrolling, and the rows are clipped
+     mid-sentence. Boxes keep their height; `.content` does the scrolling. */
+  flex: 0 0 auto;
   overflow: hidden;
   background: var(--bg-surface);
   border: 2px solid var(--border);
@@ -1344,6 +1354,9 @@ body {
   flex: 1;
   min-width: 0;
   align-self: center;
+  /* The stripe supplies the left inset via the header's gap; nothing supplies a
+     right one, so without this the ellipsis sits on the border. */
+  padding: 6px 12px 6px 0;
   overflow: hidden;
   font-family: "DM Mono", "Cascadia Code", monospace;
   font-size: 12px;
@@ -1356,6 +1369,7 @@ body {
 .task-group-badge {
   align-self: center;
   padding-right: 12px;
+  white-space: nowrap;
   font-size: 11px;
   color: var(--fg-muted);
 }
