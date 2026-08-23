@@ -47,6 +47,10 @@ use crate::ui::sticky_css::STICKY_CSS;
 /// Size a note gets when it has none of its own.
 pub const DEFAULT_NOTE_SIZE: (u32, u32) = (320, 260);
 
+/// Smallest a note may be dragged to. Enough for the bar, one line and the
+/// footer — below that the grip itself stops being reachable.
+pub const MIN_NOTE_SIZE: (u32, u32) = (180, 140);
+
 /// Vertical space reserved for the GNOME top panel.
 ///
 /// A `GetWorkArea` extension method would be more correct — it would account
@@ -139,6 +143,9 @@ async fn open_note_window(
         // background color below — same combination the pill window uses.
         .with_transparent(true)
         .with_inner_size(LogicalSize::new(w as f64, h as f64))
+        // A floor, so the grip cannot drag a note down to nothing it can
+        // never be dragged back out of.
+        .with_min_inner_size(LogicalSize::new(MIN_NOTE_SIZE.0 as f64, MIN_NOTE_SIZE.1 as f64))
         // Honored natively on Windows; ignored by Mutter, which is why the
         // GNOME extension exists. Set on both so the Windows build needs no
         // special case and gets the same scatter for free.

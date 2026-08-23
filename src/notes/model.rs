@@ -5,6 +5,7 @@
 //! persistence.
 
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// How far one model pass has got on a note.
 ///
@@ -78,6 +79,75 @@ impl NoteColor {
     }
 }
 
+/// Something a note references, rendered inline where its `[[beamer:<id>]]`
+/// token sits in `body`.
+///
+/// ⚠️ **Paths point at the user's own files and are never copied or deleted.**
+/// Beamer does not own an image the way a document editor would: dropping a
+/// photo on a note records where that photo lives, and moving the file breaks
+/// the reference visibly (`ui::sticky_blocks` renders a missing-file card with
+/// a "Locate…" button). That is the deliberate trade — a note is never a second
+/// copy of your library, and deleting a note can never delete your photo.
+///
+/// `#[serde(tag = "kind")]` so `attachments.json`-shaped rows stay readable by
+/// eye and a new variant can be added without renumbering anything.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Attachment {
+    Image { id: String, path: PathBuf, alt: Option<String> },
+    Link { id: String, url: String, title: Option<String> },
+    File { id: String, path: PathBuf },
+}
+
+impl Attachment {
+    /// The id its token carries.
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Image { id, .. } | Self::Link { id, .. } | Self::File { id, .. } => id,
+        }
+    }
+
+    /// The file this points at, if it points at one. `None` for a link.
+    pub fn path(&self) -> Option<&std::path::Path> {
+        match self {
+            Self::Image { path, .. } | Self::File { path, .. } => Some(path.as_path()),
+            Self::Link { .. } => None,
+        }
+    }
+
+    /// What to call it in the UI: the file name, or the link's host.
+    pub fn label(&self) -> String {
+        match self {
+            Self::Image { path, .. } | Self::File { path, .. } => path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.to_string_lossy().into_owned()),
+            Self::Link { url, title, .. } => match title {
+                Some(t) if !t.trim().is_empty() => t.clone(),
+                _ => link_label(url),
+            },
+        }
+    }
+}
+
+/// A link's host and path, without the scheme — what a chip shows.
+///
+/// Hand-rolled rather than a URL crate: this is presentation, the input is
+/// already known to start with a scheme, and a wrong answer costs a slightly
+/// ugly chip rather than a broken link (the `url` field is what is opened).
+fn link_label(url: &str) -> String {
+    let rest = url
+        .split_once("://")
+        .map_or(url, |(_, rest)| rest)
+        .trim_end_matches('/');
+    let rest = rest.strip_prefix("www.").unwrap_or(rest);
+    if rest.is_empty() {
+        url.to_string()
+    } else {
+        rest.to_string()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Note {
     pub id: String,
@@ -108,7 +178,22 @@ pub struct Note {
     /// exactly what Wayland does not permit, and the API that appears to do it
     /// returns `Ok((0, 0))` rather than an error.
     pub pos: Option<(i32, i32)>,
+    /// Logical pixels, captured from the window's own resize events.
+    ///
+    /// Unlike `pos`, size **is** legitimately observable on Wayland — it
+    /// arrives in the configure event rather than having to be guessed — so it
+    /// is captured and restored. This does not reopen the deliberate
+    /// scatter-on-launch decision: a note still appears somewhere new each
+    /// launch, now at the size you left it.
     pub size: Option<(u32, u32)>,
+    /// Attachments referenced by `[[beamer:<id>]]` tokens in `body`, in no
+    /// particular order — `body` owns reading order.
+    ///
+    /// `#[serde(default)]`, so a `notes.json` written before attachments
+    /// existed loads with an empty vec. Same free-migration mechanism as the
+    /// stage fields above; keep it that way.
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
     pub open: bool,
     pub archived: bool,
 }

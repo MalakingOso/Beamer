@@ -92,6 +92,135 @@ prefers a match whose app id looks like Beamer's and falls back to a title-only
 match, logging when it does. A hard filter was rejected: guessing the app id
 wrong would break placement silently, and diagnosing that costs a log out.
 
+## A note body is a block stack, not a textarea
+
+A note holds text, images, links and dropped files **interleaved in reading
+order**. The body is still one `String`; attachments live in it as placeholder
+tokens.
+
+```
+body:  "Ring Sarah about the\n[[beamer:18f2a-0001]]\nQ3 deck before Friday."
+        └── run 0 ──────────┘ └── attachment ─────┘ └── run 1 ───────────┘
+```
+
+The grammar is deliberately narrow, and lives in exactly one module,
+`notes::blocks` — pure, no Dioxus, fully tested:
+
+- A token is `[[beamer:<id>]]` **alone on its own line**, after trimming.
+- Anything else, including a token mid-line, is literal text.
+- `[[` cannot come out of dictation, so no transcript can accidentally make one.
+- **An id with no matching `Attachment` renders as literal text.** A
+  desynchronised note fails visibly rather than swallowing a line.
+
+`parse` returns strictly alternating `Text`/`Attachment` blocks, synthesizing
+**empty text runs** at both ends and between adjacent attachments — that is what
+gives the UI a textarea above a leading image and below a trailing one.
+`reassemble` works off an exact tiling of the original body, so an all-`None`
+result is byte-identical; that is what makes "cleanup changed nothing" mean
+nothing changed.
+
+⚠️ **`NoteStore::search` matches `blocks::plain_text(body)`, not `body`.**
+Without it every attachment-bearing note would match the query "beamer" through
+its own tokens.
+
+⚠️ **`raw` never gains a token.** It stays the verbatim transcript.
+
+⚠️ **Tokens never reach either model.** This is the constraint that shapes the
+cleanup path — see `agent_docs/local_inference.md`, failure mode 6, before
+touching `src/llm/` or `notes/pipeline.rs`.
+
+| Module | Job |
+|---|---|
+| `notes::blocks` | The grammar. `parse`, `plain_text`, `reassemble`, `set_run`, `insert_token`, `remove_token`. Pure. |
+| `notes::edit` | `add_attachment` / `remove_attachment` / `prune_attachments` / `relocate_attachment`, plus `set_size` and `delete`. |
+| `ui::sticky_blocks` | Rendering, the per-window asset handler, and drop classification. |
+
+### Files are referenced, never copied
+
+An `Attachment::Image` holds the **path to your file**. Beamer never copies,
+moves or deletes it, and deleting a note cannot delete your photo. The price is
+that moving the file breaks the reference — made visible, never silent: the
+block becomes a muted card naming the file, with the full path on hover and a
+**Locate…** button that reopens the picker and repoints it.
+
+Because Beamer owns no media files, the only thing that can be *orphaned* is a
+**record** — an `Attachment` whose token the user deleted out of a textarea.
+`prune_attachments` collects those, in the same store write as the edit.
+
+### Getting content in
+
+| Gesture | Result |
+|---|---|
+| Drop a file | `Image` if the extension is a WebKit-decodable raster, else `File` |
+| Drop a link from a browser | `Link` chip, from `text/uri-list` or a bare `text/plain` URL |
+| Paste a bare URL | `Link` chip |
+| Paperclip in the bar | Native file dialog — the fallback, and the Windows path |
+
+Notes:
+
+- **`ondragover` must call `prevent_default()`** or `ondrop` never fires at all.
+- On every platform but Windows, wry's native drag-drop handler merges real
+  filesystem paths into the HTML event, so `e.files()` is authoritative when it
+  is non-empty (`dioxus-desktop/src/webview.rs:157-185`).
+- ⚠️ **`ClipboardData` carries nothing on desktop** —
+  `SerializedClipboardData` is an empty struct. The clipboard is read directly
+  with `arboard`, **synchronously**, because `prevent_default` rides the event's
+  own IPC response and a spawned read would answer too late to suppress the
+  insert.
+- **Pasted image bytes are out of scope**, deliberately: an attachment is a
+  reference to a file, and a screenshot on the clipboard is not a file anywhere.
+  Detected rather than ignored — the footer says so and points at the paperclip.
+- ⚠️ Only **dropped or pasted** links become chips. A URL typed or dictated
+  inside a run stays plain text; linkifying inside a `<textarea>` is not
+  possible without replacing the editor.
+- Dropping *between* two runs is deferred; a drop appends at the end.
+
+### Images are served, not inlined
+
+`img { src: "/note-media/<attachment-id>" }`, answered by an asset handler.
+
+⚠️ **Registered inside `StickyNote`, from `sticky_blocks::use_note_media`** —
+`use_asset_handler` resolves `crate::window()` by `consume_context`, so a
+registration in `App()` binds to the main window and every note's image 404s,
+silently, as a broken image. Same per-window rule as the close handler below.
+
+The URL carries an **id, never a path**: the handler resolves it against that
+note's own `attachments` and can therefore only ever serve a file that note
+already references. Chosen over `data:` URIs, which would put whole photos into
+the DOM string on every render.
+
+## Notes are resized by the client, and the size is remembered
+
+`with_decorations(false)` means the compositor offers no edge to grab, so
+`.sticky-grip` in the footer calls `drag_resize_window(ResizeDirection::SouthEast)`
+— tao's wrapper for `xdg_toplevel.resize`. Unlike positioning this is
+**client-initiated**, so it needs no extension method and **no log out**.
+`with_min_inner_size` gives a 180×140 floor so a note cannot be dragged to
+nothing.
+
+Size is captured where position deliberately is not, and the reason is
+principled rather than pragmatic: **a window's size arrives in the compositor's
+configure event**, whereas its position is something a Wayland client is never
+told. `WindowEvent::Resized` is a fact; `outer_position()` is a lie that returns
+`Ok((0,0))`.
+
+Two things to get right, both otherwise silent:
+
+- ⚠️ **`Resized` carries `PhysicalSize`; the builder consumed a `LogicalSize`.**
+  Divide by `scale_factor()` and store logical. At scale 1.0 the two agree, so
+  the bug is invisible on this machine and reopens every note at double size on
+  a HiDPI one. `ui::sticky::logical_size` does it, and is tested.
+- ⚠️ **Guard with `peek` *before* any `write()`.** `Resized` fires once per
+  frame of a grip drag and again when the window maps, and `Signal::write`
+  notifies every subscriber whether or not the value changed — so an unguarded
+  call re-renders the note and the whole board for a size already recorded.
+  `set_size`'s own guard is not enough: by then the lock is taken. `set_size`
+  also does **not** bump `modified`, or the board would reshuffle per mouse move.
+
+This does **not** reopen the decision below. Notes still appear somewhere new
+each launch, now at the size you left them — and `place_next` already takes a
+size, so the scatter improves for free.
+
 ## Notes are placed, not remembered
 
 **Position persistence was dropped by decision (2026-08-21).** Nothing records
@@ -200,6 +329,10 @@ Each sticky window is its own `VirtualDom` with its own scope tree.
 `notes.json` beside `config.toml`. Written atomically (temp file + rename); a
 corrupt file is preserved as `.json.corrupt` rather than overwritten.
 
+Migration is free and stays free: `Note` has no `deny_unknown_fields` and every
+field added since v1 is `#[serde(default)]`. A `notes.json` written before
+attachments existed loads with an empty vec.
+
 Three write paths, because one is not enough:
 
 1. **Immediate flush on capture** (`orchestrator::sink::do_note_capture`) — a
@@ -210,6 +343,24 @@ Three write paths, because one is not enough:
    second.
 3. **Flush in the tray Quit handler** — `process::exit` skips destructors *and*
    the interval tick.
+
+Dropping, pasting and attaching also flush **inline**, on the same argument as
+capture: a photo you just dropped must not be lost to a crash before the tick.
+
+### Delete, which the store did not have until now
+
+`archive` remains the everyday, non-destructive gesture. `NoteStore::delete`
+removes a note outright and is offered **only on an archived card, behind a
+two-step confirm** on the board.
+
+Deleting a note also drops its rows from `TaskStore` (`delete_for_note`). That
+is a **deliberate exception** to "dismissed rows are retained as labelled
+negatives" — everywhere else a decision is permanent corpus data, but an
+explicit delete means gone, and keeping the rows would leave the corpus holding
+labels for a note whose text no longer exists to explain them. Rows are removed
+first, so a crash between the two strands nothing.
+
+**Files on disk are never touched.** See "Files are referenced, never copied".
 
 ## Local AI
 
@@ -226,6 +377,10 @@ Apache 2.0 plus a binding term requiring the exact string
 `"S1-mini" by "Superwhisper"`. Pinned by an exact-equality test.
 
 ## Gotchas
+
+- **The block model needed no extension change, and no log out.** Attachments,
+  the resize grip and delete are all client-side. The extension is still at v5
+  and `GetVersion` is still the only authoritative way to check it.
 
 - **`note_hotkey = ""` means note capture is off entirely**, by design, so the
   dictation hotkey can never be silently diverted. Set one before testing —

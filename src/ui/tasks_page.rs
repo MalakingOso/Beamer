@@ -19,7 +19,10 @@
 
 use dioxus::prelude::*;
 
-use crate::notes::task::Task;
+use chrono::{Datelike, NaiveDate};
+
+use crate::notes::ics;
+use crate::notes::task::{Due, Task};
 use crate::notes::task_store::TaskStore;
 use crate::notes::{Note, NoteStore};
 use crate::ui::icons::IconCheck;
@@ -98,6 +101,65 @@ fn heading_for(note: Option<&Note>) -> Heading {
     }
 }
 
+/// How a due date reads on a chip.
+///
+/// Relative wording for the near days, because "tomorrow" is what the user
+/// said and what they will look for. Beyond that an absolute date, because
+/// "in 9 days" is not something anyone can plan against.
+pub fn due_label(due: Due, today: NaiveDate) -> String {
+    let day = due.date();
+    let time = match due {
+        Due::At(dt) => format!(" {}", dt.format("%H:%M")),
+        Due::AllDay(_) => String::new(),
+    };
+    let days = (day - today).num_days();
+    let when = match days {
+        0 => "Today".to_string(),
+        1 => "Tomorrow".to_string(),
+        -1 => "Yesterday".to_string(),
+        // Inside the coming week a weekday name is the most useful form, and
+        // it is unambiguous because it can only mean the next one.
+        2..=6 => day.format("%A").to_string(),
+        _ if day.year() == today.year() => day.format("%-d %b").to_string(),
+        _ => day.format("%-d %b %Y").to_string(),
+    };
+    format!("{when}{time}")
+}
+
+/// What an `<input type="date">` / `datetime-local"` value means for the store.
+///
+/// The picker submits `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM`; an empty value means
+/// the user cleared it, which must clear the date rather than store `""`.
+pub fn picked_due(value: &str) -> (Option<String>, bool) {
+    let value = value.trim();
+    if value.is_empty() {
+        return (None, false);
+    }
+    let all_day = !value.contains('T');
+    (Some(value.to_string()), all_day)
+}
+
+/// Order rows within a note: overdue first, then by date, then undated, then
+/// done — and stable inside each band, so the caller's newest-first survives.
+///
+/// Sorting by date rather than only by `done` is the point of dating tasks at
+/// all: a list that knows what is due tomorrow and shows it fourth is a list
+/// that has to be read in full anyway.
+fn due_rank(task: &Task, today: NaiveDate) -> (u8, i64) {
+    if task.done {
+        return (3, 0);
+    }
+    match task.due_parsed() {
+        Some(due) => {
+            let days = (due.date() - today).num_days();
+            // Overdue leads, and the *most* overdue leads it.
+            (if days < 0 { 0 } else { 1 }, days)
+        }
+        // Undated work is not urgent by default and is not buried either.
+        None => (2, 0),
+    }
+}
+
 /// Group already-accepted, already-sorted rows by their note.
 ///
 /// The filter and the newest-first sort belong to `TaskStore::accepted`, not
@@ -111,7 +173,7 @@ fn heading_for(note: Option<&Note>) -> Heading {
 /// places would cost the provenance this page exists for. The sort is stable,
 /// so ticking a box moves one row down and leaves everything else where the
 /// eye last saw it.
-fn group_accepted(rows: Vec<Task>) -> Vec<(String, Vec<Task>)> {
+fn group_accepted(rows: Vec<Task>, today: NaiveDate) -> Vec<(String, Vec<Task>)> {
     let mut groups: Vec<(String, Vec<Task>)> = Vec::new();
     for task in rows {
         match groups.iter_mut().find(|(id, _)| *id == task.note_id) {
@@ -120,9 +182,85 @@ fn group_accepted(rows: Vec<Task>) -> Vec<(String, Vec<Task>)> {
         }
     }
     for (_, bucket) in groups.iter_mut() {
-        bucket.sort_by_key(|t| t.done);
+        bucket.sort_by_key(|t| due_rank(t, today));
     }
     groups
+}
+
+/// The dated half of a task row: a chip, or the phrase the model could not
+/// resolve beside a picker.
+///
+/// Three states, and the middle one is the whole reason `due_phrase` exists:
+///
+/// | State | Shown |
+/// |---|---|
+/// | Resolved | A date chip, red when overdue, and **Add to calendar** |
+/// | Unresolved phrase | The words the model saw, and a date input |
+/// | No timing mentioned | Nothing |
+///
+/// Nothing here reaches a calendar on its own. Export is a click, per task,
+/// which follows from the standing decision that tasks are suggestions and
+/// nothing is ever added unconfirmed.
+#[derive(Props, Clone, PartialEq)]
+struct DueRowProps {
+    task: Task,
+    tasks: Signal<TaskStore>,
+    today: NaiveDate,
+}
+
+#[component]
+fn DueRow(props: DueRowProps) -> Element {
+    let DueRowProps { task, mut tasks, today } = props;
+    let id = task.id.clone();
+
+    if let Some(due) = task.due_parsed() {
+        let overdue = task.is_overdue(today);
+        let export = task.clone();
+        return rsx! {
+            div { class: "task-due-row",
+                span {
+                    class: if overdue { "task-due overdue" } else { "task-due" },
+                    title: "{task.due.clone().unwrap_or_default()}",
+                    "{due_label(due, today)}"
+                }
+                button {
+                    class: "task-due-btn",
+                    title: "Write an .ics and hand it to your calendar",
+                    onclick: move |_| match ics::write_temp(&export) {
+                        // One-way: the calendar imports a copy. Beamer cannot
+                        // edit or remove it afterwards — see `notes::ics`.
+                        Ok(path) => crate::ui::open_external(&path.to_string_lossy()),
+                        Err(e) => tracing::warn!("Could not write a calendar file: {}", e),
+                    },
+                    "Add to calendar"
+                }
+            }
+        };
+    }
+
+    let Some(phrase) = task.due_phrase.clone() else {
+        return rsx! {};
+    };
+
+    rsx! {
+        div { class: "task-due-row",
+            // What the model saw and could not turn into a date. Shown rather
+            // than swallowed: it is the difference between a picker you know
+            // what to fill in and a blank field you have to re-read the note for.
+            span { class: "task-due unresolved", title: "Beamer would not guess a date for this",
+                "\u{201c}{phrase}\u{201d}"
+            }
+            input {
+                class: "task-due-input",
+                r#type: "date",
+                title: "Set a date yourself",
+                onchange: move |e: Event<FormData>| {
+                    let (due, all_day) = picked_due(&e.value());
+                    tasks.write().set_due(&id, due, all_day);
+                },
+            }
+        }
+    }
 }
 
 #[component]
@@ -134,11 +272,16 @@ pub fn TasksPage(props: TasksPageProps) -> Element {
     // Cloned into owned rows rather than held as borrows: the controls below
     // capture their ids in click handlers, which cannot outlive a `read()`
     // guard on the store. Same reasoning as `notes_page`.
+    // Read inside the memo, not beside it. A `use_memo` closure is created once
+    // and never recreated, so a date captured out here would freeze at first
+    // render — a page left open across midnight would sort against yesterday
+    // while the chips below labelled against today.
     let groups = use_memo(move || {
+        let today = chrono::Local::now().date_naive();
         let accepted: Vec<Task> =
             tasks.read().accepted().into_iter().cloned().collect();
         let store = notes.read();
-        group_accepted(accepted)
+        group_accepted(accepted, today)
             .into_iter()
             .map(|(id, rows)| {
                 let heading = heading_for(store.get(&id));
@@ -146,6 +289,10 @@ pub fn TasksPage(props: TasksPageProps) -> Element {
             })
             .collect::<Vec<_>>()
     });
+
+    // The render body's own read, for the chips. Same day as the memo's in
+    // every case that matters; both are re-evaluated when the store changes.
+    let today = chrono::Local::now().date_naive();
 
     let outstanding =
         groups.read().iter().flat_map(|(_, _, rows)| rows).filter(|t| !t.done).count();
@@ -223,6 +370,7 @@ pub fn TasksPage(props: TasksPageProps) -> Element {
                                         }
                                         div { class: "task-row-main",
                                             div { class: "task-text", "{task.text}" }
+                                            DueRow { task: task.clone(), tasks, today }
                                             // Full span on hover: it is one
                                             // ellipsized line, and being able to
                                             // check it is the whole point.
@@ -244,133 +392,5 @@ pub fn TasksPage(props: TasksPageProps) -> Element {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::notes::task::TaskStatus;
-    use crate::notes::{NoteColor, NoteOrigin};
-
-    fn task(note_id: &str, text: &str, created: &str, status: TaskStatus, done: bool) -> Task {
-        Task {
-            id: format!("{note_id}-{text}"),
-            note_id: note_id.to_string(),
-            text: text.to_string(),
-            evidence: text.to_string(),
-            confidence: 0.9,
-            status,
-            done,
-            created: created.to_string(),
-            decided: None,
-        }
-    }
-
-    fn texts(groups: &[(String, Vec<Task>)]) -> Vec<&str> {
-        groups.iter().flat_map(|(_, rows)| rows).map(|t| t.text.as_str()).collect()
-    }
-
-    /// Which rows reach this page is `TaskStore::accepted`'s rule, pinned by
-    /// `accepted_excludes_suggested_and_dismissed_rows`. What is pinned here is
-    /// that grouping does not quietly re-sort what it was handed — the caller
-    /// owns newest-first order, and a sort re-added here would fight it.
-    #[test]
-    fn grouping_preserves_the_order_it_was_given() {
-        let rows = vec![
-            task("n1", "Newest", "2026-08-22T12:00:00+01:00", TaskStatus::Accepted, false),
-            task("n1", "Oldest", "2026-08-22T09:00:00+01:00", TaskStatus::Accepted, false),
-        ];
-        assert_eq!(texts(&group_accepted(rows)), vec!["Newest", "Oldest"]);
-    }
-
-    #[test]
-    fn tasks_are_grouped_under_the_note_that_produced_them() {
-        // Newest first, which is the order `TaskStore::accepted` hands over.
-        let rows = vec![
-            task("n2", "Send the invoice", "2026-08-22T11:00:00+01:00", TaskStatus::Accepted, false),
-            task("n1", "Book a table", "2026-08-22T10:30:00+01:00", TaskStatus::Accepted, false),
-            task("n1", "Call the vet", "2026-08-22T10:00:00+01:00", TaskStatus::Accepted, false),
-        ];
-        let groups = group_accepted(rows);
-        assert_eq!(groups.len(), 2, "one group per source note, not one row per task");
-        assert_eq!(
-            groups[0].0, "n2",
-            "the note you last accepted from leads; grouping must not reshuffle to \
-             note-creation order and bury the row just added"
-        );
-        assert_eq!(texts(&groups[1..]), vec!["Book a table", "Call the vet"]);
-    }
-
-    #[test]
-    fn done_tasks_sink_below_the_ones_still_outstanding() {
-        let rows = vec![
-            task("n1", "Done early", "2026-08-22T12:00:00+01:00", TaskStatus::Accepted, true),
-            task("n1", "Still to do", "2026-08-22T10:00:00+01:00", TaskStatus::Accepted, false),
-        ];
-        assert_eq!(
-            texts(&group_accepted(rows)),
-            vec!["Still to do", "Done early"],
-            "a ticked row must stop competing for attention with work that is left"
-        );
-    }
-
-    #[test]
-    fn a_ticked_task_stays_inside_its_own_note_group() {
-        let rows = vec![
-            task("n2", "Open", "2026-08-22T11:00:00+01:00", TaskStatus::Accepted, false),
-            task("n1", "Done", "2026-08-22T10:00:00+01:00", TaskStatus::Accepted, true),
-        ];
-        let groups = group_accepted(rows);
-        assert_eq!(groups.len(), 2);
-        assert_eq!(
-            texts(&groups[1..]),
-            vec!["Done"],
-            "done rows sink within their group, never into a separate section — the \
-             group is the provenance this page exists to show"
-        );
-    }
-
-    #[test]
-    fn a_task_whose_note_is_gone_still_gets_a_heading() {
-        let h = heading_for(None);
-        assert!(!h.openable, "there is no window to open for a note that no longer exists");
-        assert_eq!(h.badge, Some("deleted"));
-        assert_eq!(
-            h.stripe, "slate",
-            "an unattributed group must not borrow another note's colour as an index"
-        );
-    }
-
-    #[test]
-    fn an_archived_notes_heading_resolves_but_does_not_offer_a_click() {
-        let mut store = NoteStore::default();
-        let id = store.create("call the vet".into(), NoteColor::Teal, NoteOrigin::Dictated);
-        store.archive(&id);
-        let h = heading_for(store.get(&id));
-        assert_eq!(h.text, "call the vet", "an archived note is still the task's provenance");
-        assert_eq!(h.stripe, "teal");
-        assert!(
-            !h.openable,
-            "the reconciler only opens a note that is open and not archived, so a click \
-             here would look live and silently do nothing"
-        );
-    }
-
-    #[test]
-    fn a_long_note_heading_is_trimmed_and_marked() {
-        let h = heading_preview(&"word ".repeat(50));
-        assert!(h.ends_with('\u{2026}'), "a trimmed heading must say so: {h}");
-        assert!(h.chars().count() <= HEADING_CHARS + 1);
-    }
-
-    #[test]
-    fn a_heading_collapses_the_whitespace_a_transcript_carries() {
-        assert_eq!(heading_preview("call   the\n\nvet  "), "call the vet");
-    }
-
-    #[test]
-    fn an_empty_note_is_named_rather_than_left_blank() {
-        assert_eq!(
-            heading_preview("   \n "),
-            "Untitled note",
-            "a blank heading would leave its tasks looking unattributed"
-        );
-    }
-}
+#[path = "tasks_page/tests.rs"]
+mod tests;

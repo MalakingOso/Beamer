@@ -247,7 +247,7 @@ pub fn App() -> Element {
                         HistoryPage { history }
                     },
                     Page::Notes => rsx! {
-                        NotesPage { notes, config, registry: sticky_registry }
+                        NotesPage { notes, config, tasks, registry: sticky_registry }
                     },
                     Page::Tasks => rsx! {
                         TasksPage { notes, tasks, registry: sticky_registry }

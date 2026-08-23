@@ -14,14 +14,17 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::config::Config;
 
-/// Public so `StageOutcome` is nameable from the model-pass callers that arrive
-/// in Batch 2; a private module would make it a private-in-public return type.
+pub mod blocks;
+pub mod edit;
+pub mod ics;
+/// Public so `StageOutcome` is nameable from the model-pass callers; a private
+/// module would make it a private-in-public return type.
 pub mod lifecycle;
 mod model;
 pub mod pipeline;
 pub mod task;
 pub mod task_store;
-pub use model::{Note, NoteColor, NoteOrigin, StageState};
+pub use model::{Attachment, Note, NoteColor, NoteOrigin, StageState};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NoteStore {
@@ -40,7 +43,11 @@ impl Default for NoteStore {
 
 /// Monotonic within a process run, so two notes created in the same
 /// millisecond still get distinct ids without pulling in a uuid dependency.
-fn next_id() -> String {
+///
+/// `pub(crate)` so attachment ids come from the same scheme — dropping three
+/// files at once must not give two of them the same id, which a timestamp
+/// alone would.
+pub(crate) fn next_id() -> String {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     let millis = Local::now().timestamp_millis();
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -146,6 +153,7 @@ impl NoteStore {
             color,
             pos: None,
             size: None,
+            attachments: Vec::new(),
             open: true,
             archived: false,
         });
@@ -233,6 +241,10 @@ impl NoteStore {
     /// remove the very words that were spoken, so searching only the display
     /// text would fail to find a note by something you actually said — which is
     /// the most natural thing to search for.
+    ///
+    /// `body` is matched through `blocks::plain_text`, so a note's own
+    /// attachment tokens are not searchable text. Without that, every note
+    /// holding an image would match the query "beamer".
     pub fn search(&self, query: &str) -> Vec<&Note> {
         let needle = query.trim().to_lowercase();
         if needle.is_empty() {
@@ -243,7 +255,7 @@ impl NoteStore {
                 .iter()
                 .filter(|n| !n.archived)
                 .filter(|n| {
-                    n.body.to_lowercase().contains(&needle)
+                    blocks::plain_text(&n.body).to_lowercase().contains(&needle)
                         || n.raw.to_lowercase().contains(&needle)
                 })
                 .collect(),

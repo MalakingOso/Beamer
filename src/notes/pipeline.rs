@@ -38,8 +38,9 @@ use crate::config::Config;
 use crate::llm::cleanup::{self, Cleaned};
 use crate::llm::extract;
 use crate::notes::lifecycle::StageOutcome;
+use crate::notes::task::{Proposal, TaskKind};
 use crate::notes::task_store::TaskStore;
-use crate::notes::{NoteStore, StageState};
+use crate::notes::{blocks, NoteStore, StageState};
 use crate::ui::status_log::{log_status, LogLevel, StatusLog};
 
 /// Which stages a request is asking for.
@@ -193,6 +194,44 @@ fn stage_is_pending(store: &NoteStore, id: &str, stage: Stage) -> bool {
     })
 }
 
+/// Clean one note, one text run at a time.
+///
+/// ```text
+/// body --parse--> [Text a][Attach x][Text b]
+///                    |                  |
+///               clean(a)            clean(b)   <- tokens are never sent
+///                    +------ reassemble ------+
+///                                  |
+///   apply_cleanup(id, expected = the ORIGINAL FULL body, reassembled)
+/// ```
+///
+/// ⚠️ **A placeholder token must never reach s1-mini.** It is a trained wire
+/// format, not a chat model; out-of-distribution input comes back garbled at
+/// HTTP 200 with a plausible body, so there is nothing to catch downstream.
+/// `blocks::parse` removes the tokens and `blocks::reassemble` puts the answers
+/// back at the fixed positions they came from.
+///
+/// Five rules, each of which preserves an existing behaviour rather than
+/// adding one:
+///
+/// 1. `sent` is still the **whole** body, so the compare-and-swap in
+///    `apply_cleanup` is unchanged and an edit mid-pass still supersedes.
+/// 2. A blank run is not sent at all; it passes through untouched.
+/// 3. A run answering `NothingToChange` keeps its original text.
+/// 4. If **every** run had nothing to change, the pass reports that and the
+///    body is not rewritten — same as before, and it costs no branch here
+///    because `reassemble` returns the body unchanged.
+/// 5. **A note with no attachments yields exactly one run**, so it is one call
+///    carrying the whole body: today's behaviour, reproduced by construction
+///    rather than by a fast-path flag that could get out of step.
+///
+/// A request that **errors** aborts the pass: the stage is marked failed and
+/// nothing is applied. Half a cleaned note is worse than an uncleaned one, and
+/// the footer's retry re-runs the whole thing.
+///
+/// Cost is one call per run — measured at 0.225s each, so a note with two
+/// images is ~0.7s. Serial on purpose: concurrency here would buy a fraction of
+/// a second and risk reordering the answers.
 async fn run_cleanup(
     id: &str,
     base_url: &str,
@@ -208,39 +247,51 @@ async fn run_cleanup(
         return;
     };
 
-    match cleanup::clean(base_url, cfg, &sent, timeout).await {
-        Ok(outcome) => {
-            let text = match &outcome {
-                Cleaned::Rewritten(t) => t.as_str(),
-                // An empty `cleaned` is how `apply_cleanup` is told "success,
-                // change nothing" — it marks the stage Done and leaves the body
-                // alone rather than blanking it.
-                Cleaned::NothingToChange => "",
-            };
-            match notes.write().apply_cleanup(id, &sent, text) {
-                StageOutcome::Applied => match outcome {
-                    Cleaned::Rewritten(_) => {
-                        tracing::info!("cleanup rewrote note {}", id);
-                    }
-                    Cleaned::NothingToChange => {
-                        tracing::info!("cleanup found nothing to change in note {}", id);
-                    }
-                },
-                StageOutcome::Superseded => {
-                    // Not a failure and not worth a status-log line: the user
-                    // typed while the model was thinking, and their text wins.
-                    // The stage stays Pending so the footer still offers it.
-                    tracing::info!("cleanup for note {} was superseded by an edit", id);
-                }
-                StageOutcome::NoteGone => {
-                    tracing::debug!("note {} disappeared during cleanup", id);
-                }
+    let runs: Vec<String> = blocks::text_runs(&sent).into_iter().map(str::to_string).collect();
+    let mut cleaned: Vec<Option<String>> = Vec::with_capacity(runs.len());
+    let mut changed = false;
+
+    for run in &runs {
+        if run.trim().is_empty() {
+            cleaned.push(None);
+            continue;
+        }
+        match cleanup::clean(base_url, cfg, run, timeout).await {
+            Ok(Cleaned::Rewritten(text)) => {
+                changed = true;
+                cleaned.push(Some(text));
+            }
+            Ok(Cleaned::NothingToChange) => cleaned.push(None),
+            Err(e) => {
+                notes.write().mark_clean_failed(id);
+                tracing::warn!("cleanup failed for note {}: {}", id, e);
+                log_status(status_log, LogLevel::Error, format!("Note cleanup failed: {e}"));
+                return;
             }
         }
-        Err(e) => {
-            notes.write().mark_clean_failed(id);
-            tracing::warn!("cleanup failed for note {}: {}", id, e);
-            log_status(status_log, LogLevel::Error, format!("Note cleanup failed: {e}"));
+    }
+
+    // An unchanged reassembly is byte-identical to `sent`, which `apply_cleanup`
+    // reads as "success, change nothing" via the same empty-response path it
+    // has always had.
+    let text = if changed { blocks::reassemble(&sent, &cleaned) } else { String::new() };
+
+    match notes.write().apply_cleanup(id, &sent, &text) {
+        StageOutcome::Applied => {
+            if changed {
+                tracing::info!("cleanup rewrote note {} ({} run(s))", id, runs.len());
+            } else {
+                tracing::info!("cleanup found nothing to change in note {}", id);
+            }
+        }
+        StageOutcome::Superseded => {
+            // Not a failure and not worth a status-log line: the user typed
+            // while the model was thinking, and their text wins. The stage
+            // stays Pending so the footer still offers it.
+            tracing::info!("cleanup for note {} was superseded by an edit", id);
+        }
+        StageOutcome::NoteGone => {
+            tracing::debug!("note {} disappeared during cleanup", id);
         }
     }
 }
@@ -259,7 +310,11 @@ async fn run_extraction(
     // cleaned, a failed cleanup falls back to `raw` (which `body` still equals),
     // and a cleanup superseded by an edit analyses what the user actually
     // typed — which is what they would want looked at.
-    let Some(text) = notes.peek().get(id).map(|n| n.body.clone()) else {
+    //
+    // Stripped of placeholder tokens, for the same reason cleanup never sends
+    // one. `extract::is_grounded` checks evidence against the string it was
+    // handed, so this also means an evidence span can never contain token text.
+    let Some(text) = notes.peek().get(id).map(|n| blocks::plain_text(&n.body)) else {
         return;
     };
     if text.trim().is_empty() {
@@ -267,14 +322,34 @@ async fn run_extraction(
         return;
     }
 
-    match extract::extract(base_url, cfg, &text, timeout).await {
+    // Supplied here rather than read inside `extract`, so the validation gates
+    // are testable without mocking the clock.
+    let today = chrono::Local::now().date_naive();
+
+    match extract::extract(base_url, cfg, &text, today, timeout).await {
         Ok(proposals) => {
             let count = proposals.len();
             {
                 let mut store = tasks.write();
                 let rows = proposals
                     .into_iter()
-                    .map(|p| TaskStore::new_suggestion(id, p.text, p.evidence, p.confidence))
+                    .map(|p| {
+                        TaskStore::new_suggestion(
+                            id,
+                            Proposal {
+                                text: p.text,
+                                evidence: p.evidence,
+                                confidence: p.confidence,
+                                due: p.due,
+                                due_all_day: p.due_all_day,
+                                due_phrase: p.due_phrase,
+                                kind: match p.kind {
+                                    extract::TaskKind::Event => TaskKind::Event,
+                                    extract::TaskKind::Todo => TaskKind::Todo,
+                                },
+                            },
+                        )
+                    })
                     .collect();
                 store.replace_suggestions(id, rows);
                 // Written now rather than on a tick. Nothing else flushes this

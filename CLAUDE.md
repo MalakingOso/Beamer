@@ -11,8 +11,12 @@ Windows system-tray dictation app. Captures mic audio, transcribes via cloud API
 - `src/hotkey/` — Global hotkey registration (hold-to-talk + toggle modes)
 - `src/config/` — TOML config + vocabulary management
 - `src/notes/` — Note store (`mod.rs`) + types (`model.rs`), stage transitions
-  (`lifecycle.rs`), the model-pass coroutine (`pipeline.rs`), task suggestions
-  (`task.rs`, `task_store.rs`)
+  (`lifecycle.rs`), attachment/size/delete edits (`edit.rs`), the model-pass
+  coroutine (`pipeline.rs`), task suggestions (`task.rs`, `task_store.rs`),
+  calendar export (`ics.rs`)
+  - `blocks.rs` — the `[[beamer:<id>]]` placeholder grammar. Pure. **Read it
+    before touching the body of a note or the cleanup path** — tokens must
+    never reach a model.
 - `src/llm/` — Client for the standalone llama.cpp server (Beamer never spawns
   it). Cleanup (`cleanup.rs`) and extraction (`extract.rs`) over `chat.rs`;
   `prompts.rs` holds both models' input contracts.
@@ -21,7 +25,9 @@ Windows system-tray dictation app. Captures mic audio, transcribes via cloud API
 - `src/tray/` — System tray icon + menu
 - `src/ui/` — Dioxus desktop: settings window, overlay, screen edge glow
   - `src/ui/settings/` — One file per card section (recording, transcription, api_keys, etc.)
-  - `src/ui/sticky*.rs`, `note_layout.rs`, `shell_window.rs` — Sticky note windows, placement
+  - `src/ui/sticky*.rs`, `note_layout.rs`, `shell_window.rs` — Sticky note
+    windows, placement; `sticky_blocks.rs` renders the block stack and serves
+    a note's images to its own webview
   - `src/ui/notes_page.rs` — All-notes board; `tasks_page.rs` — accepted tasks
   - `src/ui/components.rs` — Shared: Card, Select, Toggle, MaskedInput, TagChip
 

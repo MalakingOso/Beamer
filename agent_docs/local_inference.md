@@ -28,10 +28,11 @@ dictation ──> sink::do_note_capture ──> flush to disk ──> pipeline r
 | `llm/mod.rs` | `LlmConfig`, `MODEL_CREDIT`. Config only. |
 | `llm/client.rs` | `GET /v1/models`. On-demand probe, nothing else. |
 | `llm/chat.rs` | `POST /v1/chat/completions`, and the `ChatError` classification. |
-| `llm/prompts.rs` | `CLEANUP_SYSTEM` (a wire format) and `EXTRACT_SYSTEM` (a policy). |
+| `llm/prompts.rs` | `CLEANUP_SYSTEM` (a wire format) and `extract_system(today)` (a policy). |
 | `llm/cleanup.rs` | Stage 1. Builds the request; decides what a response *means*. |
 | `llm/extract.rs` | Stage 2. Fence stripping, evidence grounding, confidence floor. |
-| `notes/pipeline.rs` | The coroutine that runs both and writes the results back. |
+| `notes/blocks.rs` | The placeholder-token grammar. Pure. **Everything below depends on it.** |
+| `notes/pipeline.rs` | The coroutine that runs both, segments the body, and writes the results back. |
 | `notes/lifecycle.rs` | The only code allowed to write a stage result to a note. |
 | `bin/task_eval.rs` | Measures extraction against the user's own accepted/dismissed rows. |
 
@@ -48,8 +49,13 @@ bins — but it is why `llm::extract::ProposedTask` exists separately from
 
 `src/notes/mod.rs` is **not** includable the same way: it reaches for
 `crate::config::Config` to find its storage path. `task_eval` includes only the
-leaf type modules (`notes/model.rs`, `notes/task.rs`) and reads the two JSON
-files with its own envelope structs.
+leaf modules (`notes/model.rs`, `notes/task.rs`, `notes/blocks.rs` — all three
+free of crate-rooted paths) and reads the two JSON files with its own envelope
+structs.
+
+The tests for `prompts.rs` and `extract.rs` live in `prompts/tests.rs` and
+`extract/tests.rs`, reached by `#[path]` from their parents. **The same rule
+applies inside them.**
 
 ## The failures that look like successes
 
@@ -129,6 +135,67 @@ Trained sets: `Styling` ∈ {casual, semi-casual, semi-formal, formal},
 > markdown rendering inside the note's `<textarea>` is a non-issue in practice
 > rather than a deferred problem — list markers are rare, not merely unstyled.
 
+### 6. A placeholder token in the body is out-of-distribution input
+
+A note holding an image carries a `[[beamer:<id>]]` line in its `body` (see
+`agent_docs/sticky_notes.md`). `body` is what cleanup is handed and what it
+overwrites wholesale, and s1-mini has never seen a token like that. The result
+is failure mode 5 by another route: garbled text, HTTP 200, plausible body.
+
+**So a token is never sent. Not escaped, not quoted — removed.**
+
+```
+body ──blocks::parse──> [Text a][Attach x][Text b]
+                           │                  │
+                      clean(a)            clean(b)     <- two calls, no tokens
+                           └── blocks::reassemble ──┐
+                                                    ▼
+        apply_cleanup(id, expected = the ORIGINAL FULL body, reassembled)
+```
+
+Six rules, in `pipeline::run_cleanup`. Each one preserves an existing behaviour
+rather than adding one:
+
+1. `sent` is still the **whole** body, so the compare-and-swap is unchanged and
+   an edit mid-pass still supersedes.
+2. Each `Block::Text` run is cleaned independently by the existing
+   `cleanup::clean`. Runs go over **verbatim** — `cleanup_user_message` is not
+   touched, so the control line is still the wire format it always was.
+3. A blank run is not sent at all and passes through.
+4. A run answering `NothingToChange`, or with an empty reply, keeps its
+   original text. `reassemble` cannot make a run empty, which is what keeps
+   `apply_cleanup`'s `!cleaned.trim().is_empty()` guard meaningful.
+5. If every run had nothing to change, the pass reports that and the body is
+   not rewritten.
+6. **A note with no attachments yields exactly one run** — one call carrying
+   the whole body, today's behaviour, reproduced *by construction*. There is no
+   fast-path flag that could get out of step.
+
+An HTTP error on any run **aborts the pass**: `mark_clean_failed`, nothing
+applied. Half a cleaned note is worse than an uncleaned one, and the footer's
+retry re-runs the whole thing.
+
+Cost is one call per run — 0.225 s each measured, so a note with two images is
+about 0.7 s. Serial on purpose: concurrency here buys a fraction of a second
+and risks reordering the answers.
+
+**Extraction** gets `blocks::plain_text(&body)` — the same tokens removed. That
+also means an `evidence` span can never contain token text, because
+`is_grounded` checks against the string that was actually sent.
+
+The invariant is pinned at the pure layer, in `blocks`'s tests: a two-image body
+yields three text runs and **no run contains `[[beamer:`**. `cleanup::clean` is
+HTTP, so the call count itself is not unit-testable — but the wire is guarded at
+runtime: `chat::complete` scans every outgoing message and emits a
+`tracing::warn!` if one carries a token. There is no other symptom, so it warns
+rather than merely logging. Under `RUST_LOG=beamer=debug` each request also logs
+its model, message count and total size, so a segmented pass is visible as three
+lines rather than one.
+
+⚠️ `chat.rs` spells `[[beamer:` out as a literal, because `src/llm/**` may not
+reach `notes::blocks`. `blocks`'s own test pins that literal — that is what
+catches the two drifting apart.
+
 ## Extraction is a precision problem
 
 A fabricated task is worse than a missed one: a list nobody trusts cannot be
@@ -163,7 +230,8 @@ nobody is ever shown is not a labelled example, and letting it reach
 
 ## The prompt
 
-`EXTRACT_SYSTEM` is tunable — unlike `CLEANUP_SYSTEM` — but its *shape* is not.
+`extract_system(today)` is tunable — unlike `CLEANUP_SYSTEM` — but its *shape*
+is not.
 It enumerates seven negative categories with examples, states that most notes
 contain no tasks and that empty is the correct and common answer, and carries
 **two hard-negative exemplars**. Positive-only exemplars teach a model that
@@ -182,6 +250,72 @@ Spot-checked against the live model on 2026-08-22 (E4B, thinking off):
 | Three real commitments | all three, all grounded |
 
 n=5 is a spot-check, not an evaluation. That is what `task_eval` is for.
+
+## Dated tasks
+
+Extraction used to be **date-blind**: the model was handed the note and nothing
+else, so "before Friday" was unresolvable in principle, not by accident.
+
+`prompts::extract_system(today)` now states the day — **by name as well as by
+number** ("Sunday, 23 August 2026 (2026-08-23)"), because asking a language
+model to compute a weekday from an ISO date is asking it to be wrong.
+
+⚠️ **The date goes in the *system* message.** The note is still sent byte for
+byte as the user message, and a test pins that. ⚠️ **Safe here and only here** —
+Gemma is a general instruct model. The same move against s1-mini is failure
+mode 5; cleanup's prompt is not touched.
+
+Three new fields per proposal:
+
+| Field | Meaning |
+|---|---|
+| `due` | ISO date or datetime, **or null**. Only when concretely resolvable. |
+| `due_phrase` | The **verbatim** span the date was read from. |
+| `kind` | `"todo"` (a deadline) or `"event"` (an appointment at a stated time). |
+
+The prompt names the vague phrasings — "sometime next week", "soon", "in a bit"
+— and requires `due: null` for them **while still returning the phrase**. That
+asymmetry is the design: a model asked for a date will produce one, so the
+policy is strict; and showing the user the words the model saw, beside a date
+picker, turns a dead end into one click.
+
+### The four gates, in `extract::resolve_date`
+
+Every one **downgrades rather than discards**. A date the model got wrong costs
+the date, never the task — losing a real commitment because its date failed to
+parse would be the worst trade available.
+
+1. **`due_phrase` must ground in the note**, via the same normalize-and-contains
+   check `evidence` gets. The strongest guard available against an invented
+   date, and it costs nothing new: a model that made the date up made the phrase
+   up too. Fails → both fields dropped.
+2. **`due` must parse.** Unparseable → keep the phrase, drop the date.
+3. **`due` may not be more than a day in the past.** "Friday" resolved against
+   the wrong year is the classic failure and is otherwise completely silent —
+   the task looks perfect and is filed under 2024. One day of slack, not zero,
+   so a pass running just after midnight is not thrown away.
+4. **An unrecognised `kind` becomes `Todo`.**
+
+The model's own `due_all_day` flag is deliberately **not** read: whether a value
+names a day or a moment is decided by the shape of `due` itself, because the two
+can contradict each other and the value is the half carrying the information.
+
+`extract::extract` takes `today` as a **parameter**, not a clock read, so the
+gates are testable without mocking time — and so `task_eval` can grade each note
+against the day it was *captured*. Grading "before Friday" against the day the
+eval happens to run measures nothing.
+
+Nothing reaches a calendar automatically. `notes/ics.rs` emits a `VTODO` or
+`VEVENT` on an explicit per-task click, which follows directly from tasks being
+suggestions. Two traps live there, both tested: DATE-TIME has exactly three
+valid forms and **an offset suffix is not one of them** (timed values are
+emitted floating), and folding is defined in octets but must break on character
+boundaries.
+
+⚠️ **Date extraction quality is unmeasured**, exactly like the extraction prompt
+it extends. It is contained by design rather than by hope — strict resolution,
+the grounding gate, and a click before anything leaves the app. Extend
+`task_eval` to grade dates once a few dozen dated notes exist.
 
 ## Trigger policy
 

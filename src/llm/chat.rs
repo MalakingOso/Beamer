@@ -153,6 +153,11 @@ pub fn parse_completion(body: &str) -> Result<String, ChatError> {
     Ok(content)
 }
 
+/// The placeholder-token opener, spelled out here because `src/llm/**` may not
+/// use crate-rooted paths and so cannot reach `notes::blocks::token_for`. A
+/// test in that module pins the literal, so a drift is caught there.
+const NOTE_TOKEN_MARKER: &str = "[[beamer:";
+
 /// Send one completion and return the assistant's text.
 ///
 /// ⚠️ Does **not** probe `GET /v1/models` first. A status read resets the
@@ -164,6 +169,25 @@ pub async fn complete(
     request: &ChatRequest,
     timeout: Duration,
 ) -> Result<String, ChatError> {
+    // ⚠️ A placeholder token in an outgoing message is an invariant violation,
+    // not a formatting quirk: s1-mini answers out-of-distribution input with
+    // garbled text at HTTP 200, so nothing downstream can catch it. Warned
+    // about rather than merely logged, because there is no other symptom.
+    // See `agent_docs/local_inference.md`, failure mode 6.
+    if let Some(bad) = request.messages.iter().find(|m| m.content.contains(NOTE_TOKEN_MARKER)) {
+        tracing::warn!(
+            "chat request to {} carries a note placeholder token in its {} message — \
+             the reply will be garbage and the server will still answer 200",
+            request.model, bad.role
+        );
+    }
+    tracing::debug!(
+        "chat request: model={} messages={} chars={}",
+        request.model,
+        request.messages.len(),
+        request.messages.iter().map(|m| m.content.len()).sum::<usize>()
+    );
+
     let response = http_client()
         .post(chat_url(base_url))
         .json(request)

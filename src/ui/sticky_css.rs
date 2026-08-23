@@ -48,6 +48,8 @@ body { font-family:"Recursive","Segoe UI Variable","Segoe UI",system-ui,sans-ser
 #main { padding:0 5px 5px 0; }
 
 .sticky { display:flex; flex-direction:column; height:100%;
+  /* Anchors the drop-target ring below. */
+  position:relative;
   border:2px solid var(--note-border);
   border-radius:var(--radius-lg);
   /* Clips the bar's fill and border-bottom to the rounded top corners —
@@ -86,11 +88,94 @@ body { font-family:"Recursive","Segoe UI Variable","Segoe UI",system-ui,sans-ser
              background var(--duration-fast) var(--ease); }
 .sticky-archive:hover { color:var(--danger); background:rgba(220,38,38,0.10); }
 
-.sticky-body { flex:1; width:100%; resize:none; border:none; outline:none;
-  background:transparent; padding:12px; font-family:inherit; font-size:14px;
+/* --- The block stack -----------------------------------------------------
+   One textarea per text run, one card per attachment, in the order the body
+   puts them. The stack scrolls; each textarea is sized by its `rows` attribute
+   (computed in Rust from the line count) and does not scroll on its own, so a
+   run always shows all of itself and the note scrolls as one document. */
+
+.sticky-blocks { flex:1; min-height:0; overflow-y:auto;
+  display:flex; flex-direction:column; padding:6px 0; }
+
+.sticky-body { width:100%; resize:none; border:none; outline:none;
+  overflow:hidden; background:transparent; padding:6px 12px;
+  font-family:inherit; font-size:14px;
   line-height:1.5; color:var(--ink); caret-color:var(--accent); }
+/* The last run fills whatever is left, so a plain note is one big clickable
+   textarea exactly as it was before the stack existed. Without this a
+   two-line note leaves ~100px of dead space that focuses nothing — and a note
+   with no attachments is the common case. `parse` always ends with a text run,
+   so this selector always matches. */
+.sticky-blocks > .sticky-body:last-child { flex:1 0 auto; }
+
 .sticky-body::selection { background:rgba(75,0,130,0.18); }
 .sticky-body::placeholder { color:#94a0b8; }
+
+/* An attachment. `position:relative` anchors the remove button, which only
+   appears on hover — an always-visible ⤫ on every image would make a note of
+   three photos read as a toolbar. */
+.sticky-attachment { position:relative; margin:2px 12px 6px; }
+.sticky-attachment-remove { position:absolute; top:4px; right:4px;
+  display:flex; align-items:center; justify-content:center;
+  width:20px; height:20px; padding:0; border:none; cursor:pointer;
+  border-radius:var(--radius); background:rgba(255,255,255,0.86);
+  color:var(--ink-soft); font-size:13px; line-height:1;
+  opacity:0; transition:opacity var(--duration-fast) var(--ease),
+                        color var(--duration-fast) var(--ease); }
+.sticky-attachment:hover .sticky-attachment-remove { opacity:1; }
+.sticky-attachment-remove:hover { color:var(--danger); }
+
+.sticky-image { display:block; width:100%; height:auto; max-height:420px;
+  object-fit:contain; border:2px solid var(--note-border);
+  border-radius:var(--radius); background:rgba(255,255,255,0.5); }
+
+/* Links and files are chips, not blocks: they are one line of text and giving
+   them an image-sized card would waste the note. */
+.sticky-link, .sticky-file { display:block; width:100%; text-align:left;
+  padding:6px 26px 6px 8px; border:2px solid var(--note-border);
+  border-radius:var(--radius); background:rgba(255,255,255,0.5);
+  font-family:inherit; font-size:13px; line-height:1.35; color:var(--ink);
+  text-decoration:none; cursor:pointer;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  transition:background var(--duration-fast) var(--ease); }
+.sticky-link:hover, .sticky-file:hover { background:rgba(255,255,255,0.9); }
+
+/* The failure mode reference-by-path buys, made visible. Muted rather than
+   alarming: the file moved, which is a thing that happens, and the card says
+   which file and offers the fix. */
+.sticky-missing { display:flex; flex-direction:column; gap:3px;
+  padding:8px; border:2px dashed var(--note-border);
+  border-radius:var(--radius); background:rgba(255,255,255,0.35); }
+.sticky-missing-title { font-size:11px; letter-spacing:0.04em;
+  text-transform:uppercase; color:var(--ink-soft); }
+.sticky-missing-name { font-size:13px; color:var(--ink);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.sticky-locate { align-self:flex-start; cursor:pointer;
+  font-size:12px; color:var(--accent); text-decoration:underline; }
+
+/* A token whose attachment record is gone. Rendered as the literal text it is
+   — a desynchronised note must fail visibly, not swallow a line. */
+.sticky-orphan-token { padding:2px 12px; font-size:13px; line-height:1.5;
+  font-family:"DM Mono","Cascadia Code",monospace; color:var(--ink-soft); }
+
+/* Native file inputs cannot be styled, so every one of them is hidden behind
+   a label. `display:none` would make some webviews skip the click entirely. */
+.sticky-file-input { position:absolute; width:0; height:0; opacity:0;
+  pointer-events:none; }
+
+.sticky-bar-actions { display:flex; align-items:center; gap:2px; }
+.sticky-attach { display:flex; align-items:center; justify-content:center;
+  cursor:pointer; font-size:13px; line-height:1; padding:3px 5px;
+  border-radius:var(--radius-lg); opacity:0.6;
+  transition:opacity var(--duration-fast) var(--ease),
+             background var(--duration-fast) var(--ease); }
+.sticky-attach:hover { opacity:1; background:rgba(75,0,130,0.08); }
+
+/* Drag feedback. An inset dashed accent rather than an outline, so it cannot
+   push the layout around mid-drag. */
+.sticky-drop-target::after { content:""; position:absolute; inset:6px;
+  border:2px dashed var(--accent); border-radius:var(--radius);
+  pointer-events:none; }
 
 .sticky-gone { display:flex; align-items:center; justify-content:center;
   height:100%; padding:16px; text-align:center;
@@ -136,6 +221,19 @@ body { font-family:"Recursive","Segoe UI Variable","Segoe UI",system-ui,sans-ser
 .sticky-footer { flex:0 0 auto; display:flex; align-items:center; gap:8px;
   padding:4px 9px 6px; }
 
+/* The resize grip. `with_decorations(false)` means the compositor offers no
+   edge to grab, so this is the only way to resize a note. Drawn as two corner
+   rules rather than an icon: it has to read as a grip at 12px. */
+.sticky-grip { margin-left:auto; width:12px; height:12px; flex:0 0 auto;
+  cursor:nwse-resize; opacity:0.45;
+  background:
+    linear-gradient(135deg, transparent 46%, var(--ink-soft) 46%,
+                    var(--ink-soft) 54%, transparent 54%),
+    linear-gradient(135deg, transparent 76%, var(--ink-soft) 76%,
+                    var(--ink-soft) 84%, transparent 84%);
+  transition:opacity var(--duration-fast) var(--ease); }
+.sticky-grip:hover { opacity:0.9; }
+
 /* Quiet on purpose. The cleanup pass has already run by the time the note is
    on screen; this is the way back to it, not an invitation to invoke a model. */
 .sticky-pass { display:flex; align-items:center; justify-content:center;
@@ -148,6 +246,7 @@ body { font-family:"Recursive","Segoe UI Variable","Segoe UI",system-ui,sans-ser
 .sticky-pass:hover { opacity:1; color:var(--accent); background:rgba(75,0,130,0.08); }
 .sticky-pass-done { color:var(--success); }
 
-/* The one place the footer uses words. */
+/* The two places the footer uses words. */
 .sticky-pass-error { font-size:11px; color:var(--danger); }
+.sticky-paste-hint { font-size:11px; color:var(--ink-soft); }
 "#;
