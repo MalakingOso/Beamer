@@ -185,6 +185,25 @@ mod tests {
     }
 
     #[test]
+    fn a_user_edit_still_moves_the_modified_timestamp() {
+        // The other half of the rule above. `set_size` is a window event and
+        // must not reorder the board; typing into a note is an edit and must.
+        let mut store = temp_store("modified_split");
+        let id = store.create("note".into(), NoteColor::Purple, NoteOrigin::Dictated);
+        let before = store.get(&id).unwrap().modified.clone();
+
+        store.set_size(&id, (400, 320));
+        assert_eq!(store.get(&id).unwrap().modified, before);
+
+        store.set_body(&id, "typed something".into());
+        assert_ne!(
+            store.get(&id).unwrap().modified,
+            before,
+            "an edit is what newest-first ordering on the board is for"
+        );
+    }
+
+    #[test]
     fn set_size_with_an_unchanged_value_does_not_dirty_the_store() {
         let mut store = temp_store("size_noop");
         let id = store.create("note".into(), NoteColor::Purple, NoteOrigin::Dictated);

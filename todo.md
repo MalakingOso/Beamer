@@ -36,17 +36,21 @@
       reject `Super+<key>` in `parse()` so it returns `None` instead of a
       dangerous binding. The second is the smaller fix and fails safe —
       `note_hotkey_config()` already treats `None` as "unbound".
-- [ ] `src/notes/task_store.rs` is **474 lines against the 500 limit**, about
-      200 of it tests. The next addition needs the tests split out first.
+- [x] `src/notes/task_store.rs` is **474 lines against the 500 limit**. Done:
+      tests moved to `src/notes/task_store/tests.rs`, reached by `#[path]`.
+      `prompts.rs`, `extract.rs` and `tasks_page.rs` were split the same way
+      for the same reason.
 - [ ] **Suggestion count badge on the notes board.** The spec (§9) calls for a
       note with pending suggestions to show a count on its card in the board.
       The Phase 2/3 plan did not ask for it and it was not built. Small: the
       board would need the `TaskStore` signal as a prop and
       `suggested_for(&id).len()`.
-- [ ] Note windows are placed but their **size** is never captured, so resizing
-      a note is forgotten on restart. `Note::size` is read and honoured; nothing
-      writes it. (Position is forgotten *by design* — see
-      `agent_docs/sticky_notes.md` — but size has no such justification.)
+- [x] Note windows are placed but their **size** is never captured. Done: a
+      `WindowEvent::Resized` arm in `StickyNote` writes `Note::size`, and
+      `.sticky-grip` gives an undecorated note something to resize by. No
+      extension change and therefore no log out — `xdg_toplevel.resize` is
+      client-initiated, unlike positioning. (Position is still forgotten *by
+      design* — see `agent_docs/sticky_notes.md`.)
 - [ ] `GetWorkArea` extension method. Placement insets a fixed 40px for the
       GNOME panel; a real work area would account for docks and other struts.
       Speculative, so deferred — and it costs only the log out that any other
@@ -63,6 +67,39 @@
 - [ ] `assets/styles.css:752` references `var(--bg-elevated)`, which is not
       defined in the token block. Pre-existing since `c709faa`, unrelated to
       notes; an undefined custom property fails silently.
+
+## Sticky Notes — surveyed and deliberately deferred
+
+Considered while planning inline attachments and left out on purpose, so nobody
+re-derives the list from scratch. None of these is blocked; each is simply not
+worth its complexity yet.
+
+- [ ] **Dropping *between* two text runs.** A drop appends at the end of the
+      body today. Per-run drop zones are the obvious next step and are cheap —
+      `blocks::insert_token` already takes a position argument in spirit; it
+      just needs a run index instead of a bool.
+- [ ] **Backspace at the start of a run deletes the block above it.** Not
+      promised, and deliberately not attempted: Dioxus `KeyboardData` carries no
+      caret position, so knowing `selectionStart == 0` needs a `document::eval`
+      roundtrip per keydown. The hover `⤫` on each attachment block is the
+      contract. Try this only if the roundtrip turns out not to be janky.
+- [ ] **Pasted image bytes.** Out of scope while attachments are
+      reference-by-path: a screenshot on the clipboard is not a file anywhere.
+      Would need Beamer to own a media directory, which is the decision that was
+      explicitly not taken. The note detects the case and points at the
+      paperclip rather than silently dropping the paste.
+- [ ] **Thumbnails on the notes board.** The board would need its own asset
+      handler (handlers are per-window) for a strip nobody reads at card size.
+      Cards show `📎 n` instead.
+- [ ] Tags, collapsible notes, in-note checklists, a per-note workspace, and
+      audio playback of the original dictation. All surveyed, none scoped.
+- [ ] **Live two-way calendar entries.** `.ics` export is one-way: Beamer cannot
+      edit or remove what the calendar imported. The upgrade path is Evolution
+      Data Server over the `zbus` dependency Beamer already has — not planned.
+- [ ] **Grade dates in `task_eval`.** `extract_system(today)` and the four
+      validation gates are unmeasured, exactly like the extraction prompt they
+      extend. `task_eval` already passes each note its own capture date, so the
+      harness is ready; it needs the accept/dismiss corpus to grow first.
 
 ## Low Priority
 - [ ] `overlay_enabled` config field is never read — wire it to conditionally show/hide the glow overlay
