@@ -1,22 +1,36 @@
 use anyhow::{bail, Context, Result};
 use reqwest::multipart;
 
+use super::keyterms;
 use super::{http_client, wav::pcm_to_wav};
 use bytes::Bytes;
 
 /// Transcribe audio using the ElevenLabs Scribe v2 batch (REST) API.
 ///
 /// `audio_pcm` must be raw 16-bit LE, 16 kHz, mono PCM. This function wraps it
-/// in a WAV container before uploading. Vocabulary terms are sent as `keyterms`
-/// (max 100, max 50 chars each).
+/// in a WAV container before uploading.
+///
+/// Vocabulary terms go up as repeated `keyterms` multipart fields, sanitised by
+/// `keyterms::sanitize` against the batch budget. ⚠️ The field name is
+/// `keyterms`, **not** `keyterms[]`. Beamer sent the bracketed form until
+/// 2026-08-23, and the server silently ignored it: a 60-character term (well
+/// over the documented 50) came back `200 OK` under `keyterms[]` and
+/// `400 "All keywords must be less than 50 characters"` under `keyterms`. The
+/// bracketed spelling costs nothing and does nothing, so it looks like it
+/// works. Verify with a deliberately invalid term, never with a plausible one.
+///
+/// `no_verbatim` asks the model to drop filler words, false starts and
+/// disfluencies. Off unless the user turns it on.
 pub async fn transcribe_batch(
     api_key: &str,
     audio_pcm: Vec<u8>,
     language: &str,
     vocab: &[String],
+    no_verbatim: bool,
 ) -> Result<String> {
     let wav = pcm_to_wav(&audio_pcm);
     let wav_bytes = Bytes::from(wav);
+    let terms = keyterms::sanitize(vocab, keyterms::BATCH_MAX_TERMS, keyterms::BATCH_MAX_CHARS);
 
     let client = http_client();
     let mut backoff = 1u64;
@@ -26,6 +40,7 @@ pub async fn transcribe_batch(
             .text("model_id", "scribe_v2")
             .text("language_code", language.to_string())
             .text("tag_audio_events", "false")
+            .text("no_verbatim", if no_verbatim { "true" } else { "false" })
             .part(
                 "file",
                 multipart::Part::stream(reqwest::Body::from(wav_bytes.clone()))
@@ -33,11 +48,8 @@ pub async fn transcribe_batch(
                     .mime_str("application/octet-stream")?,
             );
 
-        // Send up to 100 keyterms (ElevenLabs limit)
-        for term in vocab.iter().take(100) {
-            if term.len() <= 50 {
-                form = form.text("keyterms[]", term.clone());
-            }
+        for term in &terms {
+            form = form.text("keyterms", term.clone());
         }
 
         let resp = client

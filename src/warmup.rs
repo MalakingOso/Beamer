@@ -124,7 +124,10 @@ pub async fn warm_all(mut progress: Signal<WarmupProgress>) {
                 .await
                 .map(drop),
             "elevenlabs" => {
-                crate::transcription::start_elevenlabs_session(&api_key, &language)
+                // No keyterms and no no_verbatim: this session's transcript is
+                // thrown away, and keyterm prompting carries a surcharge. The
+                // preconnect exists to warm DNS/TLS, not to transcribe.
+                crate::transcription::start_elevenlabs_session(&api_key, &language, &[], false)
                     .await
                     .map(drop)
             }

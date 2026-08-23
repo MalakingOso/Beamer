@@ -82,6 +82,10 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                 on_language_change: move |lang: String| {
                     save_config(config, |c| c.transcription.language = lang);
                 },
+                no_verbatim: config.read().transcription.no_verbatim,
+                on_no_verbatim_toggle: move |v: bool| {
+                    save_config(config, |c| c.transcription.no_verbatim = v);
+                },
             }
 
             InjectionCard {}

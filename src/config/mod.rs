@@ -75,6 +75,15 @@ pub struct TranscriptionConfig {
     pub backend: String,
     #[serde(default = "default_language")]
     pub language: String,
+    /// Ask the model to drop filler words ("um", "uh"), false starts and
+    /// stutters rather than transcribing them literally. ElevenLabs only
+    /// (`no_verbatim`, supported on both Scribe v2 paths); the Voxtral
+    /// backends have no equivalent and ignore it.
+    ///
+    /// Off by default because it is a change to what you said, not just how
+    /// it is spelled — some dictation is meant to be verbatim.
+    #[serde(default)]
+    pub no_verbatim: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,6 +156,7 @@ impl Default for TranscriptionConfig {
         Self {
             backend: default_backend(),
             language: default_language(),
+            no_verbatim: false,
         }
     }
 }

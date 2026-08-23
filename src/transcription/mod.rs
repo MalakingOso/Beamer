@@ -1,5 +1,6 @@
 mod elevenlabs_batch;
 mod elevenlabs_realtime;
+pub(crate) mod keyterms;
 mod voxtral_batch;
 mod voxtral_realtime;
 mod wav;

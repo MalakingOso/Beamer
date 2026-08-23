@@ -23,6 +23,12 @@ note_mode = "toggle"         # "toggle" or "hold". Toggle by default: a note is
 [transcription]
 backend = "elevenlabs_batch" # elevenlabs_batch | elevenlabs_realtime | mistral_batch | mistral_realtime
 language = "en"              # ISO 639-1 language code
+no_verbatim = false          # ElevenLabs only: ask the model to drop "um",
+                             # "uh", false starts and stutters. Off by default
+                             # because it changes what you said, not just how
+                             # it is spelled. The Voxtral backends have no
+                             # equivalent and ignore it, so the Settings toggle
+                             # is hidden when a Voxtral backend is selected.
 
 [injection]
 # Ordered fallback chain. Defaults:

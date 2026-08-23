@@ -134,9 +134,25 @@ async fn handle_recording(
     }
 
     log_status(status_log, LogLevel::Info, format!("Connecting to {} realtime...", display_name));
+    // Loaded here rather than inside the backend so a missing/unreadable
+    // vocabulary file costs keyterms, never the recording.
+    let vocab = crate::config::vocabulary::Vocabulary::load()
+        .map(|v| v.list().to_vec())
+        .unwrap_or_else(|e| {
+            tracing::warn!("Could not load vocabulary, continuing without keyterms: {}", e);
+            Vec::new()
+        });
     let session_result = match backend.as_str() {
         "voxtral" => transcription::start_voxtral_session(&api_key).await,
-        "elevenlabs" => transcription::start_elevenlabs_session(&api_key, language).await,
+        "elevenlabs" => {
+            transcription::start_elevenlabs_session(
+                &api_key,
+                language,
+                &vocab,
+                cfg.transcription.no_verbatim,
+            )
+            .await
+        }
         // Unreachable today — the match above rejects unknown names and the
         // batch backends were routed away. Spelled out rather than `_ =>` so
         // that adding a backend fails here instead of quietly becoming
@@ -459,7 +475,14 @@ async fn handle_batch_recording(
     let result = if backend == "voxtral_batch" {
         transcription::transcribe_voxtral_batch(api_key, pcm_buffer, &vocab).await
     } else {
-        transcription::transcribe_batch(api_key, pcm_buffer, language, &vocab).await
+        transcription::transcribe_batch(
+            api_key,
+            pcm_buffer,
+            language,
+            &vocab,
+            cfg.transcription.no_verbatim,
+        )
+        .await
     };
     match result {
         Ok(text) => {
