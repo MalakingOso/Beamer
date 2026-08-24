@@ -161,13 +161,21 @@ export class BeamerIndicator {
         this._phase += 0.35;
         // Recording follows the live mic level; processing idles at a calm
         // constant sweep. The smoothing keeps bar motion fluid between the
-        // ~15 Hz level updates coming over D-Bus.
+        // ~15 Hz level updates coming over D-Bus. Attack is faster than
+        // release so the pill snaps up on voice onset instead of oozing up.
         const target = (this._state === 'recording' || this._state === 'note')
             ? Math.max(0.12, this._level)
             : 0.15;
-        this._smoothLevel += (target - this._smoothLevel) * 0.3;
+        const rate = target > this._smoothLevel ? 0.45 : 0.15;
+        this._smoothLevel += (target - this._smoothLevel) * rate;
         for (let i = 0; i < BAR_COUNT; i++) {
-            const wave = 0.35 + 0.65 * Math.abs(Math.sin(this._phase + i * 0.55));
+            // The per-bar sine shimmer is scaled by the level itself, so it
+            // reads as "reacting to speech" rather than a decorative sweep
+            // that runs the same whether or not you're talking: near-silent
+            // bars sit almost still, and the shimmer's full swing only shows
+            // up once the level is actually high.
+            const shimmer = 0.35 + 0.65 * Math.abs(Math.sin(this._phase + i * 0.55));
+            const wave = 1 - this._smoothLevel * (1 - shimmer);
             const h = BAR_MIN_H
                 + (BAR_MAX_H - BAR_MIN_H) * this._smoothLevel * wave;
             this._bars[i].set_height(Math.round(Math.min(BAR_MAX_H, h)));

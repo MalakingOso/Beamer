@@ -121,13 +121,24 @@ const LEVEL_CEIL_DBFS: f32 = -12.0;
 ///
 /// Mapping in the dB domain keeps speech inside a *range* instead of pinned
 /// at its top, which is the whole point of a level meter.
+///
+/// Ordinary speech (0.03–0.15 RMS, see above) lands at ~0.57–0.90 on this
+/// scale, which left the waveform looking flat between a normal and a loud
+/// voice. The `powf` below is not the multiplier boost warned against above
+/// — it's monotonic and fixes both endpoints (0 stays 0, 1 stays 1), so it
+/// can't reintroduce the old saturate-at-1.0 bug. An exponent > 1 stretches
+/// values apart in the upper range where real speech lives, while pushing
+/// near-floor noise even closer to 0.
+const LEVEL_CONTRAST: f32 = 1.4;
+
 fn normalize_rms(rms: f32) -> f32 {
     if rms <= 0.0 {
         // Also keeps log10 away from -inf.
         return 0.0;
     }
     let dbfs = 20.0 * rms.log10();
-    ((dbfs - LEVEL_FLOOR_DBFS) / (LEVEL_CEIL_DBFS - LEVEL_FLOOR_DBFS)).clamp(0.0, 1.0)
+    let level = ((dbfs - LEVEL_FLOOR_DBFS) / (LEVEL_CEIL_DBFS - LEVEL_FLOOR_DBFS)).clamp(0.0, 1.0);
+    level.powf(LEVEL_CONTRAST)
 }
 
 fn chunk_rms(samples: &[f32]) -> f32 {
