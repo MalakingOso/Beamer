@@ -58,7 +58,7 @@ pub(super) fn setup_window_centering(window: DesktopContext) {
 /// centered window, walks `warm_all` through keyring/audio/(mpris)/network,
 /// then closes itself. Pays the one-time costs that would otherwise stall
 /// the first recording.
-pub(super) fn setup_splash(window: DesktopContext) {
+pub(super) fn setup_splash(window: DesktopContext, mut app_ready: Signal<bool>) {
     let warmup_progress = use_signal(WarmupProgress::default);
     let mut splash_ctx: Signal<Option<DesktopContext>> = use_signal(|| None);
 
@@ -120,6 +120,10 @@ pub(super) fn setup_splash(window: DesktopContext) {
                     ctx.close();
                 }
                 splash_ctx.set(None);
+
+                // Sticky notes restored from disk wait on this — the loading
+                // screen going away is the signal, not a fixed delay.
+                app_ready.set(true);
 
                 // Reveal the main window on platforms where it would have
                 // shown at launch. Windows keeps it hidden until tray-click,

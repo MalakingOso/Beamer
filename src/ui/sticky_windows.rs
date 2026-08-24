@@ -305,10 +305,15 @@ pub fn setup_sticky_windows(
     tasks: Signal<TaskStore>,
     passes: Coroutine<PipelineRequest>,
     config: Signal<Config>,
+    app_ready: Signal<bool>,
 ) -> StickyRegistry {
     let registry: StickyRegistry = use_signal(HashMap::new);
 
     use_effect(move || {
+        // Read unconditionally (not just inside the branch below) so the
+        // effect is subscribed to it and reruns the moment the splash closes.
+        let ready = *app_ready.read();
+
         // Subscribe to the store — this is the trigger. The registry is only
         // ever `peek`ed, so opening a window does not re-run this effect.
         let store = notes.read();
@@ -341,7 +346,10 @@ pub fn setup_sticky_windows(
             close_note_window(registry, &id);
         }
 
-        if to_open.is_empty() {
+        // Notes restored from disk wait for the loading screen to finish
+        // before their windows appear; a note dictated just now can only
+        // happen after that point anyway, since the hotkey isn't live yet.
+        if to_open.is_empty() || !ready {
             return;
         }
 

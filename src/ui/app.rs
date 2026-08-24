@@ -50,7 +50,11 @@ pub fn App() -> Element {
     // centered window, walks `warm_all` through keyring/audio/(mpris)/network,
     // then closes itself. Pays the one-time costs that would otherwise stall
     // the first recording.
-    app_setup::setup_splash(window.clone());
+    //
+    // `app_ready` flips true when the splash closes; sticky notes restored
+    // from disk wait on it so they don't pop up over the loading screen.
+    let app_ready = use_signal(|| false);
+    app_setup::setup_splash(window.clone(), app_ready);
 
     let mut current_page = use_signal(|| Page::Home);
     let rec_state = use_signal(RecordingState::default);
@@ -132,7 +136,7 @@ pub fn App() -> Element {
     // Sticky note windows: one effect keeps the set of open windows matching
     // the set of notes that should be showing. Covers both a note dictated just
     // now and notes restored from disk at startup.
-    let sticky_registry = sticky_windows::setup_sticky_windows(window.clone(), notes, tasks, note_passes, config);
+    let sticky_registry = sticky_windows::setup_sticky_windows(window.clone(), notes, tasks, note_passes, config, app_ready);
 
     // Coalesce per-keystroke note edits into one write. `do_note_capture`
     // flushes a newly captured transcript immediately — that one must never be
