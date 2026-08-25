@@ -8,5 +8,6 @@
       "Bash(git add *)",
       "Bash(git commit *)"
     ]
-  }
+  },
+  "outputStyle": "Concise"
 }

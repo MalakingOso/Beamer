@@ -20,6 +20,7 @@ pub mod sticky_chips;
 pub mod sticky_css;
 pub mod sticky_footer;
 pub mod sticky_windows;
+pub mod work_area;
 pub mod status_log;
 pub mod tasks_page;
 pub mod vocab_page;

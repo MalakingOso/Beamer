@@ -94,10 +94,20 @@ lists both `PlaceWindow` and `GetWindowFrame`. The stale-v3 caveat that used to
 sit here is resolved — notes are placed, and the note pill shows its own state
 rather than "Transcribing…" with an idle sweep.
 
-✅ **`PlaceWindow` verified to actually move a window** (2026-08-21): placed a
-live note at 400,300 and `GetWindowFrame` read back exactly
-`(true, 400, 300, 320, 260)`. At scale 1.0 physical and logical pixels agree,
-so this is confirmation rather than proof against a scaling bug.
+⚠️ **`PlaceWindow` moves a *settled* window. It does not move a window that has
+just opened** — corrected 2026-08-25. The 2026-08-21 note here claimed
+`PlaceWindow` was "verified to actually move a window" on the strength of a
+manual `gdbus` call, but that call was aimed at a note that had been open for
+minutes, so it exercised the one case that was never broken. At startup Mutter's
+own initial placement lands *after* the window is findable by title and silently
+overwrites the move: three notes asked for (2311,508), (3389,1036) and
+(1648,584) all reported placed and were all actually on Mutter's 50px cascade at
+(1120,590)+50n — i.e. the clustering the scatter exists to prevent.
+
+`ui::shell_window` now re-reads `GetWindowFrame` after a 500ms settle and
+re-places until the position sticks. **A bare `(true,)` is not verification** —
+in code or at the command line. Read the frame back, after the window settles.
+Full write-up in `agent_docs/sticky_notes.md`.
 
 ⚠️ Re-check the version after any future extension edit — GNOME extensions do
 not hot-reload on Wayland, so every change still needs a full log out.
@@ -169,8 +179,15 @@ and replaced it with a pure, tested function. Recorded in the spec §8 and
   still construct `HotkeyEvent::RecordStart` with no payload. It is
   `#[cfg(target_os = "windows")]`, so Linux builds stay green. This is a **build
   fix**, not parity work. See `todo.md`.
-- Note **size** is never captured, so resizing is forgotten. Unlike position,
-  this has no design justification.
+- **Note size IS captured and persisted** — this line used to say it was not,
+  which is stale. `ui::sticky::StickyNote` handles `WindowEvent::Resized` and
+  writes the logical size through `NoteStore::set_size`; `notes.json` carries a
+  `size` per note. Verified stable across six restarts on 2026-08-25 (268x208,
+  268x208, 320x260 throughout), so resizing is *not* forgotten.
+  ⚠️ Do not measure this with `GetWindowFrame` shortly after launch: it was
+  observed reporting 52px less in each dimension than the persisted size while
+  the window was still settling, which reads convincingly as a shrink-per-restart
+  bug that does not exist. `notes.json` is the source of truth for size.
 - Phases 2 and 3 are **built** — see `agent_docs/local_inference.md`. Phase 3's
   prompt is untuned: it was spot-checked against the live model, not measured
   against a corpus, because none existed. Precision rests on accept/dismiss and

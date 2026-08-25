@@ -228,6 +228,24 @@ where a note was; `ui::note_layout::place_next` scatters each new window around
 the ones already on screen, freshly, every launch. Restart with several notes
 open and they reappear in *different* places. That is correct, not a bug.
 
+⚠️ **The scatter is seeded by the caller, and that is deliberate (2026-08-25).**
+`place_next` takes a `seed` so it stays a pure function the tests can pin, while
+`ui::sticky_windows` supplies a fresh one per launch from the wall clock and
+mixes in each note's index. Both halves matter: an earlier version derived the
+seed from `occupied.len()` alone, which was pure and tested and *guaranteed the
+Nth note landed on the same pixel every launch* — the exact opposite of what
+this section promises. Drop the index mixing and every note in one restore draws
+the same candidate points instead, so they pile up.
+
+The scatter also spans **every** monitor and avoids the main window's estimated
+rectangle. Notes are still not always-on-top; keeping them out from under the
+main window is what makes that decision survivable, not raising them above it.
+The main window's rectangle is an *estimate* — centre of the first monitor, at
+its build size — because it is created with no position and Beamer cannot read
+where Mutter put it: `outer_position()` lies under Wayland, and the title lookup
+is ambiguous since the splash window is titled "Beamer" too. Being wrong only
+scatters notes around a patch of empty desktop.
+
 This removed the hardest and least reliable part of the original design —
 reading a window's own geometry back, and the close-race that came with it —
 and replaced it with a pure function that has real tests.
@@ -240,17 +258,65 @@ Placement lives in two halves:
 
 | Module | Job |
 |---|---|
-| `ui::note_layout` | Pure. Best-candidate sampling over a deterministic LCG. No I/O, no Dioxus. |
-| `ui::shell_window` | D-Bus client for `PlaceWindow`. Retries ~2s because Beamer cannot observe the Wayland map event. |
+| `ui::note_layout` | Pure. Best-candidate sampling over a deterministic LCG, seeded by the caller. No I/O, no Dioxus. |
+| `ui::shell_window` | D-Bus client for `PlaceWindow`. Retries ~5s and **verifies the result**, because neither the map event nor the placement can be observed directly. |
 
-Two ordering facts that are easy to get wrong:
+Four facts that are easy to get wrong, three of them measured on 2026-08-25
+against a two-monitor GNOME 50 Wayland session:
 
 - **Position is chosen at slot-reservation time, synchronously**, not inside
   `open_note_window`. On restart the reconciler opens every note in one pass; if
   placement happened after the `await`, all of them would see the same empty
   occupied set and stack in one spot.
 - **`MonitorHandle::size()` is physical pixels; `move_frame` is logical stage
-  coordinates.** Identical at scale 1.0, divergent at any other.
+  coordinates.** Identical at scale 1.0, divergent at any other. Measured here:
+  two monitors reporting 5120x2880 physical at x=0 and x=5120, scale 2 — so the
+  logical desktop is 5120x1440 and the second monitor's origin is 2560, not
+  5120. Divide by **each monitor's own** scale; there is no single factor on a
+  mixed-DPI desktop.
+- ⚠️ **`window.primary_monitor()` returns `None` on this session, while
+  `available_monitors()` enumerates both screens correctly.** This is the normal
+  path, not an edge case. `work_area` used to ask only for the primary monitor
+  and therefore fell through to its hardcoded 1920x1080 fallback on every single
+  launch, confining every note to the top-left seventh of the desktop. Anything
+  that needs a monitor must fall back to `available_monitors().next()`.
+  `ui::app_setup`'s splash centring still has the unfixed version of this.
+- ⚠️ **`PlaceWindow` returning `true` does not mean the window stayed put.** See
+  below — this is the one that cost the most time.
+
+### The clobber: a placement that succeeds and is then undone
+
+`PlaceWindow` returns `true` when it *found a window by that title and called
+`move_frame` on it*. Mutter applies its **own** initial placement when a window
+is first shown, and that happens **after** the window is already findable by
+title. So an early call is accepted, logged as a success, and silently
+overwritten.
+
+Measured 2026-08-25, three notes, ~10ms after `new_window` resolved:
+
+| Asked for | Actually ended up at |
+|---|---|
+| (2311, 508) | (1120, 590) |
+| (3389, 1036) | (1146, 616) |
+| (1648, 584) | (1196, 666) |
+
+That 50px cascade is Mutter's default placement — and it is *exactly* the
+clustering the scatter exists to prevent. Re-issuing the identical call against
+the settled window moved it correctly on the first try, so `move_frame` was
+never at fault. Believing the first `true` was.
+
+`place_blocking` therefore does not stop at `true`. It sleeps, re-reads the
+frame with `GetWindowFrame`, and only believes a placement that is **still
+there**. The sleep is the load-bearing part: a read taken immediately confirms a
+position Mutter has not clobbered *yet*. `SETTLE` (500ms) is the floor before
+any read is trusted, chosen against the timeline above.
+
+⚠️ **Never treat a bare `(true,)` from `PlaceWindow` as verification, in code or
+at the command line.** The only proof is a `GetWindowFrame` read taken after the
+window has settled. An earlier version of this document recorded `PlaceWindow`
+as "verified to actually move a window" on the strength of a manual `gdbus`
+call — that call was made against a window that had been open for minutes, so it
+tested the one case that was never broken.
 
 ## The reconciler and its invariant
 

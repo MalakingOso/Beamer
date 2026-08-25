@@ -40,7 +40,8 @@ use crate::config::Config;
 use crate::notes::pipeline::PipelineRequest;
 use crate::notes::task_store::TaskStore;
 use crate::notes::{Note, NoteStore};
-use crate::ui::note_layout::{self, Rect};
+use crate::ui::note_layout;
+use crate::ui::work_area::{launch_seed, main_window_points, work_area};
 use crate::ui::sticky::{window_title, StickyNote, StickyNoteProps};
 use crate::ui::sticky_css::STICKY_CSS;
 
@@ -50,37 +51,6 @@ pub const DEFAULT_NOTE_SIZE: (u32, u32) = (320, 260);
 /// Smallest a note may be dragged to. Enough for the bar, one line and the
 /// footer — below that the grip itself stops being reachable.
 pub const MIN_NOTE_SIZE: (u32, u32) = (180, 140);
-
-/// Vertical space reserved for the GNOME top panel.
-///
-/// A `GetWorkArea` extension method would be more correct — it would account
-/// for docks and any other struts — but it is speculative, and adding it later
-/// costs only the log out that any other extension change costs anyway.
-const PANEL_INSET: i32 = 40;
-
-/// The region notes may be placed in, in the compositor's logical coordinates.
-///
-/// `MonitorHandle::size()` reports **physical** pixels while GNOME's
-/// `move_frame` works in **logical** stage coordinates. The two agree at scale
-/// 1.0 and diverge at every other scale, so the factor is divided out here
-/// rather than silently misplacing notes on a HiDPI display.
-fn work_area(window: &DesktopContext) -> Rect {
-    let Some(monitor) = window.primary_monitor() else {
-        // No monitor to ask — assume a plain 1080p desktop. Being wrong here
-        // costs a badly placed note, not a lost one.
-        return Rect { x: 0, y: PANEL_INSET, w: 1920, h: 1080 - PANEL_INSET as u32 };
-    };
-    let scale = monitor.scale_factor();
-    let size = monitor.size();
-    let origin = monitor.position();
-    let logical = |v: i32| (f64::from(v) / scale) as i32;
-    Rect {
-        x: logical(origin.x),
-        y: logical(origin.y) + PANEL_INSET,
-        w: (f64::from(size.width) / scale) as u32,
-        h: ((f64::from(size.height) / scale) as u32).saturating_sub(PANEL_INSET as u32),
-    }
-}
 
 /// One note's entry in the window registry.
 #[derive(Clone)]
@@ -183,8 +153,9 @@ async fn open_note_window(
 
     // Mutter ignores the position the window asked for, so ask the shell to
     // move it instead. `new_window` resolves when the webview is built, not
-    // when the window is mapped and titled, so `place` retries for ~2s rather
-    // than assuming the window is findable yet.
+    // when the window is mapped and titled, so `place` retries rather than
+    // assuming the window is findable yet — and then verifies, because Mutter
+    // places the window itself once it is shown and will otherwise undo this.
     #[cfg(target_os = "linux")]
     crate::ui::shell_window::place(title, pos.0, pos.1, all_workspaces);
     #[cfg(not(target_os = "linux"))]
@@ -354,11 +325,19 @@ pub fn setup_sticky_windows(
         }
 
         let area = work_area(&window);
+        // Notes stay ordinary windows in the normal stacking order — that
+        // decision has not changed. Keeping them away from where the main
+        // window sits is the whole reason it does not need to: a note that is
+        // not underneath it cannot be hidden by it.
+        let main_window = main_window_points(&window);
+        // Fresh every pass, so a restart genuinely re-scatters rather than
+        // reproducing the previous session's layout.
+        let launch = launch_seed();
         // `peek`, not `read`: this is opened-window policy, not a trigger. The
         // effect must re-run when notes change, never when the config does.
         let all_workspaces = config.peek().notes.all_workspaces;
 
-        for note in to_open {
+        for (index, note) in to_open.into_iter().enumerate() {
             let mut reg = registry;
             if reg.peek().contains_key(&note.id) {
                 continue;
@@ -370,9 +349,15 @@ pub fn setup_sticky_windows(
             // see the same empty occupied set and stack in one spot. Reserving
             // the slot with its position means each iteration scatters around
             // the ones before it.
-            let occupied: Vec<(i32, i32)> = reg.peek().values().map(|s| s.pos).collect();
+            let mut occupied: Vec<(i32, i32)> = reg.peek().values().map(|s| s.pos).collect();
+            occupied.extend_from_slice(&main_window);
             let size = note.size.unwrap_or(DEFAULT_NOTE_SIZE);
-            let pos = note_layout::place_next(area, size, &occupied);
+            let pos = note_layout::place_next(
+                area,
+                size,
+                &occupied,
+                note_layout::seed_for(launch, index),
+            );
             reg.write().insert(note.id.clone(), StickySlot { pos, ctx: None });
 
             let window = window.clone();
