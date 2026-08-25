@@ -74,9 +74,22 @@ durable form, plus the facts that cost real time to learn.
 Phase 1 is **built and committed** on `feat/sticky-notes`. **168 tests pass**,
 up from a 101 baseline (121 at the end of Batches A–C). Zero build warnings.
 
-## ✅ The log out has happened — extension v5 is live
+## ⚠️ Extension is at v6 and needs a log out
 
-Confirmed 2026-08-21: `GetVersion` returns `(uint32 5,)` and introspection
+**Bumped to v6 on 2026-08-24.** No new D-Bus methods — v6 exists purely to
+*deploy* the pill-waveform change in 7f83eeb, which had sat undeployed since
+it was committed. The version number is the deploy trigger: `status()` in
+`src/install/gnome_extension.rs` only calls `install()` when
+`live < bundled`, so while `HELPER_VERSION` (extension.js) and `"version"`
+(metadata.json) both read 5, Beamer reported Enabled and never re-copied the
+files. **Bump both on every change to `extension/`, even a pure behaviour
+tweak** — a JS edit has no other signal that it needs to ship.
+
+Settings → the injection card now offers the update. Click it, then log out.
+Until then `GetVersion` still answers `(uint32 5,)` — that is the *running*
+Shell, not what is on disk.
+
+Confirmed 2026-08-21 (v5): `GetVersion` returned `(uint32 5,)` and introspection
 lists both `PlaceWindow` and `GetWindowFrame`. The stale-v3 caveat that used to
 sit here is resolved — notes are placed, and the note pill shows its own state
 rather than "Transcribing…" with an idle sweep.
@@ -94,7 +107,7 @@ cannot be used for this; only the `GetVersion` call above is authoritative.
 ```bash
 gdbus call --session --dest org.gnome.Shell \
   --object-path /app/beamer/FocusProvider \
-  --method app.beamer.FocusProvider.GetVersion      # expect (uint32 5,)
+  --method app.beamer.FocusProvider.GetVersion      # expect (uint32 6,) after the log out
 ```
 
 Then, with a note open (substitute a real id from `~/.config/Beamer/notes.json`):
@@ -326,7 +339,7 @@ impossible for an ordinary client, and the API that appears to work lies:
   at all** — only width/height/open. That is the state of the art.
 
 **Beamer's answer: our own GNOME Shell extension.** Code inside GNOME Shell is not
-a Wayland client and is not subject to any of the above. Extension v5 gains two
+a Wayland client and is not subject to any of the above. Extension v5 gained two
 D-Bus methods on the existing `app.beamer.FocusProvider`:
 
 - `PlaceWindow(title, x, y, all_workspaces)` → `Meta.Window.move_frame()` + `stick()`

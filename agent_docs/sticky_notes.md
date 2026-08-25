@@ -379,8 +379,19 @@ Apache 2.0 plus a binding term requiring the exact string
 ## Gotchas
 
 - **The block model needed no extension change, and no log out.** Attachments,
-  the resize grip and delete are all client-side. The extension is still at v5
-  and `GetVersion` is still the only authoritative way to check it.
+  the resize grip and delete are all client-side. `GetVersion` is still the
+  only authoritative way to check the running version.
+
+- **The extension's version number is its deploy trigger, not just its D-Bus
+  contract.** `status()` in `src/install/gnome_extension.rs` calls `install()`
+  — the copy into `~/.local/share/gnome-shell/extensions/` — only when
+  `live < bundled`. So a change to any `.js` file here that adds no method
+  ships *nothing* unless you also bump `HELPER_VERSION` in `extension.js` and
+  `"version"` in `metadata.json`, together. This bit once: 7f83eeb's pill
+  waveform change sat undeployed through a full log out, and the behaviour
+  being evaluated was the Aug-21 code. v6 (2026-08-24) is that bump.
+  Cross-check the installed copy, not just the repo:
+  `ls -l ~/.local/share/gnome-shell/extensions/beamer-focus@beamer.app/`.
 
 - **`note_hotkey = ""` means note capture is off entirely**, by design, so the
   dictation hotkey can never be silently diverted. Set one before testing —

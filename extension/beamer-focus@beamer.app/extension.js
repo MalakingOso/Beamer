@@ -5,11 +5,21 @@ import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
 import { BeamerIndicator } from './indicator.js';
 
-// Bumped to 5 for PlaceWindow/GetWindowFrame (sticky note placement) and the
-// 'note' pill state. The capability floor Beamer requires is still v2 (see
+// v5 added PlaceWindow/GetWindowFrame (sticky note placement) and the 'note'
+// pill state. The capability floor Beamer requires is still v2 (see
 // REQUIRED_VERSION in src/injection/gnome.rs) — every caller of a v5-only
 // method degrades to a silent no-op against an older helper.
-const HELPER_VERSION = 5;
+//
+// ⚠️ This number is not only the D-Bus contract version, it is the *deploy
+// trigger*. `status()` in src/install/gnome_extension.rs compares what this
+// returns over D-Bus against metadata.json's "version"; while they match,
+// Beamer reports Enabled and never re-copies the files, so an edit to any
+// .js file here silently never reaches ~/.local/share/gnome-shell/. Bump
+// BOTH this and metadata.json on every change to this directory, even a
+// pure behaviour tweak that adds no method. v6 is exactly that: the pill
+// waveform change in 7f83eeb, which sat undeployed because v5 shipped it
+// without a bump.
+const HELPER_VERSION = 6;
 
 // Typing pace: batches keep long transcripts fast (~500 chars/s) while giving
 // slow event loops (Electron apps) time to drain between batches.
