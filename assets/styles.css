@@ -1390,9 +1390,79 @@ body {
 }
 
 /* De-emphasised, not hidden: a ticked task is still the note's record of what
-   was committed to, and it sorts below the outstanding ones anyway. */
+   was committed to, and it sits behind the disclosure below anyway. */
 .task-row.done {
   opacity: 0.55;
+}
+
+/* Disclosure row that reveals a group's completed tasks. Matches
+   `.injection-fallbacks-toggle`, the app's other collapsed-by-default list. */
+.task-done-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  background: transparent;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--fg-muted);
+  text-align: left;
+  cursor: pointer;
+  transition: color var(--duration-fast) var(--ease);
+}
+
+.task-done-toggle:hover {
+  color: var(--fg-secondary);
+}
+
+.task-done-chevron {
+  width: 12px;
+  color: var(--fg-muted);
+}
+
+/* Page-level disclosure for notes whose tasks are all done. Sibling of the
+   groups rather than a box around them, so `.content`'s own 20px gap spaces
+   the revealed groups exactly like the main list.
+
+   `flex: 0 0 auto` for the reason `.task-group` carries it: `.content` is a
+   bounded flex column, so without it this row is a shrink target and collapses
+   before the page agrees to scroll.
+
+   The top border is the divider — there is no reusable separator class in this
+   stylesheet, and every other divider here is a border on a specific element. */
+.tasks-completed-toggle {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 14px 0 0;
+  border: none;
+  border-top: 2px solid var(--border);
+  background: transparent;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--fg-secondary);
+  text-align: left;
+  cursor: pointer;
+  transition: color var(--duration-fast) var(--ease);
+}
+
+.tasks-completed-toggle:hover {
+  color: var(--fg);
+}
+
+/* Sibling pairs, for the same reason `.task-row + .task-row` is one: the group
+   header already draws a bottom border, so a `border-top` on the toggle itself
+   would double the line in a group whose tasks are all completed and whose
+   toggle therefore follows the header directly. Declaring both adjacencies
+   instead puts a line between the outstanding rows and the toggle, and between
+   the toggle and the first row it reveals, and none anywhere else. */
+.task-row + .task-done-toggle,
+.task-done-toggle + .task-row {
+  border-top: 2px solid var(--border);
 }
 
 .task-check {
