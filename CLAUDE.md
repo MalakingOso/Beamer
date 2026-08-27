@@ -264,9 +264,16 @@ the spec; the spec has been updated to match.**
 **1. Backend is SYCL, not Vulkan.** The rebuild is done (`e97492369` ->
 `5a32f7b66`). Two build dirs exist:
 
-- `build-sycl/` — **use this.** `GGML_SYCL=ON`, `GGML_SYCL_F16=ON`, icx/icpx.
+- `build-sycl-2026/` — **use this.** oneAPI 2026.1, `GGML_SYCL=ON`,
+  `GGML_SYCL_F16=ON`, icx/icpx. What `deploy/llama-beamer.service` runs as of
+  2026-08-27.
+- `build-sycl/` — the same flags on oneAPI 2025.3. Kept as the fallback.
+  Measured identical to the 2026 build on gemma-4-E4B (pp512 2781.64 vs
+  2782.35 t/s, tg128 79.80 vs 79.83), so the newer toolchain is housekeeping,
+  not speed. oneAPI 2026 has now measured zero gain on eight paired runs.
 - `build/` — Vulkan fallback, no oneAPI runtime needed.
-- `build.stale-pre-20260821/` — the April binaries, kept for rollback.
+- `build.stale-pre-20260821/` — **deleted 2026-08-27.** It held the April
+  Vulkan binaries; `build/` covers that role, and the commit is in git.
 
 Measured, same commit, same device: SYCL is **2.35x** Vulkan at prompt
 processing, **~1.2x** at generation. The original spec chose Vulkan because it
@@ -280,8 +287,8 @@ it no longer does.
 # start it
 systemctl --user enable --now llama-beamer        # deploy/llama-beamer.service
 # or ad hoc — note LD_LIBRARY_PATH must EXTEND oneAPI's, not replace it
-source ~/intel/oneapi/2025.3/oneapi-vars.sh
-export LD_LIBRARY_PATH=~/Programming/llama.cpp/build-sycl/bin:$LD_LIBRARY_PATH
+source ~/intel/oneapi-2026/2026.1/oneapi-vars.sh
+export LD_LIBRARY_PATH=~/Programming/llama.cpp/build-sycl-2026/bin:$LD_LIBRARY_PATH
 llama-server --models-dir ~/models/beamer \
   --models-preset ~/Programming/Beamer/deploy/llama-models.ini \
   --models-max 2 --host 127.0.0.1 --port 8080

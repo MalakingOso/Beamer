@@ -38,6 +38,12 @@ fn texts(groups: &[(String, Vec<Task>)]) -> Vec<&str> {
     groups.iter().flat_map(|(_, rows)| rows).map(|t| t.text.as_str()).collect()
 }
 
+/// A `fn` rather than a closure: a closure here infers one lifetime for both
+/// the borrow of the slice and the borrow inside it, and refuses to compile.
+fn names<'a>(rows: &[&'a Task]) -> Vec<&'a str> {
+    rows.iter().map(|t| t.text.as_str()).collect()
+}
+
 /// Which rows reach this page is `TaskStore::accepted`'s rule, pinned by
 /// `accepted_excludes_suggested_and_dismissed_rows`. What is pinned here is
 /// that grouping does not quietly re-sort what it was handed — the caller
@@ -93,9 +99,114 @@ fn a_ticked_task_stays_inside_its_own_note_group() {
     assert_eq!(
         texts(&groups[1..]),
         vec!["Done"],
-        "done rows sink within their group, never into a separate section — the \
-         group is the provenance this page exists to show"
+        "a note's tasks always move together — a group is either in the main list \
+         or in the page-level Completed section, never split across the two, \
+         because the group is the provenance this page exists to show"
     );
+}
+
+#[test]
+fn a_group_is_finished_only_when_every_row_in_it_is_done() {
+    let done = |text: &str, done| task("n1", text, "2026-08-22T10:00:00+01:00", TaskStatus::Accepted, done);
+    assert!(group_finished(&[done("A", true), done("B", true)]));
+    assert!(
+        !group_finished(&[done("A", true), done("B", false)]),
+        "one row left to do keeps the whole note in the main list"
+    );
+}
+
+#[test]
+fn an_empty_group_is_not_finished() {
+    // `all()` is true on an empty slice, so the guard in `group_finished` is
+    // the only thing between a note with no tasks at all and a promotion into
+    // the Completed section, where it would read as work that was done.
+    assert!(!group_finished(&[]));
+}
+
+#[test]
+fn a_half_done_note_stays_put_while_a_finished_one_is_promoted() {
+    // The behaviour actually asked for, and the one a later refactor is most
+    // likely to break: promotion is decided per group, so a note with anything
+    // outstanding keeps its place even when another note is entirely ticked.
+    let mut half = dated("Half done", Some("2026-08-24"), true, false);
+    half.note_id = "n2".into();
+    let mut half_ticked = dated("Half ticked", Some("2026-08-01"), true, true);
+    half_ticked.note_id = "n2".into();
+
+    let groups = group_accepted(
+        vec![half, half_ticked, dated("All done", Some("2026-08-01"), true, true)],
+        today(),
+    );
+
+    let (active, finished): (Vec<_>, Vec<_>) =
+        groups.iter().partition(|(_, rows)| !group_finished(rows));
+
+    assert_eq!(active.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), vec!["n2"]);
+    assert_eq!(finished.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), vec!["n1"]);
+}
+
+#[test]
+fn un_ticking_the_last_done_task_returns_a_group_to_the_main_list() {
+    let mut rows = vec![
+        dated("Done", Some("2026-08-01"), true, true),
+        dated("Also done", Some("2026-08-02"), true, true),
+    ];
+    assert!(group_finished(&rows), "both ticked, so the note has graduated");
+
+    rows[1].done = false;
+    assert!(
+        !group_finished(&rows),
+        "un-ticking a row must bring the whole group back — the Completed section \
+         is derived from the rows, never a flag set at promotion time"
+    );
+}
+
+#[test]
+fn the_completed_disclosure_splits_a_group_without_losing_a_row() {
+    let rows = group_accepted(
+        vec![
+            dated("Done late", Some("2026-08-01"), true, true),
+            dated("Due tomorrow", Some("2026-08-24"), true, false),
+            dated("Done early", Some("2026-08-02"), true, true),
+            dated("Undated", None, false, false),
+        ],
+        today(),
+    )
+    .remove(0)
+    .1;
+
+    let (outstanding, done) = split_done(&rows);
+
+    assert_eq!(
+        names(&outstanding),
+        vec!["Due tomorrow", "Undated"],
+        "the visible half must keep the overdue-first order the group was sorted into"
+    );
+    assert_eq!(names(&done), vec!["Done late", "Done early"]);
+    assert_eq!(
+        outstanding.len() + done.len(),
+        rows.len(),
+        "a task that lands in neither half is a commitment silently dropped from the page"
+    );
+}
+
+#[test]
+fn a_group_with_nothing_left_to_do_is_promoted_whole() {
+    // This test used to say the group keeps an inner disclosure, on the
+    // grounds that without one a fully-ticked note is a bare heading with no
+    // way to reach its rows. That is now the *intended* rendering: the group
+    // leaves the main list entirely and its rows show directly under the
+    // page-level Completed section, so an inner caret would be a control with
+    // nothing left to hide.
+    //
+    // What still has to hold is that the rows survive the move. `split_done`
+    // puts every one of them in the done half, which is the half the promoted
+    // rendering draws — so a group cannot lose a row by being promoted.
+    let rows = vec![dated("Done", Some("2026-08-01"), true, true)];
+    let (outstanding, done) = split_done(&rows);
+    assert!(outstanding.is_empty());
+    assert_eq!(done.len(), 1, "the only way back to these rows is the disclosure");
+    assert!(group_finished(&rows), "and nothing outstanding is what triggers the move");
 }
 
 #[test]

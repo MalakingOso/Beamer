@@ -14,6 +14,11 @@
 #
 # Backend is SYCL, chosen by measurement (2.35x Vulkan at prompt processing).
 # See docs/superpowers/benchmarks/2026-08-20-b60-llama-vulkan.md
+#
+# Toolchain is oneAPI 2026.1 (build-sycl-2026). Measured 2026-08-27 against
+# the 2025.3 build on gemma-4-E4B: pp512 2782.35 vs 2781.64 t/s, tg128 79.83
+# vs 79.80. Identical within noise, so this is not a performance choice; both
+# toolchains work against compute-runtime 26.31.
 
 [Unit]
 Description=llama.cpp model server for Beamer (SYCL, Arc Pro B60)
@@ -24,13 +29,13 @@ Description=llama.cpp model server for Beamer (SYCL, Arc Pro B60)
 Type=simple
 
 # oneAPI must be sourced for the SYCL runtime (libsvml.so and friends), and
-# llama.cpp's own build-sycl/bin must be PREPENDED to what oneAPI sets, not
+# llama.cpp's own build dir must be PREPENDED to what oneAPI sets, not
 # replace it. Overwriting LD_LIBRARY_PATH instead of extending it fails at
 # startup with "libsvml.so: cannot open shared object file".
 ExecStart=/bin/bash -c 'set +u; \
-  source %h/intel/oneapi/2025.3/oneapi-vars.sh --force >/dev/null 2>&1; \
-  export LD_LIBRARY_PATH=%h/Programming/llama.cpp/build-sycl/bin:$LD_LIBRARY_PATH; \
-  exec %h/Programming/llama.cpp/build-sycl/bin/llama-server \
+  source %h/intel/oneapi-2026/2026.1/oneapi-vars.sh --force >/dev/null 2>&1; \
+  export LD_LIBRARY_PATH=%h/Programming/llama.cpp/build-sycl-2026/bin:$LD_LIBRARY_PATH; \
+  exec %h/Programming/llama.cpp/build-sycl-2026/bin/llama-server \
     --models-dir %h/models/beamer \
     --models-preset %h/Programming/Beamer/deploy/llama-models.ini \
     --models-max 2 \

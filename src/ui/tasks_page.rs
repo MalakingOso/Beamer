@@ -17,16 +17,20 @@
 //! documents: nothing in `src/` calls `provide_context`, so `use_context` here
 //! would panic rather than resolve.
 
+use std::collections::HashSet;
+
 use dioxus::prelude::*;
 
 use chrono::{Datelike, NaiveDate};
 
-use crate::notes::ics;
 use crate::notes::task::{Due, Task};
 use crate::notes::task_store::TaskStore;
 use crate::notes::{Note, NoteStore};
-use crate::ui::icons::IconCheck;
-use crate::ui::sticky_windows::{self, StickyRegistry};
+use crate::ui::sticky_windows::StickyRegistry;
+
+mod group;
+mod rows;
+use group::TaskGroup;
 
 #[derive(Props, Clone, PartialEq)]
 pub struct TasksPageProps {
@@ -168,11 +172,13 @@ fn due_rank(task: &Task, today: NaiveDate) -> (u8, i64) {
 /// them in step. `rows` arrives filtered; grouping is all that is left, and it
 /// is the part worth testing.
 ///
-/// Done tasks sink to the bottom of their group rather than to a separate
-/// section: the group is the note, and splitting a note's tasks across two
-/// places would cost the provenance this page exists for. The sort is stable,
-/// so ticking a box moves one row down and leaves everything else where the
-/// eye last saw it.
+/// Done tasks sink to the bottom of their group, which is what lets the render
+/// split them off behind a disclosure *inside* that group. A group whose tasks
+/// are **all** done graduates to the page-level Completed section instead — but
+/// as a whole group, never row by row, because the group is the note and
+/// splitting a note's tasks across two places would cost the provenance this
+/// page exists for. See `group_finished`. The sort is stable, so ticking a box
+/// moves one row and leaves everything else where the eye last saw it.
 fn group_accepted(rows: Vec<Task>, today: NaiveDate) -> Vec<(String, Vec<Task>)> {
     let mut groups: Vec<(String, Vec<Task>)> = Vec::new();
     for task in rows {
@@ -187,86 +193,36 @@ fn group_accepted(rows: Vec<Task>, today: NaiveDate) -> Vec<(String, Vec<Task>)>
     groups
 }
 
-/// The dated half of a task row: a chip, or the phrase the model could not
-/// resolve beside a picker.
+/// Split one group's rows into the work that is left and the work that is done.
 ///
-/// Three states, and the middle one is the whole reason `due_phrase` exists:
+/// A function rather than a `partition` inlined into the render, so the rule is
+/// testable: the split is the only thing standing between a ticked task and
+/// disappearing from the page, and "it looked right when I clicked it" is not a
+/// check that survives the next edit.
 ///
-/// | State | Shown |
-/// |---|---|
-/// | Resolved | A date chip, red when overdue, and **Add to calendar** |
-/// | Unresolved phrase | The words the model saw, and a date input |
-/// | No timing mentioned | Nothing |
-///
-/// Nothing here reaches a calendar on its own. Export is a click, per task,
-/// which follows from the standing decision that tasks are suggestions and
-/// nothing is ever added unconfirmed.
-#[derive(Props, Clone, PartialEq)]
-struct DueRowProps {
-    task: Task,
-    tasks: Signal<TaskStore>,
-    today: NaiveDate,
+/// `partition` is stable, so both halves keep the order `group_accepted` gave
+/// them — the outstanding half stays overdue-first, and the completed half
+/// stays in the order the rows were accepted.
+fn split_done(rows: &[Task]) -> (Vec<&Task>, Vec<&Task>) {
+    rows.iter().partition(|t| !t.done)
 }
 
-#[component]
-fn DueRow(props: DueRowProps) -> Element {
-    let DueRowProps { task, mut tasks, today } = props;
-    let id = task.id.clone();
-
-    if let Some(due) = task.due_parsed() {
-        let overdue = task.is_overdue(today);
-        let export = task.clone();
-        return rsx! {
-            div { class: "task-due-row",
-                span {
-                    class: if overdue { "task-due overdue" } else { "task-due" },
-                    title: "{task.due.clone().unwrap_or_default()}",
-                    "{due_label(due, today)}"
-                }
-                button {
-                    class: "task-due-btn",
-                    title: "Write an .ics and hand it to your calendar",
-                    onclick: move |_| match ics::write_temp(&export) {
-                        // One-way: the calendar imports a copy. Beamer cannot
-                        // edit or remove it afterwards — see `notes::ics`.
-                        Ok(path) => crate::ui::open_external(&path.to_string_lossy()),
-                        Err(e) => tracing::warn!("Could not write a calendar file: {}", e),
-                    },
-                    "Add to calendar"
-                }
-            }
-        };
-    }
-
-    let Some(phrase) = task.due_phrase.clone() else {
-        return rsx! {};
-    };
-
-    rsx! {
-        div { class: "task-due-row",
-            // What the model saw and could not turn into a date. Shown rather
-            // than swallowed: it is the difference between a picker you know
-            // what to fill in and a blank field you have to re-read the note for.
-            span { class: "task-due unresolved", title: "Beamer would not guess a date for this",
-                "\u{201c}{phrase}\u{201d}"
-            }
-            input {
-                class: "task-due-input",
-                r#type: "date",
-                title: "Set a date yourself",
-                onchange: move |e: Event<FormData>| {
-                    let (due, all_day) = picked_due(&e.value());
-                    tasks.write().set_due(&id, due, all_day);
-                },
-            }
-        }
-    }
+/// Whether a note has nothing left outstanding, and so belongs in the
+/// page-level Completed section rather than the main list.
+///
+/// The emptiness guard is not defensive noise: `all()` on an empty slice is
+/// `true`, so without it a group with no rows would report itself finished and
+/// promote a note that has no tasks at all. `group_accepted` cannot currently
+/// produce one — every group is created by pushing a task into it — but the
+/// rule should not depend on that staying true.
+fn group_finished(rows: &[Task]) -> bool {
+    !rows.is_empty() && rows.iter().all(|t| t.done)
 }
 
 #[component]
 pub fn TasksPage(props: TasksPageProps) -> Element {
     let notes = props.notes;
-    let mut tasks = props.tasks;
+    let tasks = props.tasks;
     let registry = props.registry;
 
     // Cloned into owned rows rather than held as borrows: the controls below
@@ -294,9 +250,41 @@ pub fn TasksPage(props: TasksPageProps) -> Element {
     // every case that matters; both are re-evaluated when the store changes.
     let today = chrono::Local::now().date_naive();
 
+    // Which groups have their completed section open, keyed by note id.
+    //
+    // One page-level set rather than a signal per group: a hook cannot be
+    // created inside the `for` below without breaking Dioxus' call order, and
+    // that failure compiles and then misbehaves rather than erroring.
+    //
+    // Keyed by note id rather than by position because accepting a task
+    // reshuffles the groups into newest-first order — an index would leave the
+    // open section attached to whichever note slid into that slot.
+    //
+    // Deliberately not persisted. Finished work collapses again on every visit,
+    // which is the point of moving it out of the way at all.
+    // Written by `TaskGroup`, never here — the page owns the set so the hook
+    // is created once, outside the loop, but only a group's own caret mutates
+    // it. Hence no `mut` binding.
+    let expanded = use_signal(HashSet::<String>::new);
+
+    // Whether the page-level Completed section is open.
+    //
+    // Separate from `expanded` above, and deliberately not merged into it: that
+    // set answers "is this note's inner caret open", keyed by note id, and there
+    // is no note id for the page-level section. Not persisted, same as
+    // `expanded`.
+    let mut show_finished = use_signal(|| false);
+
     let outstanding =
         groups.read().iter().flat_map(|(_, _, rows)| rows).filter(|t| !t.done).count();
     let is_empty = groups.read().is_empty();
+
+    // Owned tuples, taken by cloning the memo rather than borrowing it: the
+    // props below and the click handlers inside them outlive any `read()`
+    // guard, so partitioning the guard's contents would not compile.
+    let (active, finished): (Vec<_>, Vec<_>) =
+        groups().into_iter().partition(|(_, _, rows)| !group_finished(rows));
+    let finished_count = finished.len();
 
     rsx! {
         div { class: "content",
@@ -329,59 +317,54 @@ pub fn TasksPage(props: TasksPageProps) -> Element {
                     }
                 }
             } else {
-                for (note_id, heading, rows) in groups.read().iter() {
-                    div { key: "{note_id}", class: "task-group",
-                        div {
-                            class: if heading.openable { "task-group-header openable" } else { "task-group-header" },
-                            title: if heading.openable { "Open this note" } else { "" },
-                            onclick: {
-                                let id = note_id.clone();
-                                let openable = heading.openable;
-                                move |_| {
-                                    if openable {
-                                        sticky_windows::reopen_note(registry, notes, &id);
-                                    }
-                                }
-                            },
-                            div { class: "note-stripe note-stripe-{heading.stripe}" }
-                            span { class: "task-group-title", "{heading.text}" }
-                            if let Some(badge) = heading.badge {
-                                span { class: "task-group-badge", "{badge}" }
-                            }
+                for (note_id, heading, rows) in active.iter() {
+                    TaskGroup {
+                        key: "{note_id}",
+                        note_id: note_id.clone(),
+                        heading: heading.clone(),
+                        rows: rows.clone(),
+                        tasks,
+                        notes,
+                        registry,
+                        today,
+                        finished: false,
+                        expanded,
+                    }
+                }
+
+                if finished_count > 0 {
+                    // Rendered as a sibling of the groups rather than a box
+                    // around them, so `.content`'s own gap spaces the revealed
+                    // groups exactly as it spaces the main list.
+                    button {
+                        class: "tasks-completed-toggle",
+                        title: if show_finished() { "Hide finished notes" } else { "Show finished notes" },
+                        onclick: move |_| {
+                            let open = show_finished();
+                            show_finished.set(!open);
+                        },
+                        span { class: "task-done-chevron",
+                            if show_finished() { "\u{25BE}" } else { "\u{25B8}" }
                         }
-                        for task in rows.iter() {
-                            {
-                                let id = task.id.clone();
-                                let done = task.done;
-                                rsx! {
-                                    div {
-                                        key: "{id}",
-                                        class: if done { "task-row done" } else { "task-row" },
-                                        button {
-                                            class: if done { "task-check checked" } else { "task-check" },
-                                            title: if done { "Mark as not done" } else { "Mark as done" },
-                                            onclick: {
-                                                let id = id.clone();
-                                                move |_| { tasks.write().set_done(&id, !done); }
-                                            },
-                                            if done {
-                                                IconCheck { size: 12 }
-                                            }
-                                        }
-                                        div { class: "task-row-main",
-                                            div { class: "task-text", "{task.text}" }
-                                            DueRow { task: task.clone(), tasks, today }
-                                            // Full span on hover: it is one
-                                            // ellipsized line, and being able to
-                                            // check it is the whole point.
-                                            div {
-                                                class: "task-evidence",
-                                                title: "{task.evidence}",
-                                                "\u{201c}{task.evidence}\u{201d}"
-                                            }
-                                        }
-                                    }
-                                }
+                        if finished_count == 1 {
+                            "Completed \u{00b7} 1 note"
+                        } else {
+                            "Completed \u{00b7} {finished_count} notes"
+                        }
+                    }
+                    if show_finished() {
+                        for (note_id, heading, rows) in finished.iter() {
+                            TaskGroup {
+                                key: "{note_id}",
+                                note_id: note_id.clone(),
+                                heading: heading.clone(),
+                                rows: rows.clone(),
+                                tasks,
+                                notes,
+                                registry,
+                                today,
+                                finished: true,
+                                expanded,
                             }
                         }
                     }
