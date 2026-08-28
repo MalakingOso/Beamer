@@ -53,6 +53,12 @@ depends = [
   "libxdo3",
 ]
 
+# Syncthing carries attachment bytes between machines. It is a recommend
+# rather than a depend because Beamer works fine on one machine without it,
+# and only the images in synced notes need it. apt installs recommends by
+# default, so it arrives with the app and can be removed on its own.
+recommends = ["syncthing"]
+
 # Carries `sync_server` into the same package as `beamer`. dx has no
 # per-platform slot for a second binary in `[bundle]` itself. The one it
 # does have, top-level `external_bin`, is read by both the deb bundler and
@@ -65,3 +71,8 @@ depends = [
 # (`cargo build --release --bin sync_server` first).
 [bundle.deb.files]
 "usr/bin/sync_server" = "target/release/sync_server"
+# The systemd user unit for the sync server. Without this the package installs
+# the binary and `systemctl --user enable beamer-sync` reports the unit does
+# not exist, which is what happened on the first install. /usr/lib/systemd/user
+# is where packages put user units; nothing is enabled by installing it.
+"usr/lib/systemd/user/beamer-sync.service" = "deploy/beamer-sync.service"

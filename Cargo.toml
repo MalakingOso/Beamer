@@ -38,7 +38,11 @@ chrono = { version = "0.4", features = ["serde"] }
 toml = "0.8"
 dirs = "6"
 keyring = { version = "3", features = ["windows-native", "sync-secret-service"] }
-dioxus = { version = "0.7", features = ["desktop"] }
+# Pinned to 0.7.10 or newer so the crate and the `dx` CLI stay in step. The
+# asset pipeline is shared between them, and a `dx` older than the crate
+# bundles assets the crate then cannot resolve. CI installs dioxus-cli at
+# the same floor; see .github/workflows/windows.yml.
+dioxus = { version = "0.7.10", features = ["desktop"] }
 global-hotkey = "0.7"
 arboard = { version = "3", features = ["wayland-data-control"] }
 tracing = "0.1"
