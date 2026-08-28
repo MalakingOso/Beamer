@@ -1,0 +1,42 @@
+# Beamer's sync server: the authoritative replica of the notes document,
+# shared across every Beamer install on the tailnet.
+#
+# Disabled by default. This unit exists so an owner who wants sync can turn it
+# on with one command; nothing here enables it automatically.
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   ln -sf ~/Programming/Beamer/deploy/beamer-sync.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now beamer-sync
+#   systemctl --user status beamer-sync
+#   journalctl --user -u beamer-sync -f
+#
+# Binds loopback only, on the port `tailscale serve` already proxies `/sync`
+# to. See agent_docs/sync.md.
+#
+# --config-dir is set explicitly to the binary's own default
+# (~/.config/BeamerSyncServer) so this is documented rather than left
+# implicit. Do NOT point it at Beamer's own config directory: two processes
+# writing one notes document is exactly the topology the sync design avoids.
+# If this machine also runs Beamer itself, that install keeps its own,
+# separate document under ~/.config/Beamer.
+
+[Unit]
+Description=Beamer sync server (authoritative notes document, loopback only)
+# No graphical-session dependency on purpose: this is a plain localhost
+# WebSocket service with no UI of its own.
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/sync_server --bind 127.0.0.1:8081 --config-dir %h/.config/BeamerSyncServer
+
+# The document is written atomically (pid-scoped temp file, then rename), so
+# an unclean stop here is survivable: whatever was last durably saved is what
+# comes back. A wedged server is a different failure, since it means no
+# connected Beamer sees live updates from anyone else until this restarts.
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

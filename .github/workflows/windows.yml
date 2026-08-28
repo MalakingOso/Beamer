@@ -106,7 +106,7 @@ jobs:
           retention-days: 30
 
   linux:
-    name: Test on Linux
+    name: Test and bundle on Linux
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -128,7 +128,9 @@ jobs:
         run: cargo test --locked
 
       # sync_server belongs on the always-on desktop, so this is the build that
-      # matters for it.
+      # matters for it. It also has to exist at this path before the bundle
+      # step below: the .deb's [bundle.deb.files] entry in Dioxus.toml copies
+      # it straight out of target/release, it does not build it itself.
       - name: Build sync_server
         run: cargo build --release --locked --bin sync_server
 
@@ -138,3 +140,30 @@ jobs:
           path: target/release/sync_server
           if-no-files-found: error
           retention-days: 14
+
+      # The .deb carries both beamer and sync_server. No dpkg-deb or fakeroot
+      # needed: tauri-bundler builds the ar/tar.gz archive itself in pure
+      # Rust, so the -dev packages already installed above are everything the
+      # bundle step requires beyond dioxus-cli.
+      - name: Install dioxus-cli
+        uses: taiki-e/install-action@v2
+        with:
+          tool: dioxus-cli@0.7.0
+
+      - name: Bundle .deb
+        run: dx bundle --release --package-types deb
+
+      - name: Locate the .deb
+        id: deb
+        run: |
+          pkg=$(find . -name "*.deb" -printf '%s %p\n' | sort -rn | head -n1 | cut -d' ' -f2-)
+          if [ -z "$pkg" ]; then echo "dx bundle produced no .deb"; exit 1; fi
+          echo "Package: $pkg ($(du -h "$pkg" | cut -f1))"
+          echo "path=$pkg" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: beamer-linux-deb
+          path: ${{ steps.deb.outputs.path }}
+          if-no-files-found: error
+          retention-days: 30
