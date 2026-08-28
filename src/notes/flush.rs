@@ -125,12 +125,25 @@ fn run_document_pass(notes: &mut NoteStore, tasks: &mut TaskStore) -> DocPass {
     // Nothing changed is a settled document, not an outstanding one. A fresh
     // install with no notes reconciles to zero operations, because the root
     // maps arrive with the genesis change rather than being created here.
-    let changed = merged || doc.heads() != before;
+    //
+    // `has_pending_save` catches what the heads comparison cannot: the
+    // live-sync coroutine (`sync_client`) applies a peer's changes directly
+    // to this same document between ticks, so by the time `before` is
+    // captured above it can already include that mutation. Without this,
+    // that change would sit correctly in the note/task signals and never
+    // reach disk. Peeked rather than taken: if the save below fails, the
+    // flag must survive to ask again next tick, since nothing else about
+    // this pass would notice the miss a second time, since the mutation predates
+    // `before` on every subsequent tick as much as it does on this one.
+    let changed = merged || doc.heads() != before || doc.has_pending_save();
     let mut saved = changed;
     if changed {
-        if let Err(e) = doc.save() {
-            tracing::error!("Failed to save the sync document: {e}");
-            saved = false;
+        match doc.save() {
+            Ok(()) => doc.clear_pending_save(),
+            Err(e) => {
+                tracing::error!("Failed to save the sync document: {e}");
+                saved = false;
+            }
         }
     }
     DocPass { merged, saved, settled: saved || !changed }

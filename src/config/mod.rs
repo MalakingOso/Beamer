@@ -20,6 +20,8 @@ pub struct Config {
     pub notes: NotesConfig,
     #[serde(default)]
     pub llm: crate::llm::LlmConfig,
+    #[serde(default)]
+    pub sync: SyncConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +68,29 @@ pub struct NotesConfig {
 impl Default for NotesConfig {
     fn default() -> Self {
         Self { all_workspaces: true, default_color: default_note_color() }
+    }
+}
+
+/// Live sync against `sync_server` over `automerge::sync`. See
+/// `agent_docs/sync.md`.
+///
+/// Empty `url` means sync is off, the same precedent `note_hotkey` sets: a
+/// feature that reaches out to a URL over the network must never turn itself
+/// on by default, and an empty string is a value nobody could mistake for a
+/// real endpoint. `notes::sync_client::should_start` is the one place that
+/// reads this field to decide whether to connect.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncConfig {
+    /// `wss://<tailnet-host>/sync`, or empty. Per machine, never synced,
+    /// because a synced `config.toml` would hand every machine the same
+    /// endpoint whether or not it should reach it. See `agent_docs/sync.md`.
+    #[serde(default)]
+    pub url: String,
+}
+
+impl Default for SyncConfig {
+    fn default() -> Self {
+        Self { url: String::new() }
     }
 }
 
@@ -135,6 +160,7 @@ impl Default for Config {
             appearance: AppearanceConfig::default(),
             notes: NotesConfig::default(),
             llm: crate::llm::LlmConfig::default(),
+            sync: SyncConfig::default(),
         }
     }
 }
@@ -448,5 +474,23 @@ mod note_config_tests {
         let cfg = NotesConfig::default();
         assert!(cfg.all_workspaces, "a sticky note should follow you across workspaces");
         assert_eq!(cfg.default_color, "purple");
+    }
+
+    #[test]
+    fn sync_url_is_unset_by_default() {
+        let cfg = SyncConfig::default();
+        assert_eq!(cfg.url, "", "sync must not dial out unless a machine was told a server exists");
+    }
+
+    #[test]
+    fn an_old_config_missing_sync_still_loads() {
+        // Mirrors a config.toml written before this field existed.
+        let toml = r#"
+            [recording]
+            hotkey = "Ctrl+Space"
+            mode = "hold"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.sync.url, "");
     }
 }

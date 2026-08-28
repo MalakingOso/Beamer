@@ -6,6 +6,7 @@ use dioxus::prelude::*;
 use crate::config::Config;
 use crate::hotkey::{start_ll_hook, CaptureMode, HotkeyConfig, HotkeyEvent};
 use crate::notes::pipeline;
+use crate::notes::sync_client;
 use crate::notes::task_store::TaskStore;
 use crate::notes::NoteStore;
 use crate::orchestrator::{self, RecordingState};
@@ -171,6 +172,10 @@ pub fn App() -> Element {
     // flushes a newly captured transcript immediately — that one must never be
     // lost — so this tick only ever carries body/colour/geometry edits.
     app_setup::setup_notes_flush(notes, tasks);
+
+    // Live sync against `sync_server`, off unless `config.sync.url` names a
+    // server. A no-op call when it is empty, see `sync_client::should_start`.
+    sync_client::use_sync_client(config, notes.peek().sync_doc(), notes, tasks);
 
     // Background update check on startup (3s delay to keep launch snappy)
     app_setup::setup_update_check(config, update_status);
