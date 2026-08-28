@@ -34,10 +34,13 @@ https://github.com/MalakingOso/Beamer/actions
 
 Download **`beamer-windows-installer`**, unzip, run `Beamer_1.0.0_x64-setup.exe`.
 
-**Use the installer rather than `beamer-windows-portable`.** The Start Menu
-shortcut it creates carries a real AppUserModelID, and that is the only thing
-that stops Windows branding Beamer's notifications "PowerShell". The portable
-exe is for a quick look, not for living with.
+Either build gets correct notifications now. Beamer writes its own Start Menu
+shortcut carrying the AppUserModelID that Windows needs before it will attribute
+a toast to an app, so the portable exe is no longer second class for that.
+
+⚠️ **On the very first launch the shortcut is written after the window is up, so
+that one session's notifications may not appear at all.** Every launch after it
+is fine. If your first toast never arrives, relaunch before investigating.
 
 The installer fetches the WebView2 runtime if it is missing, silently. On
 Windows 11 it is already there and nothing happens.
@@ -143,8 +146,11 @@ four-line patch.
    whole URL and no console window should flash.
 6. **Right-click `beamer.exe`, Properties.** The icon should be there. CI
    already asserts the manifest, so this is belt and braces.
-7. **Notifications say Beamer, not PowerShell.** Only true if you used the
-   installer.
+7. **Notifications say Beamer, not PowerShell**, and carry Beamer's name in
+   the action centre. Relaunch once first, see the warning above. If they say
+   PowerShell, something is stale, because that code path is gone. If they do
+   not appear at all, check
+   `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Beamer.lnk` exists.
 8. **Dictate into an elevated window and confirm nothing happens.** Expected,
    and worth seeing once so you recognise it later.
 9. **With callisto reachable, dictate a note.** It should clean itself and grow
