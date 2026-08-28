@@ -207,9 +207,16 @@ one where the native handler causes a problem: per the comment at
 handler is provided", so dioxus glue code mimics drag-drop events instead,
 wiring `handleWindowsDragDrop` / `handleWindowsDragOver` / `handleWindowsDragLeave`
 in `launch.rs:61-83` off the native `DragDropEvent`. `e.files()` still returns
-real paths on Windows because that glue code attaches a real `File` to the
-synthesized `drop` event, so the file-drop path works the same on both
-platforms. What does not carry over is the URL case. `attachments_from_drop`
+real paths on Windows. The JS glue's `File` object is a placeholder, at
+`native.ts:268`, `File(["content"], "file.txt")`, whose own comment says it
+exists "to mimic that there are actually files in this event" and get the
+DOM drop event to fire at all. The real paths come from the Rust side,
+bypassing that placeholder entirely: `webview.rs:159` calls
+`NativeFileHover::current_paths()`, populated from wry's native
+`DragDropEvent::Drop { paths }`, and `webview.rs:159-183` builds the
+`DesktopFileDragEvent` with those paths unconditionally, on every platform.
+The file-drop path works the same on both platforms as a result.
+What does not carry over is the URL case. `attachments_from_drop`
 falls back to `dataTransfer.getData("text/uri-list")` when there are no files,
 and Windows's synthetic `dataTransfer` never populates that field, so dragging
 a URL from a browser onto a note silently does nothing on Windows even though
