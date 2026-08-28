@@ -1,0 +1,96 @@
+name: Windows
+
+# The Windows target went months without compiling because nothing built it.
+# This runs on every push and pull request so that cannot happen again.
+#
+# A native runner is deliberate. Cross-compiling from Linux is blocked by
+# `ring`, which arrives through `self_update` and whose build script wants MSVC
+# `lib.exe`; a Windows runner has it, along with the `rc.exe` that `build.rs`
+# needs to embed the icon and the manifest. The local `cargo xwin check` gate
+# stays useful for fast feedback, and this is the build that proves the real
+# toolchain works.
+
+on:
+  push:
+    branches: [master, "feat/**"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  build:
+    name: Build and test on Windows
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # Runs the suite on Windows for the first time. Every number in this
+      # repo's history was measured on Linux, so a failure here is new
+      # information rather than a regression.
+      - name: Test
+        run: cargo test --locked
+
+      # `build.rs` guards on CARGO_CFG_TARGET_OS rather than a cfg attribute,
+      # so the icon and the asInvoker/PerMonitorV2 manifest are embedded here.
+      # winresource fails silently when it does not run, which is why the
+      # manifest is extracted and checked below rather than assumed.
+      - name: Build release
+        run: cargo build --release --locked
+
+      - name: Verify the manifest and icon were embedded
+        shell: pwsh
+        run: |
+          $exe = "target\release\beamer.exe"
+          if (-not (Test-Path $exe)) { throw "beamer.exe was not produced" }
+
+          $mt = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter mt.exe -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -match 'x64' } | Select-Object -First 1
+          if (-not $mt) { Write-Host "::warning::mt.exe not found, skipping manifest extraction"; exit 0 }
+
+          & $mt.FullName -nologo -inputresource:"$exe" -out:extracted.xml
+          $manifest = Get-Content extracted.xml -Raw
+          if ($manifest -notmatch 'asInvoker')    { throw "requestedExecutionLevel asInvoker missing" }
+          if ($manifest -notmatch 'PerMonitorV2') { throw "PerMonitorV2 dpiAwareness missing" }
+          Write-Host "Manifest carries asInvoker and PerMonitorV2."
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: beamer-windows-x86_64
+          path: |
+            target/release/beamer.exe
+            target/release/sync_server.exe
+          if-no-files-found: error
+
+  linux:
+    name: Test on Linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Dioxus desktop needs WebKitGTK, and cpal needs ALSA.
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libasound2-dev \
+            libgtk-3-dev libsoup-3.0-dev libxdo-dev pkg-config
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --locked
