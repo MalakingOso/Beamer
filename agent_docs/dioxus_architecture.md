@@ -186,7 +186,7 @@ guarantees there is one.
 
 dioxus-desktop calls `webview.with_browser_accelerator_keys(false)` behind a
 bare `#[cfg(target_os = "windows")]` with no further gate
-(`dioxus-desktop-0.7.9/src/webview.rs:403-408`), so every Windows webview,
+(`dioxus-desktop-0.7.10/src/webview.rs:403-408`), so every Windows webview,
 main window and every sticky note alike, loses the browser's built-in
 Ctrl+F, F5, and Ctrl+P handling. This is dioxus's own default, not something
 Beamer's code opts into or could opt out of without patching the dependency.
@@ -243,17 +243,12 @@ else `build.rs` grows a platform branch.
 
 ### `open_external` no longer goes through a shell
 
-`ui::open_external` used to run its target through `cmd /C start "" <target>`
-on Windows. Rust only quotes arguments containing spaces or quotes, so an
-unescaped `&` still split there: the browser got a truncated URL and `cmd`
-ran whatever followed the `&` as its own command. The target comes from note
-content, a link chip or an `.ics` export, so that was a command-injection
-surface reachable from anything a note captured, not just a truncation bug.
-It now calls `ShellExecuteW` directly (`src/ui/mod.rs:72`), which never
-touches a shell parser; the whole target travels as one opaque wide string.
-Whether `ShellExecuteW` actually opens links and files correctly at runtime
-is unverified, same as everything else here that needs the laptop; what's
-proven is that the shell-injection path is gone at the code level.
+Task 3b closed a command-injection surface in `ui::open_external` on
+Windows (a `cmd /C start` argument split reachable from note content, a
+link chip or an `.ics` export). `src/ui/mod.rs:72-90` documents the fix
+in full; nothing here restates it. What the comment doesn't say: whether
+`ShellExecuteW` actually opens links and files correctly at runtime is
+unverified, same as everything else in this section that needs the laptop.
 
 ### Auto-repeat: why `ll_hook.rs` and `linux_hotkey.rs` guard differently
 
@@ -276,8 +271,8 @@ That is why `ll_hook.rs` keeps a cross-binding, physical-trigger-keyed
 (`src/hotkey/ll_hook.rs:122-127`), where `linux_hotkey.rs` calls
 `matching_binding` first and only checks per-binding held state **after**.
 A binding-per-binding guard, matching Linux's shape, looks like the more
-natural port and was tried during review. It does not hold up. Traced
-counterexample: hold Ctrl+Super (dictation) and tap Alt mid-hold. A
+natural port. It does not hold up: traced through the two files, the
+counterexample is holding Ctrl+Super (dictation) and tapping Alt mid-hold. A
 `VK_LWIN` auto-repeat during that tap re-reads live modifier state via
 `GetAsyncKeyState`, resyncs to `ctrl+alt`, and, with a per-binding
 post-match guard, would match the sibling `Ctrl+Alt+Super` (note) binding
@@ -307,7 +302,7 @@ be broken.
   virtual-desktop layout was judged a bigger change than the taskbar-aware
   fix it rides alongside.
 - **WebView2's user data folder lives in Roaming, not Local.**
-  `webview_data_dir()` (`src/ui/mod.rs:169`) uses `dirs::data_dir()`, which
+  `webview_data_dir()` (`src/ui/mod.rs:170`) uses `dirs::data_dir()`, which
   resolves to `%APPDATA%` (Roaming) on Windows. Microsoft's own guidance is
   to put a WebView2 user data folder under `%LOCALAPPDATA%`: it is a cache,
   and a roaming profile will copy it across machines for no benefit.
