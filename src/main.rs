@@ -28,6 +28,23 @@ mod warmup;
 
 use anyhow::Result;
 
+/// Beamer's Windows AppUserModelID (AUMID). Setting this on the process is
+/// what lets a toast (and the taskbar) show "Beamer" instead of whatever
+/// shortcut launched the process.
+///
+/// Three things have to agree on this string, and nothing checks that they
+/// do:
+/// 1. This constant.
+/// 2. `identifier` in `Dioxus.toml`, which it is copied from.
+/// 3. The AUMID that the NSIS installer's Start Menu shortcut carries. An
+///    AUMID normally has to be registered by a shortcut before Windows will
+///    honor it; `dioxus::bundle::NsisSettings` has no field for it, so the
+///    installer template controls this and Beamer cannot verify it from
+///    here. See `orchestrator::notify::show_notification` for the fallback
+///    that exists because of this gap.
+#[cfg(target_os = "windows")]
+pub(crate) const WINDOWS_APP_USER_MODEL_ID: &str = "com.beamer.app";
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -37,6 +54,14 @@ fn main() {
         .init();
 
     tracing::info!("Beamer starting...");
+
+    // Must run before any window or toast exists, so the process is
+    // attributed to Beamer from the first notification onward. Not fatal:
+    // an unregistered AUMID does not stop the app, only degrades toast
+    // branding, and `orchestrator::notify::show_notification` has a
+    // fallback for that.
+    #[cfg(target_os = "windows")]
+    set_windows_app_user_model_id();
 
     if !ensure_single_instance() {
         tracing::warn!("Another instance of Beamer is already running");
@@ -75,6 +100,24 @@ fn main() {
 
     // Dioxus owns the main thread and tokio runtime — nothing runs after this
     ui::launch_app();
+}
+
+/// Register this process under Beamer's own AppUserModelID instead of
+/// whatever the launching shortcut carries. See [`WINDOWS_APP_USER_MODEL_ID`]
+/// for what has to stay in sync for this to actually change toast branding.
+#[cfg(target_os = "windows")]
+fn set_windows_app_user_model_id() {
+    use windows::core::HSTRING;
+    use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+
+    let aumid = HSTRING::from(WINDOWS_APP_USER_MODEL_ID);
+    // SAFETY: `SetCurrentProcessExplicitAppUserModelID` just stores the
+    // string for the process; it has no preconditions beyond a valid
+    // pointer, which `HSTRING` guarantees.
+    let result = unsafe { SetCurrentProcessExplicitAppUserModelID(&aumid) };
+    if let Err(e) = result {
+        tracing::debug!("Failed to set process AppUserModelID: {}", e);
+    }
 }
 
 // ─── Single-instance guard ────────────────────────────────────────────────────
