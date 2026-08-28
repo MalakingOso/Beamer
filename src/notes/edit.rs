@@ -29,6 +29,14 @@
 //! `model::Attachment`'s doc comment for the fuller version of that
 //! guarantee, and `model::owned_file_name` for why `hash`/`ext` are never
 //! trusted enough to build a path from directly.
+//!
+//! **Refcounting alone stops being enough once a second machine can hold the
+//! same attachment.** `NoteStore.sync_enabled` gates the actual file removal
+//! in `release_attachment_bytes`: with a sync server configured, this store
+//! no longer deletes a file just because nothing local references it any
+//! more, because "nothing local" says nothing about another machine's still-
+//! open note. See that function's doc comment and `agent_docs/sync.md`'s
+//! attachments section for the full reasoning.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -347,6 +355,20 @@ impl NoteStore {
     /// carrying a hand-edited or maliciously synced traversal. This only
     /// ever touches a path under `attachments_dir`, Beamer's own copy, never
     /// the user's original.
+    ///
+    /// **A no-op once `self.sync_enabled` is true, even past the referenced
+    /// check above.** `still_referenced` only ever looks at *this* store:
+    /// with attachment bytes carried by Syncthing (see `agent_docs/sync.md`),
+    /// a hash this machine no longer references can still be the only copy
+    /// on a note that is open and unedited on another machine, and that
+    /// machine has no way to object before the file is gone here: Syncthing
+    /// propagates a delete exactly as readily as it propagates a new file.
+    /// Deleting nothing when sync is on trades disk for safety on purpose: an
+    /// orphaned file left behind costs space, which is cheap and can be
+    /// cleaned up later once something actually tracks cross-machine
+    /// references, while a referenced image that vanishes on every machine at
+    /// once cannot be recovered by anything. With sync off this function
+    /// behaves exactly as it always has.
     fn release_attachment_bytes(&self, hash: &str, ext: &str) {
         let still_referenced = self
             .notes
@@ -355,6 +377,13 @@ impl NoteStore {
             .filter_map(owned_hash)
             .any(|(h, e)| h == hash && e == ext);
         if still_referenced {
+            return;
+        }
+        if self.sync_enabled {
+            tracing::debug!(
+                hash, ext, "sync is on; keeping this attachment's bytes even though \
+                nothing local references them any more, in case another machine still does"
+            );
             return;
         }
         let Some(name) = super::model::owned_file_name(hash, ext) else {

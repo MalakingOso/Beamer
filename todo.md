@@ -69,59 +69,66 @@
 
 ## Live Sync, open questions
 
-- [ ] **Attachment bytes have no transport at all yet.** Task 10 shipped
-      `automerge::sync` for `notes.automerge` itself (`sync_server`,
-      `notes::sync_client`): a note's text, color, stage state and task
-      suggestions all propagate live. The content-addressed files under
-      `<config_dir>/sync/attachments` do not: nothing in this protocol moves
-      bytes, only document changes, and a document change is a *reference* to
-      an attachment (a hash and an extension), never the attachment itself.
-      Concretely: dictate a note with a dropped image on machine A, and once
-      it syncs, machine B has the note and the reference and no bytes,
-      because `attachments_dir(&config_dir)` on B was simply never given
-      `<hash>.<ext>` by anything. `sticky_blocks.rs` shows whatever its
-      missing-file card looks like. See `agent_docs/sync.md`'s "What this
-      protocol does not carry" for the fuller writeup; this is the single
-      biggest gap Task 10 leaves behind, not a rounding error.
-- [ ] **Cross-machine attachment deletion still has no story, and the race
-      changed shape rather than disappearing.** Task 8 shipped store-local
-      refcounting for attachment bytes (`src/notes/edit.rs`,
-      `release_attachment_bytes`): a file under `<config_dir>/sync/attachments`
-      is removed only once nothing in *that store* references it, which is
-      correct for one machine and has no visibility into what a second
-      machine still needs. The original writeup here described this as a
-      Syncthing file-watcher race; Syncthing is no longer part of the design
-      (see `agent_docs/sync.md`), but the underlying problem is unchanged,
-      because deletions now propagate the same way any other edit does:
-      through `automerge::sync` itself, live, the moment both machines are
-      online together, rather than through a file-sync daemon noticing a
-      changed directory on its own schedule. Two concrete failure scenarios,
-      both real data loss, neither solved by anything shipped so far:
-      1. **A live reference gets deleted out from under it.** Machine A has a
-         note referencing hash `H`. Machine B, offline, deletes its own last
-         note referencing `H`; `release_attachment_bytes` correctly removes
-         `H.<ext>` from B's local `attachments_dir`, because at the moment of
-         deletion nothing on B references it. Once B reconnects, the note
-         deletion itself syncs to A over `sync_client`/`sync_server` like any
-         other change. A's note still references `H`, but the bytes are now
-         gone on both machines, permanently, since B's local refcount had no
-         way to know A still needed them. (Moot until the item above ships,
-         since A never had B's bytes to begin with over this transport, but
-         the day attachment bytes do sync, this is waiting.)
-      2. **The remove button silently destroys the only copy that exists.**
-         On the machine where an attachment was originally dropped, deleting
-         it removes Beamer's copy and never touches the user's original file
-         (by design, and correctly). On the *other* machine, there never was
-         a "user's original": the note and its attachment arrived entirely
-         through sync. On that machine, hitting remove on the attachment (or
-         deleting the note) destroys the only copy of those bytes that ever
-         existed there, with no confirmation dialog distinguishing it from
-         the harmless case on the machine of origin.
-      Needs an actual design (a tombstone/grace-period before physical
-      deletion, a "still wanted elsewhere" check against the sync state, or
-      something else) before attachment sync ships. Blocked on the item
-      above existing first: there is no live cross-machine deletion race to
-      design against until attachment bytes have a transport to race over.
+- [x] **Attachment bytes now have a transport, decided and documented, not yet
+      run.** The owner's decision: Syncthing carries `<config_dir>/sync/attachments`,
+      independently of `automerge::sync`, which keeps carrying `notes.automerge`
+      and nothing else. `agent_docs/sync.md`'s "Attachments: Syncthing carries
+      the bytes" section has the full design (what Syncthing must and must not
+      point at, why content-addressed immutable blobs need none of the
+      conflict-copy machinery a live document would, setup steps for both
+      machines) and says plainly that it is installed on neither machine yet.
+      Nothing here has been run end to end. What is left: install it on both
+      machines per those steps, verify a dropped attachment actually appears
+      on the other side, and confirm Ignore Delete behaves as documented.
+- [x] **The local half of cross-machine attachment deletion is decided and
+      implemented; the cross-machine half still is not.** `release_attachment_bytes`
+      (`src/notes/edit.rs`) now checks `NoteStore.sync_enabled`
+      (`config.sync.url` non-empty, set from `sync_client::use_sync_client`)
+      after its refcount check: with sync configured, a hash nothing local
+      references any more is left on disk rather than deleted, because the
+      local refcount has no visibility into whether a note open on another
+      machine still needs those bytes. This trades disk for safety on
+      purpose: an orphaned file costs space and can be cleaned up later, while
+      a referenced image deleted on every machine at once cannot be recovered
+      by anything. Tests: `with_sync_configured_deleting_the_last_reference_keeps_the_file`,
+      `with_sync_configured_removing_the_last_reference_to_an_attachment_keeps_the_file`,
+      and `without_sync_configured_the_refcounted_delete_still_removes_the_file`
+      pin sync-on and sync-off behaviour side by side, in `src/notes/edit/tests.rs`.
+      What remains, genuinely open:
+      1. **Orphan collection has no story yet, and that is fine for now.**
+         Bytes kept alive by the policy above accumulate with no local
+         reference and nothing sweeps them. Needs an actual cross-machine
+         notion of "referenced nowhere" (a tombstone/grace-period, a
+         "still wanted elsewhere" check against sync state, or something
+         else) before it is worth building; there is nothing to design
+         against yet without real usage data on how much this actually
+         accumulates.
+      2. **The remove button gives no different warning on a machine that
+         never held the original.** On the machine where an attachment was
+         dropped, deleting it removes only Beamer's copy, the user's
+         original file is never touched, by design. On a machine where the
+         note and its attachment arrived entirely through sync, there never
+         was a "user's original" to fall back on; today's UI gives no
+         confirmation dialog that treats that case differently from the
+         harmless one. The deletion-policy item above stops that keystroke
+         from destroying the bytes immediately, but a clearer warning in the
+         UI is still worth doing.
+- [ ] **The missing-file card does not notice a file arriving.** Checked
+      while wiring the Syncthing attachment transport above: `AttachmentBlock`
+      in `src/ui/sticky_blocks.rs` computes `missing` once, from a plain
+      `resolved.exists()` check, when it renders. Nothing polls afterward, and
+      because it takes no props that a stray re-render would happen to change,
+      Dioxus's prop-equality check skips re-running it on an unrelated parent
+      render, so once a note shows the missing-file card it keeps showing it
+      until something changes that note's own content (a real edit) or the
+      window is closed and reopened, even though the attachment's bytes may
+      have landed on disk seconds later. That is exactly the shape this
+      feature produces on purpose (see `agent_docs/sync.md`, "a note can
+      arrive before its image does"), so this matters: the card should heal
+      itself, most naturally with a short `use_future` inside
+      `AttachmentBlock` that polls `exists()` while `missing` is true and
+      stops once it flips. Not built here: `sticky_blocks.rs` was locked to a
+      concurrent edit for the whole of this task.
 - [ ] **`task_eval` cannot read a pre-Task-8 `notes.json` that carries an
       attachment, until Beamer has run once and flushed.** `NoteStore::load`
       upgrades a legacy path-shaped attachment (`{"kind":"image","path":

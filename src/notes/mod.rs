@@ -108,6 +108,17 @@ pub struct NoteStore {
     /// their window state. See `doc_notes::Hydrated`.
     #[serde(skip)]
     pub(crate) unreadable_notes: Vec<String>,
+    /// Whether this machine has a sync server configured, i.e. whether
+    /// `config.sync.url` is non-empty. Defaults to `false`, the same
+    /// empty-means-off value `SyncConfig::url` itself defaults to; set once,
+    /// at startup, from `sync_client::use_sync_client`.
+    ///
+    /// `edit::release_attachment_bytes` reads this to decide whether it is
+    /// still safe to delete an attachment's local bytes once nothing in this
+    /// store references them any more. See that function's doc comment for
+    /// why the answer changes once a second machine is in the picture.
+    #[serde(skip)]
+    pub(crate) sync_enabled: bool,
 }
 
 impl Default for NoteStore {
@@ -122,6 +133,7 @@ impl Default for NoteStore {
             doc_dirty: false,
             load_error: None,
             unreadable_notes: Vec::new(),
+            sync_enabled: false,
         }
     }
 }
@@ -201,6 +213,18 @@ impl NoteStore {
         self.doc.clone()
     }
 
+    /// Record whether a sync server is configured for this machine. Called
+    /// once, at startup, from `sync_client::use_sync_client`, using the same
+    /// `should_start` check that decides whether the sync client itself
+    /// connects.
+    ///
+    /// This is the one thing `edit::release_attachment_bytes` needs to know
+    /// to decide whether deleting an attachment's local bytes is still safe.
+    /// See its doc comment.
+    pub fn set_sync_enabled(&mut self, enabled: bool) {
+        self.sync_enabled = enabled;
+    }
+
     /// Whether anything is waiting on either the JSON mirror or the document.
     ///
     /// The tick reads this rather than `is_dirty`: an inline `flush_if_dirty`
@@ -269,6 +293,7 @@ impl NoteStore {
                 doc_dirty: false,
                 load_error: load_error.or(unreadable_message),
                 unreadable_notes: hydrated.unreadable,
+                sync_enabled: false,
             };
             store.migrate_legacy_attachments();
             // An entry we could not read is a read failure, not proof the

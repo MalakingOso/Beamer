@@ -61,11 +61,22 @@ pub fn App() -> Element {
     let rec_state = use_signal(RecordingState::default);
     let last_injection = use_signal(|| "No injection yet".to_string());
     let history = use_signal(TranscriptionHistory::load);
-    let notes = use_signal(NoteStore::load);
+    let mut notes = use_signal(NoteStore::load);
     // Loaded after the notes, and from the same automerge document: the note
     // store opens it and owns the handle.
     let tasks = use_signal(|| TaskStore::load_beside(&notes.peek()));
     let config = use_signal(|| Config::load().unwrap_or_default());
+    // Record whether a sync server is configured, once, before anything can
+    // delete an attachment: `notes::edit::release_attachment_bytes` reads
+    // this to decide whether it is still safe to remove a file nothing local
+    // references any more. Same `should_start` check `sync_client` uses to
+    // decide whether to connect at all, reused rather than duplicated.
+    // `use_hook`, not a plain call: `Signal::write` notifies every subscriber
+    // whether or not the value changed, so doing this on every render would
+    // churn the whole app for a flag that is fixed for the life of the process.
+    use_hook(move || {
+        notes.write().set_sync_enabled(sync_client::should_start(&config.peek().sync.url));
+    });
     let status_log = use_signal(StatusLog::new);
     // A corpus that failed to load used to be replaced by an empty store in
     // silence. Say so instead, once, on the first render.

@@ -20,10 +20,13 @@ document itself.
 ```
 
 `notes.automerge` under `sync/` is the same on every machine, given time and
-a server; that is the whole point of this task. `sync/attachments` is not, and
-is not even trying to be yet: see "What this protocol does not carry" below.
+a server; that is the whole point of this task. `sync/attachments` is carried
+by a different mechanism entirely, Syncthing, not by this protocol: see
+"Attachments: Syncthing carries the bytes" below for what that means and why.
 Everything directly under the config root is machine-local by design, and
-Task 10 does not touch any of it except to read `config.sync.url`.
+neither `sync_client` nor Syncthing touches any of it: `sync_client` only
+reads `config.sync.url`, and Syncthing is pointed at `sync/attachments`
+specifically, never at the config root or at `sync/` as a whole.
 
 ## Why automerge, not last-write-wins
 
@@ -170,22 +173,179 @@ server *this* machine dials is exactly as per-machine as `llm.base_url`. See
 
 ## What this protocol does *not* carry
 
-**Attachments do not sync.** `notes.automerge` carries a note's *reference*
-to an attachment, the content hash and extension `Attachment` stores, but
-never the bytes themselves. `automerge::sync` moves changes to the document;
-it was never given a channel for the separate `attachments/<hash>.<ext>`
-files those changes point at. Concretely: dictate a note with a dropped image
-on machine A, and once it syncs, machine B sees the note, sees that it has an
-attachment, and has no bytes for it. `sticky_blocks.rs` renders whatever its
-missing-file card looks like, because `attachments_dir(&config_dir)` on B
-simply does not have `<hash>.<ext>` on disk.
+**Attachments never move through `automerge::sync`.** `notes.automerge`
+carries a note's *reference* to an attachment, the content hash and
+extension `Attachment` stores, but never the bytes themselves.
+`automerge::sync` moves changes to the document; it was never given a
+channel for the separate `attachments/<hash>.<ext>` files those changes
+point at, and it never will be, by design, not by omission: the document is
+kept small and the two kinds of data are carried by two different
+mechanisms suited to each. See "Attachments: Syncthing carries the bytes"
+below for what actually moves the bytes, and how far that closes the gap
+this section used to describe as unsolved.
 
-This is the top open question this task leaves behind, not a rounding error:
-a note that looks complete on one machine can look broken on the other, with
-nothing in this protocol able to explain why or fix it. `todo.md`'s sync
-section has the fuller shape of what is missing, including that the
-cross-machine deletion race Task 8 flagged now has a different trigger
-(sync-delivered changes) but the same unresolved shape.
+## Attachments: Syncthing carries the bytes
+
+The decision: attachment bytes are not this protocol's problem to solve.
+`notes.automerge` keeps carrying the document, exactly as everything above
+this section describes, and a second, unrelated piece of software,
+Syncthing, is pointed at `<config_dir>/sync/attachments` and keeps that one
+directory's contents the same across machines. Two different jobs, two
+different tools, on purpose: automerge merges a document machines edit
+concurrently, which attachment bytes are never edited, only added, so
+merging is not a problem they have.
+
+⚠️ **Not installed on either machine yet.** Everything below is setup
+instructions to follow, not a description of something already running.
+Nothing here has been exercised end to end.
+
+### What Syncthing carries, and what it must never carry
+
+Syncthing's one job is the `attachments` folder and nothing else:
+
+```
+<config_dir>/sync/attachments/<hash>.<ext>   <- Syncthing's folder, only this
+<config_dir>/sync/notes.automerge            <- automerge::sync's job, not Syncthing's
+<config_dir>/machine.json                    <- machine-local, never synced by anything
+<config_dir>/config.toml                     <- machine-local, never synced by anything
+<config_dir>/notes.json                      <- a derived export, never read back, not worth syncing
+<config_dir>/tasks.json                      <- same, derived from the document
+WebView2 profile (Windows, outside config_dir) <- browser engine state, never synced
+```
+
+Pointing Syncthing at `sync/` itself instead of `sync/attachments` would
+also try to sync `notes.automerge`, which already has its own live sync
+protocol above. Two mechanisms writing the same file, on their own
+schedules, with no coordination between them, is exactly the two-writers
+hazard "The server's `--config-dir`" above works around for two `sync_server`
+processes sharing one document, except Syncthing has no equivalent of that
+section's pid-scoped temp file or its "loser reconciles again next tick"
+guarantee. Worse, Syncthing's own answer to two conflicting versions of a
+file is a `.sync-conflict-<date>-<time>` copy sitting next to the original,
+which is meaningless for an automerge document: nothing reads a
+`notes.automerge.sync-conflict-...` file, so a conflict copy there is not a
+second chance to recover data, it is a dead file that silently never gets
+merged in. Point Syncthing at `attachments/` only.
+
+### Why the attachments folder is safe to sync, when the rest is not
+
+Attachment bytes are the one thing under `config_dir` that fits a plain
+file-sync tool without any of the caveats the rest of this document spends
+so much space on:
+
+- **Content-addressed and immutable.** A file's name *is* its sha256 hash
+  (`<hash>.<ext>`, see `model::owned_file_name`). Two machines can never
+  disagree about what a given filename should contain, because the filename
+  only exists in the first place because of what the bytes hash to. There is
+  no "which version is newer" question for Syncthing to get wrong, because
+  there is only ever one possible version of `<hash>.<ext>` that could exist
+  under that name.
+- **Write-once.** A hash file is created once, by `edit::adopt_into`'s
+  copy-then-rename, and is never edited in place afterward. Syncthing's
+  conflict-copy machinery exists for files that change; nothing here changes.
+- **No cross-file relationships Syncthing needs to preserve.** Each file
+  stands alone; nothing about `<hash-a>.png` depends on whether
+  `<hash-b>.jpg` has arrived yet.
+
+That last point is also the thing to expect and not be alarmed by: **a note
+can arrive before its image does.** The document propagates over
+`sync_client`'s WebSocket, typically in milliseconds; the bytes propagate
+over Syncthing, on its own schedule, over however Syncthing and the two
+machines' networks are getting along at that moment. A note showing up with
+a missing-file card that fills in a few seconds (or longer, on a slow link,
+for a large attachment) later is the expected shape of this design, not a
+bug to chase.
+
+### The deletion policy, and why it trades disk for safety
+
+Content addressing makes attachment bytes safe to sync; it does not make them
+safe to *delete* the way `edit::release_attachment_bytes` used to.
+Refcounting there only ever looks at the local store: it removes
+`<hash>.<ext>` once nothing in *that machine's* notes references it. That was
+correct when attachments never left the machine that dropped them. It stops
+being correct the moment Syncthing can carry the same file to a second
+machine, because "nothing local references this" says nothing about whether
+a note open on that second machine still does. Machine B deleting its last
+local reference to a hash, with Syncthing propagating that deletion the same
+way it propagates a new file, would silently take the bytes with it on
+machine A too, permanently, the moment sync brings the two machines' folders
+back in step.
+
+`NoteStore.sync_enabled` is the fix: with a sync server configured
+(`config.sync.url` non-empty, the same signal `sync_client::should_start`
+already reads), `release_attachment_bytes` still runs its refcount check, but
+once that check says "nothing local references this any more," it stops
+there instead of deleting the file. An orphaned file left on disk costs disk
+space, recoverable and cheap to clean up later once something exists that
+can actually check references across every machine, rather than only the
+local one. A referenced image deleted out from under a note on every machine at once is
+not recoverable by anything. That asymmetry is the whole argument: given a
+choice between wasting some disk and losing a photo permanently, waste the
+disk. With sync off, `release_attachment_bytes` behaves exactly as it always
+has: local refcounting, real deletion once nothing local points at a hash.
+
+This closes neither of the two scenarios `todo.md` already describes for
+cross-machine attachment deletion (a still-referenced hash going missing
+because it was deleted on a machine that had no reference to it yet, and a
+machine that never held a "user's original" losing the only copy that ever
+existed there); a real fix for those needs an actual cross-machine notion of
+"referenced nowhere," which nothing here builds. What this policy does is
+narrower and unconditional: it stops Beamer's own local refcount, on its
+own, from being the thing that deletes a still-needed file. See `todo.md`'s
+sync section for what is still open.
+
+### Ignore Delete: a second, independent layer
+
+Syncthing has its own per-folder advanced setting, **Ignore Delete**, that
+stops a deletion on one side from propagating to the other at all: the file
+disappears locally but Syncthing does not remove it from peers, and does not
+recreate it if the peer's own copy is later deleted too. Turning this on for
+the `attachments` folder, on both machines, is worth doing independently of
+whatever Beamer's own `sync_enabled` policy does above: it is a second,
+unrelated layer, enforced by Syncthing itself rather than by Beamer's code,
+and it protects against exactly the same failure mode from the other
+direction, a deletion propagating when it should not have. Recommended, not
+required; Beamer's own deletion policy does not depend on it being set.
+
+### Setup, on both machines
+
+Nothing below has been run. These are the steps to follow, not a record of
+what is already configured.
+
+**On the Linux desktop (the machine `sync_server` also runs on):**
+
+1. `sudo apt install syncthing`
+2. Start it (`systemctl --user enable --now syncthing`, or run it once by
+   hand) and open its web UI, `http://127.0.0.1:8384` by default.
+3. Add a folder pointed at `~/.config/Beamer/sync/attachments`. Give the
+   folder id something recognizable, e.g. `beamer-attachments`; the label
+   only has to match on both machines if you want the UI to line up.
+4. Under that folder's **Advanced** settings, turn on **Ignore Delete**.
+5. Under **Actions → Settings → GUI**, note the device ID (or read it from
+   `syncthing --device-id`) for pairing in step 3 on the laptop.
+
+**On the Windows laptop:**
+
+1. Install Syncthing from the official Windows installer
+   (syncthing.net/downloads), or `winget install Syncthing.Syncthing`.
+2. Open its web UI and add the desktop as a remote device, addressed by its
+   tailnet hostname (the same `*.ts.net` address `sync_server`'s own
+   `wss://…/sync` endpoint uses, so the tailnet is already doing the
+   authentication work here too, the same case "Why a self-hosted socket on
+   the tailnet, not an account" makes above) rather than a bare IP.
+3. Accept the desktop's offered `beamer-attachments` folder (or add the same
+   folder id manually if auto-accept is off), pointed at
+   `%APPDATA%\Beamer\sync\attachments` on this machine.
+4. Turn on **Ignore Delete** on this side too. It is a per-folder,
+   per-device setting; both machines need it set for the protection to hold
+   in both directions.
+
+Once both sides show the folder as up to date, an attachment dropped on
+either machine should appear in the other's `attachments` directory within
+whatever interval Syncthing's file watcher and the tailnet link allow, no
+different from any other pair of machines running Syncthing between two
+folders. That behavior has not been checked by hand yet; do so before
+relying on it.
 
 ## Threading: the socket task never writes anything Dioxus owns
 

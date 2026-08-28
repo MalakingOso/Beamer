@@ -40,6 +40,7 @@ fn temp_store(tag: &str) -> NoteStore {
         doc_dirty: false,
         load_error: None,
         unreadable_notes: Vec::new(),
+        sync_enabled: false,
     }
 }
 
@@ -377,6 +378,67 @@ fn deleting_the_last_note_referencing_a_hash_removes_the_file() {
     store.delete(&id);
 
     assert!(!file.exists(), "nothing left references this hash");
+}
+
+#[test]
+fn with_sync_configured_deleting_the_last_reference_keeps_the_file() {
+    // Same shape as `deleting_the_last_note_referencing_a_hash_removes_the_file`,
+    // sync on: the only difference this flag is allowed to make.
+    let mut store = temp_store("sync_keep_delete");
+    store.sync_enabled = true;
+    let source = temp_source("sync_keep_delete", "deck.png", b"a peer machine might still need this");
+    let id = store.create(String::new(), NoteColor::Purple, NoteOrigin::Dictated);
+    store.add_attachment(&id, image("a1", &source.to_string_lossy()));
+    let (hash, ext) = owned_hash(&store.get(&id).unwrap().attachments[0]).unwrap();
+    let file = store.attachments_dir.join(format!("{hash}.{ext}"));
+    assert!(file.exists());
+
+    store.delete(&id);
+
+    assert!(
+        file.exists(),
+        "with sync configured, this store's own refcount reaching zero is not proof \
+         nothing elsewhere still needs the bytes"
+    );
+    assert!(source.exists(), "the user's original is untouched either way");
+}
+
+#[test]
+fn with_sync_configured_removing_the_last_reference_to_an_attachment_keeps_the_file() {
+    // The `remove_attachment` counterpart to the test above: removing a
+    // single attachment (not deleting the whole note) is refcounted the
+    // same way, through the same `release_attachment_bytes`.
+    let mut store = temp_store("sync_keep_remove");
+    store.sync_enabled = true;
+    let source = temp_source("sync_keep_remove", "deck.png", b"kept in case a peer still points at it");
+    let id = store.create(String::new(), NoteColor::Purple, NoteOrigin::Dictated);
+    store.add_attachment(&id, image("a1", &source.to_string_lossy()));
+    let (hash, ext) = owned_hash(&store.get(&id).unwrap().attachments[0]).unwrap();
+    let file = store.attachments_dir.join(format!("{hash}.{ext}"));
+
+    store.remove_attachment(&id, "a1");
+
+    assert!(file.exists(), "with sync on, an unreferenced file is kept rather than deleted");
+    assert!(source.exists());
+}
+
+#[test]
+fn without_sync_configured_the_refcounted_delete_still_removes_the_file() {
+    // Pins the default: a store built without ever calling
+    // `set_sync_enabled` behaves exactly as it always has. `sync_enabled`
+    // defaulting to anything else would silently change every existing
+    // install's behaviour the moment this field was added.
+    let mut store = temp_store("no_sync_default");
+    assert!(!store.sync_enabled, "sync must default to off");
+    let source = temp_source("no_sync_default", "deck.png", b"nothing else on this machine wants this");
+    let id = store.create(String::new(), NoteColor::Purple, NoteOrigin::Dictated);
+    store.add_attachment(&id, image("a1", &source.to_string_lossy()));
+    let (hash, ext) = owned_hash(&store.get(&id).unwrap().attachments[0]).unwrap();
+    let file = store.attachments_dir.join(format!("{hash}.{ext}"));
+
+    store.delete(&id);
+
+    assert!(!file.exists(), "sync off is the existing behaviour, unchanged");
 }
 
 #[test]
