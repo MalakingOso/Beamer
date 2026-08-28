@@ -147,7 +147,8 @@ hotkey can never be silently diverted. The switch proposes **Ctrl+Alt+Space**;
 the picker below it edits the chord, and both re-register live (no restart).
 
 ⚠️ **Do not pick `Ctrl+Super+<key>` for notes.** Two reasons, both verified:
-`HotkeyConfig` has no Meta modifier field, so Super is silently dropped; and
+`HotkeyConfig` has no Meta modifier field, so such a chord now fails to parse
+and the binding is unbound (it used to silently drop Super instead); and
 even with that fixed, dictation's `Ctrl+Super` is a strict *prefix* — pressing
 Ctrl then Super fires `RecordStart(Inject)` before the key is reached.
 
@@ -175,10 +176,12 @@ and replaced it with a pure, tested function. Recorded in the spec §8 and
 
 ## What is NOT done
 
-- **Task 4 — the Windows target does not compile.** `src/hotkey/ll_hook.rs:137,143`
-  still construct `HotkeyEvent::RecordStart` with no payload. It is
-  `#[cfg(target_os = "windows")]`, so Linux builds stay green. This is a **build
-  fix**, not parity work. See `todo.md`.
+- **Task 4 is done: the Windows target compiles.** `ll_hook.rs` was rewritten
+  around the same binding-matching layer `linux_hotkey.rs` uses, so note
+  capture now has a real second binding on Windows too, not just dictation.
+  `cargo xwin check --target x86_64-pc-windows-msvc` is clean. What's still
+  unverified is runtime behaviour, since this was built with no Windows
+  machine to run it on. See `todo.md`.
 - **Note size IS captured and persisted** — this line used to say it was not,
   which is stale. `ui::sticky::StickyNote` handles `WindowEvent::Resized` and
   writes the logical size through `NoteStore::set_size`; `notes.json` carries a

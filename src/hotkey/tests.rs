@@ -65,7 +65,7 @@ fn two_bindings() -> Vec<BindingConfig> {
 ///
 /// This is the real-world pairing: `Ctrl+Super` dictates, `Ctrl+Alt+Super`
 /// captures a note. Both resolve to `trigger_vk == VK_LWIN`, because the
-/// parser can only express Super as a trigger — `HotkeyConfig` has no
+/// parser can only express Super as a trigger, and `HotkeyConfig` has no
 /// Super/Meta modifier field at all. Nothing separates them except the
 /// exact modifier comparison in `matching_binding`, so it is worth pinning:
 /// a future `mods.ctrl >= b.config.ctrl`-style relaxation would make every

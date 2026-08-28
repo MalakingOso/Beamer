@@ -186,6 +186,7 @@ pub fn matching_binding(bindings: &[BindingConfig], vk: u32, mods: Modifiers) ->
 #[cfg(target_os = "windows")]
 mod ll_hook;
 #[cfg(target_os = "windows")]
+#[allow(unused_imports)]
 pub use ll_hook::{start_ll_hook, HotkeyHandle};
 
 #[cfg(not(target_os = "windows"))]
