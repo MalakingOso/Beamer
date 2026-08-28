@@ -16,6 +16,10 @@ name = "voxtral_test"
 path = "src/bin/voxtral_test.rs"
 
 [[bin]]
+name = "sync_server"
+path = "src/bin/sync_server.rs"
+
+[[bin]]
 name = "task_eval"
 path = "src/bin/task_eval.rs"
 # The `#[path]`-included modules carry their own `#[cfg(test)] mod tests`, so

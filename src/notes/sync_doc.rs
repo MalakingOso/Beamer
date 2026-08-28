@@ -116,6 +116,20 @@ pub struct SyncDoc {
     /// `.corrupt` copy, because nothing failed to *parse*. The parse arm has
     /// always quarantined first; this is the arm that cannot.
     read_only: bool,
+    /// A mutation landed on this document from somewhere other than
+    /// `flush::run_document_pass`'s own reconcile-and-merge, and still owes a
+    /// save.
+    ///
+    /// Task 10's live-sync coroutine calls `receive_sync_message` directly on
+    /// the shared document, outside any flush tick. `run_document_pass`
+    /// decides whether a tick has anything to save by comparing heads before
+    /// and after its own reconcile/merge, a comparison that is blind to a
+    /// mutation that happened *before* that tick even started, because the
+    /// "before" snapshot is taken fresh each call and already includes it.
+    /// Without this flag, a change applied between two ticks would sit in
+    /// memory, correctly reflected in the note/task signals, and never reach
+    /// disk. See `SyncDoc::mark_pending_save` and `has_pending_save`.
+    pending_save: bool,
 }
 
 impl Default for SyncDoc {
@@ -126,6 +140,7 @@ impl Default for SyncDoc {
             last_write: None,
             existed: false,
             read_only: false,
+            pending_save: false,
         }
     }
 }
@@ -223,7 +238,7 @@ impl SyncDoc {
         }
 
         let last_write = existed.then(|| mtime(&path)).flatten();
-        (Self { doc, path, last_write, existed, read_only }, error)
+        (Self { doc, path, last_write, existed, read_only, pending_save: false }, error)
     }
 
     /// Whether writing is off for this session. See the field.
@@ -278,6 +293,36 @@ impl SyncDoc {
 
     pub fn heads(&mut self) -> Vec<ChangeHash> {
         self.doc.get_heads()
+    }
+
+    /// Record that a change landed on this document from outside the flush
+    /// tick's own reconcile/merge, and still owes a save. See the field.
+    ///
+    /// Called by the live-sync coroutine right after `receive_sync_message`
+    /// applies a peer's changes, never by `flush::run_document_pass` itself,
+    /// that path already detects its own changes by comparing heads.
+    pub fn mark_pending_save(&mut self) {
+        self.pending_save = true;
+    }
+
+    /// Peek the flag `mark_pending_save` sets, without clearing it.
+    /// `run_document_pass` folds this into its own changed-or-not decision so
+    /// a save it could not otherwise see still happens on the next tick.
+    ///
+    /// Deliberately not consuming: a `save()` right after can still fail, and
+    /// a version that cleared the flag unconditionally would then have
+    /// nothing left to notice the miss on the *next* tick, since that tick's
+    /// own heads comparison sees no change either, since the mutation predates it.
+    /// `clear_pending_save` is the only thing allowed to turn this back off,
+    /// and only the caller who just saved successfully may call it.
+    pub fn has_pending_save(&self) -> bool {
+        self.pending_save
+    }
+
+    /// Clear the flag after a save that actually reached disk. See
+    /// `has_pending_save` for why this is a separate step from reading it.
+    pub fn clear_pending_save(&mut self) {
+        self.pending_save = false;
     }
 
     /// Whether the file on disk has been written since we last wrote it.

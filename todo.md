@@ -67,24 +67,47 @@
       defined in the token block. Pre-existing since `c709faa`, unrelated to
       notes; an undefined custom property fails silently.
 
-## Windows Remote LLM / Sync, blockers before Task 10 designs the share
+## Live Sync, open questions
 
-- [ ] **Cross-machine attachment deletion has no story yet.** Task 8 shipped
-      store-local refcounting for attachment bytes (`src/notes/edit.rs`,
+- [ ] **Attachment bytes have no transport at all yet.** Task 10 shipped
+      `automerge::sync` for `notes.automerge` itself (`sync_server`,
+      `notes::sync_client`): a note's text, color, stage state and task
+      suggestions all propagate live. The content-addressed files under
+      `<config_dir>/sync/attachments` do not: nothing in this protocol moves
+      bytes, only document changes, and a document change is a *reference* to
+      an attachment (a hash and an extension), never the attachment itself.
+      Concretely: dictate a note with a dropped image on machine A, and once
+      it syncs, machine B has the note and the reference and no bytes,
+      because `attachments_dir(&config_dir)` on B was simply never given
+      `<hash>.<ext>` by anything. `sticky_blocks.rs` shows whatever its
+      missing-file card looks like. See `agent_docs/sync.md`'s "What this
+      protocol does not carry" for the fuller writeup; this is the single
+      biggest gap Task 10 leaves behind, not a rounding error.
+- [ ] **Cross-machine attachment deletion still has no story, and the race
+      changed shape rather than disappearing.** Task 8 shipped store-local
+      refcounting for attachment bytes (`src/notes/edit.rs`,
       `release_attachment_bytes`): a file under `<config_dir>/sync/attachments`
-      is removed only once nothing in *that store* references it. That is
-      correct for one machine, but Task 10 puts this same directory inside
-      what Syncthing shares, and refcounting has no visibility into what a
-      second machine still needs. Two concrete failure scenarios, both real
-      data loss, neither solved by anything shipped so far:
+      is removed only once nothing in *that store* references it, which is
+      correct for one machine and has no visibility into what a second
+      machine still needs. The original writeup here described this as a
+      Syncthing file-watcher race; Syncthing is no longer part of the design
+      (see `agent_docs/sync.md`), but the underlying problem is unchanged,
+      because deletions now propagate the same way any other edit does:
+      through `automerge::sync` itself, live, the moment both machines are
+      online together, rather than through a file-sync daemon noticing a
+      changed directory on its own schedule. Two concrete failure scenarios,
+      both real data loss, neither solved by anything shipped so far:
       1. **A live reference gets deleted out from under it.** Machine A has a
          note referencing hash `H`. Machine B, offline, deletes its own last
          note referencing `H`; `release_attachment_bytes` correctly removes
          `H.<ext>` from B's local `attachments_dir`, because at the moment of
-         deletion nothing on B references it. Syncthing later propagates that
-         deletion to A. A's note still references `H`, but the bytes are now
+         deletion nothing on B references it. Once B reconnects, the note
+         deletion itself syncs to A over `sync_client`/`sync_server` like any
+         other change. A's note still references `H`, but the bytes are now
          gone on both machines, permanently, since B's local refcount had no
-         way to know A still needed them.
+         way to know A still needed them. (Moot until the item above ships,
+         since A never had B's bytes to begin with over this transport, but
+         the day attachment bytes do sync, this is waiting.)
       2. **The remove button silently destroys the only copy that exists.**
          On the machine where an attachment was originally dropped, deleting
          it removes Beamer's copy and never touches the user's original file
@@ -94,12 +117,11 @@
          deleting the note) destroys the only copy of those bytes that ever
          existed there, with no confirmation dialog distinguishing it from
          the harmless case on the machine of origin.
-      Task 10 needs an actual design for this (a tombstone/grace-period
-      before physical deletion, a "still wanted elsewhere" check against the
-      sync state, or something else) before attachment sync ships. Not
-      something Task 8 could solve: the brief scoped it to store-local
-      refcounting, and a cross-machine answer needs Task 10's sync design to
-      already exist.
+      Needs an actual design (a tombstone/grace-period before physical
+      deletion, a "still wanted elsewhere" check against the sync state, or
+      something else) before attachment sync ships. Blocked on the item
+      above existing first: there is no live cross-machine deletion race to
+      design against until attachment bytes have a transport to race over.
 - [ ] **`task_eval` cannot read a pre-Task-8 `notes.json` that carries an
       attachment, until Beamer has run once and flushed.** `NoteStore::load`
       upgrades a legacy path-shaped attachment (`{"kind":"image","path":

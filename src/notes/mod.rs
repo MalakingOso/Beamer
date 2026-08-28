@@ -35,6 +35,7 @@ pub mod lifecycle;
 mod machine;
 mod model;
 pub mod pipeline;
+pub mod sync_client;
 pub mod sync_doc;
 pub mod task;
 pub mod task_store;
