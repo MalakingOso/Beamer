@@ -19,9 +19,11 @@ document itself.
     history.json             dictation history
 ```
 
-Everything under `sync/` is the same on every machine, given time and a
-server. Everything directly under the config root is not, and Task 10 does
-not touch any of it except to read `config.sync.url`.
+`notes.automerge` under `sync/` is the same on every machine, given time and
+a server; that is the whole point of this task. `sync/attachments` is not, and
+is not even trying to be yet: see "What this protocol does not carry" below.
+Everything directly under the config root is machine-local by design, and
+Task 10 does not touch any of it except to read `config.sync.url`.
 
 ## Why automerge, not last-write-wins
 
@@ -73,6 +75,39 @@ public internet, is categorically off the table for the same reason
 `agent_docs/local_inference.md` rules it out for `llama-server`: it would
 turn "reachable by my tailnet" into "reachable by anyone," on a protocol that
 was never given a password to check.
+
+## The server's `--config-dir`, and running it beside a Beamer install
+
+`sync_server` runs on `callisto`, and `callisto` is also a machine a
+Beamer install can run on directly, at least for testing this feature.
+`sync_server`'s default `--config-dir` is deliberately **not**
+`Config::config_dir()` (the `Beamer` leaf a real Beamer install uses) for
+exactly that reason: defaulting to the same directory would make every
+plain `cargo run --bin sync_server`, with no flags, a silent file-sharing
+arrangement between two independent processes writing the same
+`notes.automerge`. The default is a distinct directory
+(`BeamerSyncServer`, alongside `Beamer` under the OS config root) so that
+sharing has to be asked for.
+
+Two processes writing the same document file is safe: `SyncDoc::save`'s temp
+file name is scoped by pid (`notes.automerge.tmp.<pid>`), so two writers can
+no longer collide on one temp path or have a `rename` fail because the other
+process already moved the file it was racing. They still race the final
+`rename` itself, one save wins and the other is superseded, but neither can
+lose data by it: the loser's own in-memory `AutoCommit` still holds its
+changes and reconciles them again on its own next tick, same as an ordinary
+merge from a slightly-stale file always has.
+
+If you deliberately want `sync_server` to serve the exact corpus a co-located
+Beamer install reads and writes locally, point it there on purpose:
+
+```
+sync_server --config-dir "$HOME/.config/Beamer" --bind 127.0.0.1:8081
+```
+
+Otherwise, leave `--config-dir` unset and the server keeps its own corpus,
+under `BeamerSyncServer`, entirely separate from any Beamer install that
+happens to run on the same box.
 
 ## The genesis change
 
@@ -171,7 +206,7 @@ in-memory document and calls `SyncDoc::mark_pending_save`; the existing
 500ms tick in `notes::flush` is still the only place `SyncDoc::save` is
 called. `flush::run_document_pass`'s own before/after heads comparison cannot
 see a mutation that already happened before that tick started, which is
-exactly what `mark_pending_save`/`take_pending_save` exist to catch. See the
+exactly what `mark_pending_save`/`has_pending_save` exist to catch. See the
 doc comment on `SyncDoc`'s `pending_save` field for the detail.
 
 `sync_server` has no such split: it is not a Dioxus process, so

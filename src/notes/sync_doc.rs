@@ -381,6 +381,21 @@ impl SyncDoc {
     /// have instead would destroy them. `NoteStore::flush_if_dirty` holds
     /// back the JSON mirror for the same reason, so a session that starts
     /// this way persists nothing at all beyond machine-local window state.
+    ///
+    /// ⚠️ **The temp name carries this process's pid.** Task 10 put a second
+    /// process, `sync_server`, on this same document format, and the
+    /// documented default deployment can run it on the same machine as
+    /// Beamer, sharing this file. Two processes racing a plain
+    /// `notes.automerge.tmp` can rename over each other's temp file, or
+    /// `rename` can fail outright because the other process already moved
+    /// the same path away. Pid-scoping the temp name, the same fix
+    /// `edit::adopt_into` already applies to attachment temp files, gives
+    /// each process its own name so the two writers cannot collide, even
+    /// though they still race on the final `rename` destination itself (one
+    /// wins, one's write is superseded, and that is fine: both write the
+    /// same document format, and neither can lose changes the other reads
+    /// back, since the loser's changes are already reflected in its own
+    /// in-memory `AutoCommit` and get reconciled again on its next tick).
     pub fn save(&mut self) -> Result<()> {
         if self.path.as_os_str().is_empty() || self.read_only {
             return Ok(());
@@ -389,7 +404,7 @@ impl SyncDoc {
             std::fs::create_dir_all(dir)?;
         }
         let bytes = self.doc.save();
-        let tmp = self.path.with_extension("automerge.tmp");
+        let tmp = self.path.with_extension(format!("automerge.tmp.{}", std::process::id()));
         std::fs::write(&tmp, bytes)?;
         if let Err(e) = std::fs::rename(&tmp, &self.path) {
             let _ = std::fs::remove_file(&tmp);

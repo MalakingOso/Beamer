@@ -41,6 +41,7 @@ mod sync_doc;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use automerge::sync::{Message as SyncMessage, State as SyncState, SyncDoc as _};
@@ -63,9 +64,22 @@ fn notes_document_path(config_dir: &Path) -> PathBuf {
     config_dir.join("sync").join("notes.automerge")
 }
 
+/// Deliberately **not** `Config::config_dir()`'s `Beamer` leaf. This box
+/// (`callisto`) can also run a Beamer install directly, for testing this
+/// feature if nothing else, and defaulting to the same directory the app
+/// itself uses would make every operator's first `cargo run --bin
+/// sync_server` a silent, undocumented file-sharing arrangement between two
+/// independent processes.
+///
+/// Two processes racing a write to the same `notes.automerge` is safe now
+/// (`SyncDoc::save`'s temp name is pid-scoped, so a rename can no longer
+/// collide with another process's temp file), but two processes still race
+/// the final `rename` onto one path, and an operator who wants that sharing
+/// on purpose should ask for it explicitly with `--config-dir`, not get it by
+/// omission. See `agent_docs/sync.md`.
 fn default_config_dir() -> PathBuf {
     let base = dirs::config_dir().expect("Could not determine config directory");
-    base.join("Beamer")
+    base.join("BeamerSyncServer")
 }
 
 /// Refuse anything but loopback. `tailscaled` is this socket's entire
@@ -153,6 +167,17 @@ async fn main() -> Result<()> {
     }
 }
 
+/// How often an idle connection gets a ping, and how long with no traffic at
+/// all (not even a pong) before it is presumed half-open and closed. Without
+/// this, a peer that drops off the network without a clean TCP close (a
+/// laptop that loses power, a network that black-holes instead of resetting)
+/// parks its `serve_peer` task, its `sync::State` and its `watch::Receiver`
+/// until the OS's own TCP timeout, which can be a long time. A clean
+/// disconnect (`WsMessage::Close`, or the read returning an error) is already
+/// handled without waiting for either of these.
+const PING_INTERVAL: Duration = Duration::from_secs(30);
+const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+
 /// One connection, one `sync::State`, for as long as the socket lives.
 /// Dropping the connection loses only that state; a reconnect starts a fresh
 /// one and the protocol re-converges, at the cost of a fuller first message.
@@ -161,44 +186,72 @@ async fn serve_peer(stream: TcpStream, handle: SyncHandle, changed_tx: watch::Se
     let (mut ws_write, mut ws_read) = ws.split();
     let mut changed_rx = changed_tx.subscribe();
     let mut state = SyncState::new();
+    let mut last_activity = tokio::time::Instant::now();
+    let mut ping_tick = tokio::time::interval(PING_INTERVAL);
+    ping_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     send_pending(&handle, &mut state, &mut ws_write).await?;
 
     loop {
         tokio::select! {
             incoming = ws_read.next() => {
+                last_activity = tokio::time::Instant::now();
                 match incoming {
                     Some(Ok(WsMessage::Binary(bytes))) => {
                         let msg = SyncMessage::decode(&bytes)
                             .context("could not decode an incoming sync message")?;
-                        apply_and_save(&handle, &mut state, msg)?;
-                        // Our own send below already reflects this change for
-                        // this peer; the broadcast is for every *other* peer
-                        // whose `changed_rx.changed()` is waiting on it.
-                        let _ = changed_tx.send(());
+                        // Gated on the document actually moving: most
+                        // messages in this protocol are handshakes and acks
+                        // that carry no changes, and rewriting the document
+                        // to disk (and waking every other connected peer)
+                        // for one of those would make every idle connection
+                        // a source of needless disk I/O and wakeups.
+                        if apply_and_save(&handle, &mut state, msg)? {
+                            // Our own send below already reflects this change
+                            // for this peer; the broadcast is for every
+                            // *other* peer whose `changed_rx.changed()` is
+                            // waiting on it.
+                            let _ = changed_tx.send(());
+                        }
                     }
                     Some(Ok(WsMessage::Close(_))) | None => return Ok(()),
-                    Some(Ok(_)) => {} // ping/pong/text: this protocol sends neither
+                    Some(Ok(_)) => {} // ping/pong/text: only pings/pongs arrive here, and tungstenite answers pings on our behalf
                     Some(Err(e)) => return Err(e.into()),
                 }
             }
             changed = changed_rx.changed() => {
                 changed.context("the change-notification channel closed unexpectedly")?;
             }
+            _ = ping_tick.tick() => {
+                if last_activity.elapsed() > IDLE_TIMEOUT {
+                    anyhow::bail!(
+                        "peer sent nothing (not even a pong) for over {IDLE_TIMEOUT:?}; \
+                         presuming the connection half-open and closing it"
+                    );
+                }
+                ws_write.send(WsMessage::Ping(Vec::new().into())).await?;
+            }
         }
         send_pending(&handle, &mut state, &mut ws_write).await?;
     }
 }
 
-fn apply_and_save(handle: &SyncHandle, state: &mut SyncState, msg: SyncMessage) -> Result<()> {
+/// Applies one incoming message and, only if it actually moved the
+/// document's heads, saves and returns `true`. See the call site's comment
+/// on why a no-op message must not trigger either.
+fn apply_and_save(handle: &SyncHandle, state: &mut SyncState, msg: SyncMessage) -> Result<bool> {
     let mut doc = handle.lock();
     if doc.is_read_only() {
         tracing::warn!("sync document is read-only; dropping an incoming change from a peer");
-        return Ok(());
+        return Ok(false);
     }
+    let before = doc.heads();
     doc.doc_mut().sync().receive_sync_message(state, msg)?;
+    if doc.heads() == before {
+        return Ok(false);
+    }
     doc.save().context("could not save the sync document")?;
-    Ok(())
+    Ok(true)
 }
 
 type WsSink = futures_util::stream::SplitSink<WebSocketStream<TcpStream>, WsMessage>;
