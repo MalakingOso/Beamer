@@ -61,9 +61,14 @@ pub fn App() -> Element {
     let last_injection = use_signal(|| "No injection yet".to_string());
     let history = use_signal(TranscriptionHistory::load);
     let notes = use_signal(NoteStore::load);
-    let tasks = use_signal(TaskStore::load);
+    // Loaded after the notes, and from the same automerge document: the note
+    // store opens it and owns the handle.
+    let tasks = use_signal(|| TaskStore::load_beside(&notes.peek()));
     let config = use_signal(|| Config::load().unwrap_or_default());
     let status_log = use_signal(StatusLog::new);
+    // A corpus that failed to load used to be replaced by an empty store in
+    // silence. Say so instead, once, on the first render.
+    app_setup::report_load_errors(notes, tasks, status_log);
     let update_status = use_signal(UpdateStatus::default);
     // Which hotkey started the current recording, so the pill can say so.
     let active_mode = use_signal(CaptureMode::default);
@@ -96,6 +101,7 @@ pub fn App() -> Element {
             history,
             status_log,
             notes,
+            tasks,
             active_mode,
             note_passes,
         )

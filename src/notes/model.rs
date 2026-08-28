@@ -5,7 +5,7 @@
 //! persistence.
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// How far one model pass has got on a note.
 ///
@@ -79,24 +79,102 @@ impl NoteColor {
     }
 }
 
+/// Where an attachment's bytes actually are.
+///
+/// **`Owned` is the normal case, as of this task.** Beamer copies a dropped
+/// file's bytes in right away, and from then on all it stores is a sha256 hash
+/// and the extension. A hash means the same thing on any machine, which is
+/// what makes an attachment syncable at all; a raw path from one OS is
+/// meaningless on another, and rewriting it there just breaks it here.
+///
+/// **`External` is the not-yet-owned case.** It is what a `notes.json` from
+/// before this task carries until migration finds the file and copies it in,
+/// and it is also what a "Locate…" pick becomes if the chosen file cannot be
+/// read. The path may not exist; `ui::sticky_blocks` renders that as a
+/// missing-file card with a "Locate…" button rather than dropping the
+/// attachment, because a broken reference is recoverable and a deleted one
+/// is not.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Location {
+    Owned { hash: String, ext: String },
+    External { path: PathBuf },
+}
+
+impl Location {
+    /// Where to read this location's bytes from, given this machine's
+    /// attachments directory.
+    ///
+    /// Existence is a separate question from what this returns: an `External`
+    /// path can be gone, and even an `Owned` file can be, if the local copy
+    /// has not synced yet or was removed by hand outside Beamer.
+    ///
+    /// An `Owned` location whose `hash`/`ext` are not shaped like anything
+    /// this code would have written never resolves outside `attachments_dir`.
+    /// `hash`/`ext` are plain `String`s straight out of `Deserialize`, and a
+    /// hand-edited or (once notes sync) maliciously crafted `notes.json`
+    /// could set `hash` to `"../../../home/user/Pictures/cat"`: `Path::join`
+    /// discards the base entirely for an absolute-looking second argument,
+    /// and `..` traverses without even needing that. `owned_file_name`
+    /// rejects anything that is not exactly what `Sha256::digest` and this
+    /// codebase's own extension handling produce, and this falls back to a
+    /// single fixed name, still inside `attachments_dir`, when it does.
+    pub fn resolved_path(&self, attachments_dir: &Path) -> PathBuf {
+        match self {
+            Self::Owned { hash, ext } => match owned_file_name(hash, ext) {
+                Some(name) => attachments_dir.join(name),
+                None => attachments_dir.join(INVALID_OWNED_PLACEHOLDER),
+            },
+            Self::External { path } => path.clone(),
+        }
+    }
+}
+
+/// The fixed name `resolved_path` falls back to for an `Owned` location whose
+/// `hash`/`ext` fail `owned_file_name`'s validation. A single hard-coded
+/// string, not built from either field, so it can never itself be steered
+/// outside `attachments_dir`; nothing legitimate is ever adopted under this
+/// name, since `adopt_into` always produces a valid hash.
+const INVALID_OWNED_PLACEHOLDER: &str = "invalid-attachment";
+
+/// The `<hash>.<ext>` filename for a content-addressed attachment, or `None`
+/// if `hash`/`ext` are not shaped like what this codebase ever writes:
+/// `hash` exactly 64 lowercase hex digits (a sha256 hex digest), `ext` 1 to
+/// 16 ASCII alphanumeric characters.
+///
+/// This is the one place that decides whether a `Location::Owned`'s two
+/// strings are safe to fold into a path at all. Every filesystem operation
+/// keyed on an owned attachment, in this file and in `edit.rs`, must go
+/// through this rather than formatting `hash`/`ext` into a path directly.
+pub fn owned_file_name(hash: &str, ext: &str) -> Option<String> {
+    let hash_ok = hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    let ext_ok = !ext.is_empty() && ext.len() <= 16 && ext.bytes().all(|b| b.is_ascii_alphanumeric());
+    (hash_ok && ext_ok).then(|| format!("{hash}.{ext}"))
+}
+
 /// Something a note references, rendered inline where its `[[beamer:<id>]]`
 /// token sits in `body`.
 ///
-/// ⚠️ **Paths point at the user's own files and are never copied or deleted.**
-/// Beamer does not own an image the way a document editor would: dropping a
-/// photo on a note records where that photo lives, and moving the file breaks
-/// the reference visibly (`ui::sticky_blocks` renders a missing-file card with
-/// a "Locate…" button). That is the deliberate trade — a note is never a second
-/// copy of your library, and deleting a note can never delete your photo.
+/// **Beamer owns a copy of what it can.** Dropping a photo on a note copies
+/// its bytes into `<config_dir>/sync/attachments`, content-addressed by
+/// sha256, and the note records that hash and the original file name rather
+/// than a path. Two attachments with identical bytes, even on different
+/// notes, share one file on disk; see `edit.rs` for the refcounting that
+/// keeps that file around exactly as long as something references it.
 ///
-/// `#[serde(tag = "kind")]` so `attachments.json`-shaped rows stay readable by
-/// eye and a new variant can be added without renumbering anything.
+/// **Deleting a note still never touches your original.** That half of the
+/// old design survives unchanged: what gets deleted is Beamer's own copy, the
+/// one it made on attach, never the file the photo or document came from.
+///
+/// `#[serde(tag = "kind")]` so an attachment's row inside `notes.json` stays
+/// readable by eye and a new variant can be added without renumbering
+/// anything.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Attachment {
-    Image { id: String, path: PathBuf, alt: Option<String> },
+    Image { id: String, filename: String, alt: Option<String>, location: Location },
     Link { id: String, url: String, title: Option<String> },
-    File { id: String, path: PathBuf },
+    File { id: String, filename: String, location: Location },
 }
 
 impl Attachment {
@@ -107,21 +185,42 @@ impl Attachment {
         }
     }
 
-    /// The file this points at, if it points at one. `None` for a link.
-    pub fn path(&self) -> Option<&std::path::Path> {
+    /// Where this attachment's bytes are, if it points at bytes at all.
+    /// `None` for a link, which has no file.
+    pub fn location(&self) -> Option<&Location> {
         match self {
-            Self::Image { path, .. } | Self::File { path, .. } => Some(path.as_path()),
+            Self::Image { location, .. } | Self::File { location, .. } => Some(location),
             Self::Link { .. } => None,
         }
     }
 
-    /// What to call it in the UI: the file name, or the link's host.
+    /// Repoint this attachment at a new location. A no-op on a link.
+    pub fn set_location(&mut self, new: Location) {
+        match self {
+            Self::Image { location, .. } | Self::File { location, .. } => *location = new,
+            Self::Link { .. } => {}
+        }
+    }
+
+    /// Rename the display name, e.g. when "Locate…" points at a file that is
+    /// not called what the original was. A no-op on a link.
+    pub fn set_filename(&mut self, name: String) {
+        match self {
+            Self::Image { filename, .. } | Self::File { filename, .. } => *filename = name,
+            Self::Link { .. } => {}
+        }
+    }
+
+    /// Where to read this attachment's bytes from, given this machine's
+    /// attachments directory. `None` for a link.
+    pub fn resolved_path(&self, attachments_dir: &Path) -> Option<PathBuf> {
+        self.location().map(|loc| loc.resolved_path(attachments_dir))
+    }
+
+    /// What to call it in the UI: the original file name, or the link's host.
     pub fn label(&self) -> String {
         match self {
-            Self::Image { path, .. } | Self::File { path, .. } => path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.to_string_lossy().into_owned()),
+            Self::Image { filename, .. } | Self::File { filename, .. } => filename.clone(),
             Self::Link { url, title, .. } => match title {
                 Some(t) if !t.trim().is_empty() => t.clone(),
                 _ => link_label(url),
@@ -168,24 +267,6 @@ pub struct Note {
     #[serde(default)]
     pub origin: NoteOrigin,
     pub color: NoteColor,
-    /// **Not read on Linux, and never written from window geometry.**
-    ///
-    /// Position memory was dropped by decision: `ui::note_layout` chooses where
-    /// each note goes, freshly, every launch. The field stays because it is
-    /// part of the persisted schema and `with_position` is still honoured
-    /// natively on Windows — but nothing captures a window's actual position
-    /// into it, and nothing should. Reading a window's own position back is
-    /// exactly what Wayland does not permit, and the API that appears to do it
-    /// returns `Ok((0, 0))` rather than an error.
-    pub pos: Option<(i32, i32)>,
-    /// Logical pixels, captured from the window's own resize events.
-    ///
-    /// Unlike `pos`, size **is** legitimately observable on Wayland — it
-    /// arrives in the configure event rather than having to be guessed — so it
-    /// is captured and restored. This does not reopen the deliberate
-    /// scatter-on-launch decision: a note still appears somewhere new each
-    /// launch, now at the size you left it.
-    pub size: Option<(u32, u32)>,
     /// Attachments referenced by `[[beamer:<id>]]` tokens in `body`, in no
     /// particular order — `body` owns reading order.
     ///
@@ -194,7 +275,6 @@ pub struct Note {
     /// stage fields above; keep it that way.
     #[serde(default)]
     pub attachments: Vec<Attachment>,
-    pub open: bool,
     pub archived: bool,
 }
 
@@ -209,5 +289,46 @@ mod tests {
             NoteColor::from_config_name("chartreuse"), NoteColor::Purple,
             "a bad config value must not panic or produce an unrenderable color"
         );
+    }
+
+    #[test]
+    fn a_valid_hash_and_extension_resolve_to_the_expected_filename() {
+        let hash = "a".repeat(64);
+        assert_eq!(owned_file_name(&hash, "png"), Some(format!("{hash}.png")));
+    }
+
+    #[test]
+    fn a_traversal_shaped_hash_never_resolves_outside_attachments_dir() {
+        let attachments_dir = Path::new("/tmp/beamer-attachments-test");
+        let cases = [
+            Location::Owned { hash: "../../../../etc/passwd".into(), ext: "png".into() },
+            Location::Owned { hash: "/home/berkley/Pictures/cat".into(), ext: "png".into() },
+            Location::Owned { hash: "a".repeat(64), ext: "../../etc".into() },
+            Location::Owned { hash: String::new(), ext: String::new() },
+            // One character short of a real digest, easy to get wrong by an
+            // off-by-one in a future edit.
+            Location::Owned { hash: "a".repeat(63), ext: "png".into() },
+            // Uppercase hex is not what `Sha256::digest` formats as; treating
+            // it as valid would let two different-looking hashes address the
+            // same bytes and confuse the refcount.
+            Location::Owned { hash: "A".repeat(64), ext: "png".into() },
+        ];
+        for location in cases {
+            let resolved = location.resolved_path(attachments_dir);
+            assert!(
+                resolved.starts_with(attachments_dir),
+                "{location:?} must resolve inside attachments_dir, got {resolved:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn owned_file_name_rejects_what_it_should() {
+        let hash = "a".repeat(64);
+        assert_eq!(owned_file_name(&hash, ""), None, "an empty extension");
+        assert_eq!(owned_file_name(&hash, "p/ng"), None, "a separator in the extension");
+        assert_eq!(owned_file_name("../etc/passwd", "png"), None, "a short, traversal-shaped hash");
+        assert_eq!(owned_file_name(&"a".repeat(65), "png"), None, "one character too many");
+        assert_eq!(owned_file_name(&hash, "png"), Some(format!("{hash}.png")));
     }
 }

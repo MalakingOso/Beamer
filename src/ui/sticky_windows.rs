@@ -101,7 +101,7 @@ async fn open_note_window(
     pos: (i32, i32),
     all_workspaces: bool,
 ) {
-    let (w, h) = note.size.unwrap_or(DEFAULT_NOTE_SIZE);
+    let (w, h) = notes.peek().size(&note.id).unwrap_or(DEFAULT_NOTE_SIZE);
     let title = window_title(&note.id);
     let builder = WindowBuilder::new()
         .with_title(title.clone())
@@ -245,7 +245,7 @@ fn slot_state(registry: &StickyRegistry, id: &str) -> SlotState {
 /// "bring it back", so it is the right place to clean up after a window that
 /// died without saying so.
 pub fn reopen_note(mut registry: StickyRegistry, mut notes: Signal<NoteStore>, id: &str) {
-    let open = notes.peek().get(id).is_some_and(|n| n.open);
+    let open = notes.peek().is_open(id);
     match reopen_action(slot_state(&registry, id), open) {
         ReopenAction::Focus => {
             if let Some(StickySlot { ctx: Some(weak), .. }) = registry.peek().get(id) {
@@ -302,7 +302,7 @@ pub fn setup_sticky_windows(
             // it at the one gesture that unambiguously means "bring it back".
             let live = registry.peek();
             for note in store.notes.iter() {
-                let showing = note.open && !note.archived;
+                let showing = store.is_open(&note.id) && !note.archived;
                 let registered = live.contains_key(&note.id);
                 if showing && !registered {
                     to_open.push(note.clone());
@@ -353,7 +353,7 @@ pub fn setup_sticky_windows(
 
             let mut occupied: Vec<(i32, i32)> = reg.peek().values().map(|s| s.pos).collect();
             occupied.extend_from_slice(&main_window);
-            let size = note.size.unwrap_or(DEFAULT_NOTE_SIZE);
+            let size = notes.peek().size(&note.id).unwrap_or(DEFAULT_NOTE_SIZE);
             let pos = note_layout::place_next(
                 area,
                 size,

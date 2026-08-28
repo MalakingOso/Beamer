@@ -132,12 +132,16 @@ pub fn NotesPage(props: NotesPageProps) -> Element {
                             // for any note that is open and not archived.
                             let color =
                                 NoteColor::from_config_name(&config.peek().notes.default_color);
-                            let mut store = notes.write();
-                            store.create(String::new(), color, NoteOrigin::Typed);
-                            // Flushed inline, like `do_note_capture`: a note the
-                            // user is about to type into must not be lost to a
-                            // crash before the debounce tick comes round.
-                            store.flush_if_dirty();
+                            notes.write().create(String::new(), color, NoteOrigin::Typed);
+                            // Flushed inline, like `do_note_capture`, and
+                            // through `flush_stores` because that is the only
+                            // thing that writes the document. `flush_if_dirty`
+                            // would write the JSON mirror alone, which nothing
+                            // reads back.
+                            crate::notes::flush_stores(
+                                &mut notes.write(),
+                                &mut tasks.write(),
+                            );
                         },
                         IconPlus { size: 14 }
                     }
@@ -262,9 +266,11 @@ pub fn NotesPage(props: NotesPageProps) -> Element {
                                                     // rather than a note whose
                                                     // rows are.
                                                     tasks.write().delete_for_note(&id);
-                                                    let mut store = notes.write();
-                                                    store.delete(&id);
-                                                    store.flush_if_dirty();
+                                                    notes.write().delete(&id);
+                                                    crate::notes::flush_stores(
+                                                        &mut notes.write(),
+                                                        &mut tasks.write(),
+                                                    );
                                                 }
                                             },
                                             if confirming { "Really delete?" } else { "Delete" }

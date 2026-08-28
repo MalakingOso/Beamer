@@ -25,16 +25,29 @@ fn note(id: &str, clean: StageState, extract: StageState) -> Note {
         extract_state: extract,
         origin: NoteOrigin::default(),
         color: NoteColor::Purple,
-        pos: None,
-        size: None,
         attachments: Vec::new(),
-        open: true,
         archived: false,
     }
 }
 
 fn store(notes: Vec<Note>) -> NoteStore {
-    NoteStore { notes, path: std::path::PathBuf::new(), dirty: false }
+    // `attachments_dir` points at the real temp directory, not an empty
+    // `PathBuf`: nothing here exercises attachment removal, but an empty
+    // base would make any future `release_attachment_bytes` call resolve
+    // relative to the process's cwd, which during `cargo test` is the repo
+    // checkout, not a throwaway location.
+    let attachments_dir = std::env::temp_dir().join("beamer_pipeline_test_attachments");
+    NoteStore {
+        notes,
+        path: std::path::PathBuf::new(),
+        dirty: false,
+        machine: crate::notes::MachineStore::new(std::path::PathBuf::new()),
+        attachments_dir,
+        doc: crate::notes::sync_doc::SyncHandle::default(),
+        doc_dirty: false,
+        load_error: None,
+        unreadable_notes: Vec::new(),
+    }
 }
 
 /// Marks a note archived, for the one test that needs it. A free function

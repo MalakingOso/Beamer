@@ -30,9 +30,10 @@ impl NoteStore {
     /// that failed.
     ///
     /// The guard is body equality, deliberately **not** the `modified`
-    /// timestamp: `set_color` and `set_open` bump `modified` for things that
-    /// are not edits at all, so a timestamp guard would reject perfectly good
-    /// results.
+    /// timestamp: `set_color` bumps `modified` for something that is not an
+    /// edit at all, so a timestamp guard would reject perfectly good results.
+    /// `set_open` used to be in that list too; since Task 7 it is
+    /// machine-local and does not touch `modified` at all.
     ///
     /// An empty or whitespace-only `cleaned` is a **success**. A note that was
     /// pure filler correctly cleans up to nothing, and the model saying so must
@@ -116,8 +117,21 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("beamer_notes_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(format!("lifecycle_{tag}.json"));
+        let machine_path = dir.join(format!("lifecycle_{tag}.machine.json"));
         let _ = std::fs::remove_file(&path);
-        NoteStore { notes: Vec::new(), path, dirty: false }
+        let _ = std::fs::remove_file(&machine_path);
+        let attachments_dir = dir.join(format!("lifecycle_{tag}_attachments"));
+        NoteStore {
+            notes: Vec::new(),
+            path,
+            dirty: false,
+            machine: crate::notes::MachineStore::new(machine_path),
+            attachments_dir,
+            doc: crate::notes::sync_doc::SyncHandle::default(),
+            doc_dirty: false,
+            load_error: None,
+            unreadable_notes: Vec::new(),
+        }
     }
 
     #[test]

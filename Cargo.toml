@@ -47,6 +47,8 @@ image = { version = "0.25", default-features = false, features = ["png", "ico"] 
 rodio = { version = "0.20", default-features = false, features = ["mp3"] }
 reqwest = { version = "0.12", default-features = false, features = ["multipart", "native-tls", "json"] }
 self_update = { version = "0.42", features = ["archive-zip"] }
+sha2 = "0.10.9"
+automerge = "0.11"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13"
