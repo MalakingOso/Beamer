@@ -5,6 +5,7 @@ pub mod hotkey_picker;
 pub mod injection_card;
 pub mod local_ai_card;
 pub mod recording_card;
+pub mod sync_card;
 pub mod transcription_card;
 pub mod update_card;
 pub mod vocabulary_card;
@@ -17,9 +18,11 @@ use self::debug_card::DebugCard;
 use self::injection_card::InjectionCard;
 use self::local_ai_card::LocalAiCard;
 use self::recording_card::RecordingCard;
+use self::sync_card::SyncCard;
 use self::transcription_card::TranscriptionCard;
 use self::update_card::UpdateCard;
 use crate::config::Config;
+use crate::notes::sync_client::SyncClientHandle;
 use crate::notes::task_store::TaskStore;
 use crate::notes::NoteStore;
 use crate::ui::status_log::StatusLog;
@@ -33,6 +36,7 @@ pub struct SettingsPageProps {
     pub update_status: Signal<UpdateStatus>,
     pub notes: Signal<NoteStore>,
     pub tasks: Signal<TaskStore>,
+    pub sync_client: SyncClientHandle,
 }
 
 /// Apply a mutation to the config signal, then synchronously persist it.
@@ -97,10 +101,17 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
             ApiKeysCard {
                 elevenlabs_key: elevenlabs_key.read().clone(),
                 on_elevenlabs_change: move |key: String| {
+                    // Saved immediately, like every other field on this page,
+                    // instead of waiting for the footer button. A key typed
+                    // in and left there used to vanish on close with no
+                    // warning, since nothing else on the page hints that
+                    // this one field needs a separate save.
+                    crate::config::save_api_key("elevenlabs_api_key", &key);
                     elevenlabs_key.set(key);
                 },
                 mistral_key: mistral_key.read().clone(),
                 on_mistral_change: move |key: String| {
+                    crate::config::save_api_key("mistral_api_key", &key);
                     mistral_key.set(key);
                 },
             }
@@ -126,6 +137,15 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                 },
                 on_extract_model_change: move |m: String| {
                     save_config(config, |c| c.llm.extract.model = m);
+                },
+            }
+
+            SyncCard {
+                url: config.read().sync.url.clone(),
+                status: props.sync_client.status,
+                started_url: props.sync_client.started_url.clone(),
+                on_url_change: move |url: String| {
+                    save_config(config, |c| c.sync.url = url);
                 },
             }
 

@@ -186,7 +186,16 @@ pub fn App() -> Element {
 
     // Live sync against `sync_server`, off unless `config.sync.url` names a
     // server. A no-op call when it is empty, see `sync_client::should_start`.
-    sync_client::use_sync_client(config, notes.peek().sync_doc(), notes, tasks);
+    // The returned handle is what `SyncCard` in Settings reads to show the
+    // connection's live state without opening a second one of its own.
+    //
+    // `sync_doc` has to be its own statement, not inlined as an argument
+    // below: `use_sync_client` itself writes `notes` (see its doc), and a
+    // `notes.peek()` used inline as a call argument does not drop its borrow
+    // until the whole statement finishes, which is after that write already
+    // ran. Splitting it here is what lets the borrow end first.
+    let sync_doc = notes.peek().sync_doc();
+    let sync_client_handle = sync_client::use_sync_client(config, sync_doc, notes, tasks);
 
     // Background update check on startup (3s delay to keep launch snappy)
     app_setup::setup_update_check(config, update_status);
@@ -311,7 +320,7 @@ pub fn App() -> Element {
                         VocabPage {}
                     },
                     Page::Settings => rsx! {
-                        SettingsPage { config, last_injection, status_log, update_status, notes, tasks }
+                        SettingsPage { config, last_injection, status_log, update_status, notes, tasks, sync_client: sync_client_handle }
                     },
                 }
             }

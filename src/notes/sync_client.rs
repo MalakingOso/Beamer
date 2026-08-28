@@ -60,22 +60,65 @@ pub fn should_start(url: &str) -> bool {
     !url.trim().is_empty()
 }
 
+/// Live state of the sync connection, as `SyncCard` on the Settings page
+/// needs to describe it to someone who has never heard of a WebSocket.
+///
+/// Written from exactly one place, `run_client`'s own coroutine, at the
+/// moments the connection actually changes state. Nothing polls for this: a
+/// status only moves because a socket event moved it, which is the
+/// "smallest signal, no second writer, no polling timer" the card was asked
+/// to observe rather than invent.
+#[derive(Clone, PartialEq, Default)]
+pub enum SyncStatus {
+    /// No URL is configured, or the URL changed but Beamer has not been
+    /// restarted since. See `SyncClientHandle::started_url`.
+    #[default]
+    Off,
+    /// A `connect_async` attempt is in flight, or about to be, between
+    /// backoff sleeps.
+    Connecting,
+    Connected,
+    /// A connection attempt failed, or an established connection dropped.
+    /// `detail` is the raw error the socket handed back, useful next to
+    /// `sync_server`'s own logs. The card leads with a plain-language line
+    /// and shows this detail second, not first.
+    Disconnected { detail: String },
+}
+
+/// What the Settings page needs in order to describe the running sync
+/// client: its live state, plus the URL it actually started with.
+///
+/// The URL is fixed at mount (see `use_sync_client`'s doc below), so keeping
+/// it is what lets `SyncCard` tell a saved edit apart from a connection that
+/// has not picked it up yet, rather than the status line describing the old
+/// address as though it were the new one.
+#[derive(Clone, PartialEq)]
+pub struct SyncClientHandle {
+    pub status: Signal<SyncStatus>,
+    pub started_url: String,
+}
+
 /// Start the live-sync client. Call once, from `App()`.
 ///
 /// A no-op when `config.sync.url` is empty: sync is off until a machine is
 /// told a server exists, matching `note_hotkey`'s empty-means-off precedent.
 /// The URL is read once, at first render, the same way the dictation
-/// hotkey's initial binding is read in `app.rs`; a config edit takes effect
-/// on the next restart, not live. Settings has no toggle for this yet either;
-/// wiring one is later work, not part of this task.
-pub fn use_sync_client(config: Signal<Config>, doc: SyncHandle, notes: Signal<NoteStore>, tasks: Signal<TaskStore>) {
-    use_hook(move || {
+/// hotkey's initial binding is read in `app.rs`; a config edit made through
+/// `SyncCard` takes effect on the next restart, not live.
+pub fn use_sync_client(config: Signal<Config>, doc: SyncHandle, notes: Signal<NoteStore>, tasks: Signal<TaskStore>) -> SyncClientHandle {
+    let status = use_signal(SyncStatus::default);
+    let started_url = use_hook(move || {
         let url = config.peek().sync.url.trim().to_string();
-        if !should_start(&url) {
-            return;
+        // `NoteStore::sync_enabled` is set by `App()`'s own startup hook,
+        // from the same `should_start` check, before this one runs. See
+        // `edit::release_attachment_bytes` for why that flag exists. Not
+        // repeated here to avoid writing the same `Signal` from two places.
+        if should_start(&url) {
+            spawn(run_client(url.clone(), doc, notes, tasks, status));
         }
-        spawn(run_client(url, doc, notes, tasks));
+        url
     });
+    SyncClientHandle { status, started_url }
 }
 
 /// Reconnect forever. Returns only if the coroutine's owning scope drops.
@@ -85,19 +128,34 @@ pub fn use_sync_client(config: Signal<Config>, doc: SyncHandle, notes: Signal<No
 /// read or write error deserves the same fast retry as one that closed
 /// politely. Waiting up to 30s to retry after an hours-long, error-terminated
 /// connection would be the wrong lesson to draw from that history.
-async fn run_client(url: String, doc: SyncHandle, mut notes: Signal<NoteStore>, mut tasks: Signal<TaskStore>) {
+async fn run_client(
+    url: String,
+    doc: SyncHandle,
+    mut notes: Signal<NoteStore>,
+    mut tasks: Signal<TaskStore>,
+    mut status: Signal<SyncStatus>,
+) {
     let mut backoff = BACKOFF_START;
     loop {
+        status.set(SyncStatus::Connecting);
         match tokio_tungstenite::connect_async(&url).await {
             Ok((ws, _)) => {
                 backoff = BACKOFF_START;
+                status.set(SyncStatus::Connected);
                 match run_connection(ws, &doc, &mut notes, &mut tasks).await {
-                    Ok(()) => tracing::info!("sync connection to {url} closed cleanly"),
-                    Err(e) => tracing::debug!("sync connection to {url} dropped: {e}"),
+                    Ok(()) => {
+                        tracing::info!("sync connection to {url} closed cleanly");
+                        status.set(SyncStatus::Disconnected { detail: "the connection closed".to_string() });
+                    }
+                    Err(e) => {
+                        tracing::debug!("sync connection to {url} dropped: {e}");
+                        status.set(SyncStatus::Disconnected { detail: e.to_string() });
+                    }
                 }
             }
             Err(e) => {
                 tracing::debug!("could not connect to {url}: {e}");
+                status.set(SyncStatus::Disconnected { detail: e.to_string() });
             }
         }
         tokio::time::sleep(backoff).await;

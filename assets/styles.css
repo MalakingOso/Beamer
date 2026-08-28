@@ -1634,3 +1634,21 @@ body {
   padding-top: 4px;
   border-top: 2px solid var(--border);
 }
+
+/* ── Sync card ───────────────────────────────────────────────────────── */
+
+.sync-status {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.sync-status.ok { color: var(--success); }
+.sync-status.bad { color: var(--danger); }
+.sync-status.connecting { color: var(--accent); }
+.sync-status.off { color: var(--fg-muted); }
+
+.sync-note {
+  font-size: 12px;
+  color: var(--fg-muted);
+  font-family: "DM Mono", "Cascadia Code", monospace;
+}

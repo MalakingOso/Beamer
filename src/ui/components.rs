@@ -174,7 +174,12 @@ pub fn MaskedInput(props: MaskedInputProps) -> Element {
                 class: "input input-mono",
                 r#type: "{input_type}",
                 value: "{props.value}",
-                oninput: move |e: Event<FormData>| {
+                // `onchange`, not `oninput`: this fires once, when the field
+                // loses focus, not on every keystroke. Callers persist the
+                // value straight through (see `ApiKeysCard`'s use in the
+                // Settings page), and a credential store is not something to
+                // write to on every character typed.
+                onchange: move |e: Event<FormData>| {
                     props.onchange.call(e.value().to_string());
                 },
             }
