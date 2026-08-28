@@ -61,7 +61,7 @@ pub enum Stages {
 pub struct PipelineRequest {
     pub note_id: String,
     pub stages: Stages,
-    /// Set only by the backlog sweep — see `sweep_requests`. A swept request's
+    /// Set only by the backlog sweep, see `sweep_requests`. A swept request's
     /// own completion never triggers another sweep, or a note that keeps
     /// failing would re-sweep the whole backlog forever every time any other
     /// note happened to succeed.
@@ -88,7 +88,7 @@ impl PipelineRequest {
 ///
 /// Pure: a function of the store's stage fields and nothing else, so this is
 /// testable without a server or a running coroutine. The one caller is
-/// `use_pipeline`'s own success path — never a timer, see the module-level
+/// `use_pipeline`'s own success path, never a timer. See the module-level
 /// warning on never polling the server.
 pub fn sweep_requests(notes: &NoteStore) -> Vec<PipelineRequest> {
     notes
@@ -149,8 +149,8 @@ pub fn use_pipeline(
                     // The sweep trigger: a request that just succeeded is
                     // itself the evidence the server is reachable, so ask it
                     // to also carry the rest of the failed backlog. This is
-                    // never a timer — see the never-poll warning on
-                    // `client::probe` — it fires only from a request that
+                    // never a timer, see the never-poll warning on
+                    // `client::probe`. It fires only from a request that
                     // already completed.
                     if should_sweep(finished.succeeded, finished.swept) {
                         let backlog = sweep_requests(&notes.peek());
@@ -171,8 +171,8 @@ pub fn use_pipeline(
 }
 
 /// What one finished pass reports back to the coroutine loop: which note it
-/// was, whether it was itself a swept request, and whether it succeeded —
-/// the fact the sweep trigger is built on.
+/// was, whether it was itself a swept request, and whether it succeeded.
+/// That last fact is what the sweep trigger is built on.
 struct Finished {
     note_id: String,
     swept: bool,
@@ -223,7 +223,7 @@ async fn run_request(
         return Finished { note_id: id, swept, succeeded: false };
     }
 
-    // Starts true and only ever gets pulled down — a stage that is disabled
+    // Starts true and only ever gets pulled down. A stage that is disabled
     // in config, rather than requested, contacts no server and so cannot make
     // this pass count as failed evidence either way.
     let mut succeeded = true;
@@ -318,7 +318,7 @@ fn stage_is_pending(store: &NoteStore, id: &str, stage: Stage) -> bool {
 /// Cost is one call per run — measured at 0.225s each, so a note with two
 /// images is ~0.7s. Serial on purpose: concurrency here would buy a fraction of
 /// a second and risk reordering the answers.
-/// Returns whether the pass completed without a request error — the evidence
+/// Returns whether the pass completed without a request error, the evidence
 /// `should_sweep` acts on. A note that vanished before any request went out
 /// counts as `false`: nothing was attempted, so nothing was learned about
 /// whether the server is reachable.
@@ -384,7 +384,7 @@ async fn run_cleanup(
             tracing::debug!("note {} disappeared during cleanup", id);
         }
     }
-    // Reached only via `Applied`, `Superseded` or `NoteGone` — the request
+    // Reached only via `Applied`, `Superseded` or `NoteGone`. The request
     // itself got a response in all three; only the mid-flight `Err` above,
     // and the note-vanished-before-any-call guard, return `false`.
     true

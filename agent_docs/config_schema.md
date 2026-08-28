@@ -58,8 +58,8 @@ enabled = true                       # On-device cleanup and task extraction
 base_url = "http://127.0.0.1:8080"   # Beamer never spawns or configures the
                                      # server, only talks to it. Can point at a
                                      # tailnet host, e.g.
-                                     # "https://callisto.taila63f23.ts.net" —
-                                     # an https:// URL validates against the
+                                     # "https://callisto.taila63f23.ts.net".
+                                     # An https:// URL validates against the
                                      # OS trust store with no code change,
                                      # since reqwest is built with native-tls
 request_timeout_ms = 15000           # Generous on purpose: waking a sleeping
@@ -79,7 +79,7 @@ connect_timeout_ms = 5000            # How long to wait for the connection
                                      # ⚠️ Baked into the shared HTTP client's
                                      # `OnceLock` once, at process start
                                      # (`llm::client::init_http_client`, called
-                                     # from `main.rs`) — changing this value
+                                     # from `main.rs`). Changing this value
                                      # takes effect on the next restart, not
                                      # immediately. The Local AI settings card
                                      # says so.
@@ -118,15 +118,15 @@ First run creates the file with all defaults.
 
 Beamer is a plain HTTP client of a **standalone** `llama-server`; it does not
 spawn, configure or shut it down. That is why `[llm]` has two connection
-settings — where the server is (`base_url`) and how long to wait for it to
-answer (`request_timeout_ms`, `connect_timeout_ms`) — and nothing about how
+settings (where the server is, `base_url`, and how long to wait for it to
+answer, `request_timeout_ms` and `connect_timeout_ms`) and nothing about how
 the server runs. Launch settings live in `deploy/llama-beamer.service`;
 per-model settings, including idle shutdown and the required no-thinking flags
 for both models, live in `deploy/llama-models.ini`.
 
 `base_url` moving from `127.0.0.1` to a tailnet host is why the two timeouts
-are split rather than one. The far end can be asleep — a laptop, a desktop
-that's suspended — and a short `connect_timeout_ms` turns that into a fast,
+are split rather than one. The far end can be asleep (a laptop, a desktop
+that's suspended), and a short `connect_timeout_ms` turns that into a fast,
 well-classified failure ("Server not running") instead of a multi-second stall
 on every dictated note, while `request_timeout_ms` stays generous for the
 actual model work once a connection exists.

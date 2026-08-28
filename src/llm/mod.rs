@@ -184,7 +184,7 @@ mod tests {
     #[test]
     fn an_old_config_missing_connect_timeout_ms_still_loads() {
         // Mirrors the pre-existing shape of config.toml before this field
-        // existed — the field must be `#[serde(default)]`, not required.
+        // existed, and the field must be `#[serde(default)]`, not required.
         let toml = r#"
             enabled = true
             base_url = "http://127.0.0.1:8080"

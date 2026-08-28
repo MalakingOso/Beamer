@@ -2,8 +2,8 @@
 //! reason `task_store.rs` does: the parent file was already close to the
 //! 500-line limit before this task's sweep logic landed.
 //!
-//! Everything here is a function of plain values — `NoteStore`, `StageState`,
-//! `PipelineRequest` — with no coroutine, no signal and no server. That is
+//! Everything here is a function of plain values (`NoteStore`, `StageState`,
+//! `PipelineRequest`), with no coroutine, no signal and no server. That is
 //! deliberate: there is no llama.cpp server reachable in CI or in this
 //! sandbox, so the sweep's actual trigger (a real request completing inside
 //! `use_pipeline`) is not something a test here can exercise. What is tested
@@ -144,7 +144,7 @@ fn an_ordinary_successful_request_does_trigger_a_sweep() {
 
 #[test]
 fn a_failed_request_never_triggers_a_sweep() {
-    // Failure is not evidence the server is reachable — the opposite case
+    // Failure is not evidence the server is reachable. It is the opposite case
     // the brief's rationale rests on.
     assert!(!should_sweep(false, false));
 }

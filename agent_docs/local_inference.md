@@ -404,7 +404,7 @@ other note whose `clean_state` or `extract_state` is `Failed`, asking each one
 only for the stages that actually failed (`sweep_requests`). The existing
 `in_flight` set still dedupes, so this cannot storm the server with duplicate
 requests, and a swept request is marked `swept: true` so *its own* completion
-never triggers a further sweep — without that guard, a note that keeps
+never triggers a further sweep. Without that guard, a note that keeps
 genuinely failing would re-sweep the whole backlog forever, once per success,
 on every other note in the app.
 
@@ -412,7 +412,7 @@ on every other note in the app.
 periodic `GET /v1/models` that runs whether or not anyone asked for anything,
 which resets the server's per-model idle clock and pins a model in VRAM with
 no error and no symptom. The sweep has no timer and starts nothing on its
-own — it only ever fires as a direct, synchronous consequence of a request
+own. It only ever fires as a direct, synchronous consequence of a request
 that was already going to happen, already succeeded, and already proved the
 server is reachable right now. No new request is sent unless a person's own
 action (dictating, pressing the footer) produced one first.

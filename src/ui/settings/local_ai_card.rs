@@ -26,8 +26,8 @@ pub struct LocalAiCardProps {
     pub request_timeout_ms: u64,
     /// How long to wait for the connection itself to open, separate from the
     /// total request timeout above. Read into the shared HTTP client's
-    /// `OnceLock` once, at process start — see `llm::client::init_http_client`
-    /// — so editing it here does not take effect until the next restart. The
+    /// `OnceLock` once, at process start (see `llm::client::init_http_client`),
+    /// so editing it here does not take effect until the next restart. The
     /// card says so; do not remove that note without re-plumbing the client.
     pub connect_timeout_ms: u64,
     pub cleanup_model: String,

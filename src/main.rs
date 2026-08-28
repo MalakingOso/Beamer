@@ -38,9 +38,9 @@ fn main() {
 
     // Bakes `connect_timeout_ms` into the shared LLM client's `OnceLock` for
     // the rest of the process. Must happen before anything reaches
-    // `llm::client::http_client()` — settings::LocalAiCard's own startup probe
-    // included — so this runs as early as the config is available, ahead of
-    // `ui::launch_app()`. See `llm::client::init_http_client` for why the
+    // `llm::client::http_client()`, including settings::LocalAiCard's own
+    // startup probe, so this runs as early as the config is available, ahead
+    // of `ui::launch_app()`. See `llm::client::init_http_client` for why the
     // value can't just be read per-request instead.
     llm::client::init_http_client(std::time::Duration::from_millis(config.llm.connect_timeout_ms));
 

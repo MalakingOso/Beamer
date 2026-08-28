@@ -15,7 +15,7 @@ static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 /// Build the shared client with the configured connect timeout, baking it in
 /// for the process's whole lifetime. Call once, at startup, before anything
-/// reaches [`http_client`] — a `OnceLock` keeps only whichever value gets
+/// reaches [`http_client`]. A `OnceLock` keeps only whichever value gets
 /// there first.
 ///
 /// Takes a plain [`Duration`] rather than `crate::config::Config`: no file
@@ -26,7 +26,7 @@ static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 ///
 /// A second call is a harmless no-op: `OnceLock::get_or_init` only ever runs
 /// the closure once. That is also why this deliberately does *not* re-plumb
-/// the client through config on every request — a live-reloading connect
+/// the client through config on every request. A live-reloading connect
 /// timeout would need a client rebuilt per change, and the Local AI settings
 /// card says plainly that this setting takes effect on restart instead.
 pub fn init_http_client(connect_timeout: Duration) {
@@ -48,7 +48,7 @@ pub fn init_http_client(connect_timeout: Duration) {
 /// second one — a per-request `Client` would discard the kept-alive connection
 /// between the cleanup and extraction passes of the same note.
 ///
-/// Falls back to `reqwest::Client::new()` — no explicit connect timeout — if
+/// Falls back to `reqwest::Client::new()` (no explicit connect timeout) if
 /// [`init_http_client`] was never called first. That only happens in tests and
 /// in the `task_eval` binary, neither of which reaches the network here; the
 /// ordinary process path always calls `init_http_client` from `main.rs`,
@@ -215,7 +215,7 @@ mod tests {
     #[test]
     fn init_http_client_is_idempotent() {
         // The OnceLock this backs is process-global, so this only proves the
-        // call itself never panics on a second attempt — not which value won.
+        // call itself never panics on a second attempt, not which value won.
         // Which value wins is exactly the "first caller wins" behaviour the
         // task brief ruled out for config, and is why `main.rs`, not any
         // caller inside `src/llm/`, is the one place this gets called.
