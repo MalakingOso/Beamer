@@ -516,3 +516,10 @@ Apache 2.0 plus a binding term requiring the exact string
   hidden would exit Beamer entirely.
 - The registry holds **weak** handles. A strong `Rc` would keep the OS window
   alive after its `VirtualDom` is gone — a visible window that is never polled.
+- **Note windows stay in the taskbar, on purpose.** They omit
+  `with_skip_taskbar(true)` even though the splash and the pill both set it,
+  so six open notes means six taskbar buttons. This is a ruling, not an
+  oversight: notes are deliberately not always-on-top, so a skip-taskbar note
+  buried under other windows would have no way back to it, and Microsoft's own
+  Sticky Notes appears in the taskbar too. Do not add `with_skip_taskbar` here
+  without revisiting that trade-off first.
