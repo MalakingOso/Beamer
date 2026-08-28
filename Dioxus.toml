@@ -18,6 +18,15 @@ Beamer is a system-tray dictation app that captures your voice, transcribes it u
 [bundle.windows]
 icon_path = "assets/icon.ico"
 
+# dioxus-cli defaults to OfflineInstaller, which embeds the whole ~250 MB
+# WebView2 runtime and produced a 267 MB installer for a 7.6 MB binary.
+# WebView2 ships with Windows 11 and is present on most Windows 10 machines, so
+# the bootstrapper is the right trade: a small installer that fetches the
+# runtime only on the rare machine that lacks it. Switch back to
+# OfflineInstaller if Beamer ever has to install somewhere with no network.
+[bundle.windows.webview_install_mode.DownloadBootstrapper]
+silent = true
+
 [bundle.windows.nsis]
 sidebar_image = "installer/welcome.bmp"
 header_image = "installer/header.bmp"
