@@ -180,6 +180,12 @@ pub fn App() -> Element {
     // Background update check on startup (3s delay to keep launch snappy)
     app_setup::setup_update_check(config, update_status);
 
+    // Register the AUMID's Start Menu shortcut so toast notifications show
+    // under Beamer's own name. See `ui::windows_shortcut` for why this is
+    // needed at all.
+    #[cfg(target_os = "windows")]
+    app_setup::setup_windows_aumid_shortcut();
+
     // Tray menu clicks + tray icon left-click (toggle window visibility).
     app_setup::setup_menu_handlers(&items, window.clone(), current_page, last_injection, config, update_status, notes, tasks);
     app_setup::setup_tray_click_handler(window.clone());

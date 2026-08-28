@@ -435,6 +435,26 @@ pub(super) fn setup_update_check(config: Signal<Config>, mut update_status: Sign
     });
 }
 
+/// Register Beamer's AppUserModelID by creating (or repairing) its Start
+/// Menu shortcut. Runs once on first render, off the render thread: shortcut
+/// creation is COM and filesystem work, so it goes through
+/// `tokio::task::spawn_blocking` the same way `injection::inject_text` does
+/// for UIA, rather than blocking the Dioxus event loop.
+///
+/// Best-effort. See `ui::windows_shortcut::ensure_shortcut` for the failure
+/// handling. A missing or stale shortcut only degrades toast branding; it
+/// never blocks dictation.
+#[cfg(target_os = "windows")]
+pub(super) fn setup_windows_aumid_shortcut() {
+    use_hook(|| {
+        spawn(async move {
+            if let Err(e) = tokio::task::spawn_blocking(super::windows_shortcut::ensure_shortcut).await {
+                tracing::warn!("AUMID shortcut task panicked: {}", e);
+            }
+        });
+    });
+}
+
 /// Wire up tray menu item clicks.
 ///
 /// NOTE: use_muda_event_handler instead of use_tray_menu_event_handler because

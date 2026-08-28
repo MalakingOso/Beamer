@@ -36,12 +36,14 @@ use anyhow::Result;
 /// do:
 /// 1. This constant.
 /// 2. `identifier` in `Dioxus.toml`, which it is copied from.
-/// 3. The AUMID that the NSIS installer's Start Menu shortcut carries. An
-///    AUMID normally has to be registered by a shortcut before Windows will
-///    honor it; `dioxus::bundle::NsisSettings` has no field for it, so the
-///    installer template controls this and Beamer cannot verify it from
-///    here. See `orchestrator::notify::show_notification` for the fallback
-///    that exists because of this gap.
+/// 3. The `System.AppUserModel.ID` property `ui::windows_shortcut::ensure_shortcut`
+///    writes onto Beamer's Start Menu shortcut, the thing that actually
+///    registers this AUMID with Windows for an unpackaged app.
+/// 4. The `app_id` passed to `Toast::new` in `orchestrator::notify`.
+///
+/// Nothing checks that all four agree. An AUMID Windows has never seen fails
+/// by silence, not by an error: `Toast::show()` still returns `Ok` and the
+/// toast just never appears.
 #[cfg(target_os = "windows")]
 pub(crate) const WINDOWS_APP_USER_MODEL_ID: &str = "com.beamer.app";
 
@@ -58,8 +60,9 @@ fn main() {
     // Must run before any window or toast exists, so the process is
     // attributed to Beamer from the first notification onward. Not fatal:
     // an unregistered AUMID does not stop the app, only degrades toast
-    // branding, and `orchestrator::notify::show_notification` has a
-    // fallback for that.
+    // branding. `ui::windows_shortcut::ensure_shortcut` runs later, once
+    // Dioxus's tokio runtime exists, and does the actual registration this
+    // call depends on.
     #[cfg(target_os = "windows")]
     set_windows_app_user_model_id();
 
