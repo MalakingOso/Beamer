@@ -137,17 +137,35 @@ touching `src/llm/` or `notes/pipeline.rs`.
 | `notes::edit` | `add_attachment` / `remove_attachment` / `prune_attachments` / `relocate_attachment`, plus `set_size` and `delete`. |
 | `ui::sticky_blocks` | Rendering, the per-window asset handler, and drop classification. |
 
-### Files are referenced, never copied
+### Attachments are owned copies, not references
 
-An `Attachment::Image` holds the **path to your file**. Beamer never copies,
-moves or deletes it, and deleting a note cannot delete your photo. The price is
-that moving the file breaks the reference — made visible, never silent: the
-block becomes a muted card naming the file, with the full path on hover and a
-**Locate…** button that reopens the picker and repoints it.
+This section used to say an `Attachment::Image` holds the path to your file
+and that Beamer never copies, moves or deletes it. That was true until the
+sync work landed, and it is not true anymore. Dropping a file now copies its
+bytes into `<config_dir>/sync/attachments/<sha256>.<ext>`, content-addressed,
+before the record ever reaches `notes.json`. The note stores that hash plus
+the original file name instead of a path. Two attachments with identical
+bytes, even on different notes, share one file on disk. See
+`src/notes/model.rs`'s `Location` and `Attachment` types for the exact shape,
+and `src/notes/edit.rs` for the refcount that manages the copy:
+`add_attachment` adopts the bytes on drop, and `remove_attachment`, `delete`,
+and the "Locate…" repoint each release their share of it afterward.
 
-Because Beamer owns no media files, the only thing that can be *orphaned* is a
-**record** — an `Attachment` whose token the user deleted out of a textarea.
-`prune_attachments` collects those, in the same store write as the edit.
+**Your original file is still never touched.** That half of the old guarantee
+survives unchanged: what gets deleted is Beamer's own copy, made on attach,
+not the file the photo or document came from. An attachment Beamer cannot
+read at the moment of attaching (already gone, permissions) still falls back
+to the old `External`, path-only record, and gets the same muted card and
+Locate… recovery a legacy attachment gets, with the full path on hover.
+
+Because Beamer now owns a copy, there is more that can go orphaned than there
+used to be. It used to be just a record, an `Attachment` whose token the user
+deleted out of a textarea, and `prune_attachments` still collects those in the
+same store write as the edit. Content-addressed bytes under
+`sync/attachments/` are orphanable now too, and that is what the refcount in
+`release_attachment_bytes` exists for: it checks every note's attachments and
+removes a file under `attachments_dir` only once nothing anywhere in the store
+still points at that `(hash, ext)` pair.
 
 ### Getting content in
 
@@ -481,7 +499,8 @@ explicit delete means gone, and keeping the rows would leave the corpus holding
 labels for a note whose text no longer exists to explain them. Rows are removed
 first, so a crash between the two strands nothing.
 
-**Files on disk are never touched.** See "Files are referenced, never copied".
+**The user's original file is still never touched.** See "Attachments are
+owned copies, not references".
 
 ## Local AI
 

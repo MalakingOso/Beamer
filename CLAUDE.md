@@ -157,7 +157,7 @@ Ctrl then Super fires `RecordStart(Inject)` before the key is reached.
 2. Note hotkey → sticky appears, pill shows the **purple note ring**, and the
    waveform still tracks your mic.
 3. Dictate four or five notes → **spread irregularly**, none stacked, none off-screen.
-4. Close one with Alt+F4 → `notes.json` shows `"open": false`.
+4. Close one with Alt+F4 → `machine.json` shows `"open": false` for that note's id.
 5. Notes board (new sidebar icon): search finds a note by a word you actually
    *said*; clicking a card reopens it; archive hides it; "Show archived" restores.
 6. Restart with several notes open → they reappear, freshly scattered. Positions
@@ -183,15 +183,18 @@ and replaced it with a pure, tested function. Recorded in the spec §8 and
   `cargo xwin check --target x86_64-pc-windows-msvc` is clean. What's still
   unverified is runtime behaviour, since this was built with no Windows
   machine to run it on. See `todo.md`.
-- **Note size IS captured and persisted** — this line used to say it was not,
-  which is stale. `ui::sticky::StickyNote` handles `WindowEvent::Resized` and
-  writes the logical size through `NoteStore::set_size`; `notes.json` carries a
-  `size` per note. Verified stable across six restarts on 2026-08-25 (268x208,
-  268x208, 320x260 throughout), so resizing is *not* forgotten.
+- **Note size IS captured and persisted.** This line used to say it was not,
+  which was already stale, and it also used to point at `notes.json`, which
+  the sync work has since moved off. `ui::sticky::StickyNote` handles
+  `WindowEvent::Resized` and writes the logical size through
+  `NoteStore::set_size`; that now lands in `<config_dir>/machine.json`, keyed
+  by note id, machine-local and never synced. Verified stable across six
+  restarts on 2026-08-25 (268x208, 268x208, 320x260 throughout), so resizing
+  is *not* forgotten.
   ⚠️ Do not measure this with `GetWindowFrame` shortly after launch: it was
   observed reporting 52px less in each dimension than the persisted size while
   the window was still settling, which reads convincingly as a shrink-per-restart
-  bug that does not exist. `notes.json` is the source of truth for size.
+  bug that does not exist. `machine.json` is the source of truth for size.
 - Phases 2 and 3 are **built** — see `agent_docs/local_inference.md`. Phase 3's
   prompt is untuned: it was spot-checked against the live model, not measured
   against a corpus, because none existed. Precision rests on accept/dismiss and
