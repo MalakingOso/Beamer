@@ -108,12 +108,48 @@ impl Location {
     /// Existence is a separate question from what this returns: an `External`
     /// path can be gone, and even an `Owned` file can be, if the local copy
     /// has not synced yet or was removed by hand outside Beamer.
+    ///
+    /// An `Owned` location whose `hash`/`ext` are not shaped like anything
+    /// this code would have written never resolves outside `attachments_dir`.
+    /// `hash`/`ext` are plain `String`s straight out of `Deserialize`, and a
+    /// hand-edited or (once notes sync) maliciously crafted `notes.json`
+    /// could set `hash` to `"../../../home/user/Pictures/cat"`: `Path::join`
+    /// discards the base entirely for an absolute-looking second argument,
+    /// and `..` traverses without even needing that. `owned_file_name`
+    /// rejects anything that is not exactly what `Sha256::digest` and this
+    /// codebase's own extension handling produce, and this falls back to a
+    /// single fixed name, still inside `attachments_dir`, when it does.
     pub fn resolved_path(&self, attachments_dir: &Path) -> PathBuf {
         match self {
-            Self::Owned { hash, ext } => attachments_dir.join(format!("{hash}.{ext}")),
+            Self::Owned { hash, ext } => match owned_file_name(hash, ext) {
+                Some(name) => attachments_dir.join(name),
+                None => attachments_dir.join(INVALID_OWNED_PLACEHOLDER),
+            },
             Self::External { path } => path.clone(),
         }
     }
+}
+
+/// The fixed name `resolved_path` falls back to for an `Owned` location whose
+/// `hash`/`ext` fail `owned_file_name`'s validation. A single hard-coded
+/// string, not built from either field, so it can never itself be steered
+/// outside `attachments_dir`; nothing legitimate is ever adopted under this
+/// name, since `adopt_into` always produces a valid hash.
+const INVALID_OWNED_PLACEHOLDER: &str = "invalid-attachment";
+
+/// The `<hash>.<ext>` filename for a content-addressed attachment, or `None`
+/// if `hash`/`ext` are not shaped like what this codebase ever writes:
+/// `hash` exactly 64 lowercase hex digits (a sha256 hex digest), `ext` 1 to
+/// 16 ASCII alphanumeric characters.
+///
+/// This is the one place that decides whether a `Location::Owned`'s two
+/// strings are safe to fold into a path at all. Every filesystem operation
+/// keyed on an owned attachment, in this file and in `edit.rs`, must go
+/// through this rather than formatting `hash`/`ext` into a path directly.
+pub fn owned_file_name(hash: &str, ext: &str) -> Option<String> {
+    let hash_ok = hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    let ext_ok = !ext.is_empty() && ext.len() <= 16 && ext.bytes().all(|b| b.is_ascii_alphanumeric());
+    (hash_ok && ext_ok).then(|| format!("{hash}.{ext}"))
 }
 
 /// Something a note references, rendered inline where its `[[beamer:<id>]]`
@@ -130,8 +166,9 @@ impl Location {
 /// old design survives unchanged: what gets deleted is Beamer's own copy, the
 /// one it made on attach, never the file the photo or document came from.
 ///
-/// `#[serde(tag = "kind")]` so `attachments.json`-shaped rows stay readable by
-/// eye and a new variant can be added without renumbering anything.
+/// `#[serde(tag = "kind")]` so an attachment's row inside `notes.json` stays
+/// readable by eye and a new variant can be added without renumbering
+/// anything.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Attachment {
@@ -252,5 +289,46 @@ mod tests {
             NoteColor::from_config_name("chartreuse"), NoteColor::Purple,
             "a bad config value must not panic or produce an unrenderable color"
         );
+    }
+
+    #[test]
+    fn a_valid_hash_and_extension_resolve_to_the_expected_filename() {
+        let hash = "a".repeat(64);
+        assert_eq!(owned_file_name(&hash, "png"), Some(format!("{hash}.png")));
+    }
+
+    #[test]
+    fn a_traversal_shaped_hash_never_resolves_outside_attachments_dir() {
+        let attachments_dir = Path::new("/tmp/beamer-attachments-test");
+        let cases = [
+            Location::Owned { hash: "../../../../etc/passwd".into(), ext: "png".into() },
+            Location::Owned { hash: "/home/berkley/Pictures/cat".into(), ext: "png".into() },
+            Location::Owned { hash: "a".repeat(64), ext: "../../etc".into() },
+            Location::Owned { hash: String::new(), ext: String::new() },
+            // One character short of a real digest, easy to get wrong by an
+            // off-by-one in a future edit.
+            Location::Owned { hash: "a".repeat(63), ext: "png".into() },
+            // Uppercase hex is not what `Sha256::digest` formats as; treating
+            // it as valid would let two different-looking hashes address the
+            // same bytes and confuse the refcount.
+            Location::Owned { hash: "A".repeat(64), ext: "png".into() },
+        ];
+        for location in cases {
+            let resolved = location.resolved_path(attachments_dir);
+            assert!(
+                resolved.starts_with(attachments_dir),
+                "{location:?} must resolve inside attachments_dir, got {resolved:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn owned_file_name_rejects_what_it_should() {
+        let hash = "a".repeat(64);
+        assert_eq!(owned_file_name(&hash, ""), None, "an empty extension");
+        assert_eq!(owned_file_name(&hash, "p/ng"), None, "a separator in the extension");
+        assert_eq!(owned_file_name("../etc/passwd", "png"), None, "a short, traversal-shaped hash");
+        assert_eq!(owned_file_name(&"a".repeat(65), "png"), None, "one character too many");
+        assert_eq!(owned_file_name(&hash, "png"), Some(format!("{hash}.png")));
     }
 }

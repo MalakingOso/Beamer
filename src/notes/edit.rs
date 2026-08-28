@@ -22,12 +22,15 @@
 //! `attachments_dir`, content-addressed by sha256, before the record ever
 //! reaches `notes.json`; `delete`, `remove_attachment` and `prune_attachments`
 //! each release their share of that copy afterward. Two attachments can name
-//! the same hash, on the same note or different ones, so removal is
-//! refcounted: a file under `attachments_dir` only actually goes away once no
-//! attachment anywhere in the store still points at its hash. The user's
-//! original file is never touched by any of this; see `model::Attachment`'s
-//! doc comment for the fuller version of that guarantee.
+//! the same `(hash, ext)` pair, on the same note or different ones, so
+//! removal is refcounted: a file under `attachments_dir` only actually goes
+//! away once no attachment anywhere in the store still points at that exact
+//! pair. The user's original file is never touched by any of this; see
+//! `model::Attachment`'s doc comment for the fuller version of that
+//! guarantee, and `model::owned_file_name` for why `hash`/`ext` are never
+//! trusted enough to build a path from directly.
 
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -250,8 +253,8 @@ impl NoteStore {
     }
 
     /// Try to copy `source`'s bytes into this store's `attachments_dir`.
-    /// `None` if `source` cannot be read, in which case the caller keeps
-    /// whatever `Location` it already had.
+    /// `None` if `source` cannot be read (or is over `MAX_ADOPTED_BYTES`), in
+    /// which case the caller keeps whatever `Location` it already had.
     fn adopt(&self, source: &Path) -> Option<Location> {
         Self::adopt_into(&self.attachments_dir, source)
     }
@@ -262,42 +265,106 @@ impl NoteStore {
     ///
     /// Idempotent: if a file already sits at the destination (this content
     /// was adopted before, by this attachment or some other one entirely),
-    /// it is not rewritten. That idempotency is the whole mechanism behind
-    /// "the same bytes attached twice yield one file, one hash".
+    /// the copy just made is discarded rather than overwriting it. That
+    /// idempotency is the whole mechanism behind "the same bytes attached
+    /// twice yield one file, one hash".
+    ///
+    /// Copies via a unique temp file inside `attachments_dir` itself, then
+    /// renames it to `<hash>.<ext>`, the same tmp-then-rename shape
+    /// `NoteStore::save` already uses for `notes.json`. Without it, a crash
+    /// or a full disk mid-write could leave `<hash>.<ext>` holding bytes
+    /// that do not actually hash to `hash`; the idempotency check above
+    /// would then treat that torn file as already-adopted forever, and no
+    /// later attach of the same source would ever repair it.
+    ///
+    /// Streams `source` into the temp file while hashing it in the same
+    /// pass, rather than reading the whole file into memory first: a 4 GB
+    /// video dropped on a note must not allocate 4 GB before this function
+    /// has even decided whether to keep it. `MAX_ADOPTED_BYTES` bounds the
+    /// cost further by refusing anything over that size outright, the same
+    /// way an unreadable path is refused: left `External`, not adopted.
     fn adopt_into(attachments_dir: &Path, source: &Path) -> Option<Location> {
-        let bytes = std::fs::read(source).ok()?;
-        let hash = format!("{:x}", Sha256::digest(&bytes));
-        let ext = source
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("bin")
-            .to_ascii_lowercase();
+        let metadata = std::fs::metadata(source).ok()?;
+        if !metadata.is_file() || metadata.len() > MAX_ADOPTED_BYTES {
+            return None;
+        }
         std::fs::create_dir_all(attachments_dir).ok()?;
-        let dest = attachments_dir.join(format!("{hash}.{ext}"));
-        if !dest.exists() {
-            std::fs::write(&dest, &bytes).ok()?;
+
+        let tmp = attachments_dir.join(format!(".tmp-{}", super::next_id()));
+        let hash = match Self::stream_copy_and_hash(source, &tmp) {
+            Some(hash) => hash,
+            None => {
+                let _ = std::fs::remove_file(&tmp);
+                return None;
+            }
+        };
+        let ext = extension_for(source);
+        let name = super::model::owned_file_name(&hash, &ext)?;
+        let dest = attachments_dir.join(&name);
+        if dest.exists() {
+            let _ = std::fs::remove_file(&tmp);
+        } else if std::fs::rename(&tmp, &dest).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            return None;
         }
         Some(Location::Owned { hash, ext })
     }
 
+    /// Streams `source`'s bytes into `dest`, hashing them in the same pass.
+    /// Returns the sha256 hex digest, or `None` on any I/O error, in which
+    /// case `dest` may exist but be incomplete; the caller removes it.
+    fn stream_copy_and_hash(source: &Path, dest: &Path) -> Option<String> {
+        let mut input = std::fs::File::open(source).ok()?;
+        let mut output = std::fs::File::create(dest).ok()?;
+        let mut hasher = Sha256::new();
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            let n = input.read(&mut buf).ok()?;
+            if n == 0 {
+                break;
+            }
+            output.write_all(&buf[..n]).ok()?;
+            hasher.update(&buf[..n]);
+        }
+        output.flush().ok()?;
+        Some(format!("{:x}", hasher.finalize()))
+    }
+
     /// Remove `<hash>.<ext>` from `attachments_dir` once nothing in the store
-    /// references it any more.
+    /// references that exact pair any more.
     ///
     /// Content addressing means two attachments, even on different notes, can
     /// share one file on disk; only the last reference's removal actually
-    /// deletes it. This only ever touches a path under `attachments_dir`,
-    /// Beamer's own copy, never the user's original.
+    /// deletes it. Matched on `(hash, ext)` together, not `hash` alone: the
+    /// same bytes adopted once from `deck.png` and once from an extensionless
+    /// source produce `<hash>.png` and `<hash>.bin`, two files, and releasing
+    /// one must not be blocked by a reference to the other still standing.
+    ///
+    /// Refuses to touch anything if `hash`/`ext` are not shaped like a real
+    /// digest and extension (`owned_file_name` rejects them): there is
+    /// nothing safe to delete under `attachments_dir` on the say-so of two
+    /// strings that could be anything, including a former `notes.json`
+    /// carrying a hand-edited or maliciously synced traversal. This only
+    /// ever touches a path under `attachments_dir`, Beamer's own copy, never
+    /// the user's original.
     fn release_attachment_bytes(&self, hash: &str, ext: &str) {
         let still_referenced = self
             .notes
             .iter()
             .flat_map(|n| n.attachments.iter())
             .filter_map(owned_hash)
-            .any(|(h, _)| h == hash);
+            .any(|(h, e)| h == hash && e == ext);
         if still_referenced {
             return;
         }
-        let file = self.attachments_dir.join(format!("{hash}.{ext}"));
+        let Some(name) = super::model::owned_file_name(hash, ext) else {
+            tracing::warn!(
+                "refusing to remove an attachment with an unrecognised hash/ext ({:?}, {:?})",
+                hash, ext
+            );
+            return;
+        };
+        let file = self.attachments_dir.join(name);
         if let Err(e) = std::fs::remove_file(&file) {
             if e.kind() != std::io::ErrorKind::NotFound {
                 tracing::warn!("Could not remove orphaned attachment {:?}: {}", file, e);
@@ -322,6 +389,30 @@ fn owned_hash(a: &Attachment) -> Option<(String, String)> {
         Some(Location::Owned { hash, ext }) => Some((hash.clone(), ext.clone())),
         _ => None,
     }
+}
+
+/// Attachments larger than this are left `External` rather than copied in.
+/// Not a product limit, a safety valve: without it, `adopt_into` would read
+/// and hash an arbitrarily large file, at whatever cost, before it can even
+/// decide whether to keep it. 512 MiB comfortably covers what a sticky note
+/// attachment actually is (photos, PDFs, short recordings) while refusing
+/// something like a dropped video outright rather than paying its cost.
+const MAX_ADOPTED_BYTES: u64 = 512 * 1024 * 1024;
+
+/// The extension `adopt_into` stores an attachment under: `source`'s own
+/// extension, lowercased, if it is 1 to 16 ASCII alphanumeric characters
+/// (the same shape `model::owned_file_name` requires), otherwise `"bin"`.
+/// `Path::extension()` cannot itself contain a separator, but this still
+/// guards against whatever else a filename could carry (spaces, unicode,
+/// an extension longer than any real one) rather than trusting it into a
+/// path unchecked.
+fn extension_for(source: &Path) -> String {
+    source
+        .extension()
+        .and_then(|e| e.to_str())
+        .filter(|e| !e.is_empty() && e.len() <= 16 && e.bytes().all(|b| b.is_ascii_alphanumeric()))
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_else(|| "bin".to_string())
 }
 
 #[cfg(test)]

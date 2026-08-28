@@ -392,6 +392,66 @@ fn deleting_a_note_never_touches_the_original_source_file() {
 }
 
 #[test]
+fn deleting_a_note_never_touches_an_unmigrated_external_path_either() {
+    // The `Owned` case above goes through the copy-and-hash path; this one
+    // never gets that far. `External`'s whole record *is* the user's own
+    // path, and it is exactly the shape a future refactor of `owned_hash`
+    // (which only ever matches `Owned`) could accidentally start deleting
+    // through if that guard were loosened. Built by pushing the attachment
+    // directly rather than through `add_attachment`, standing in for a note
+    // whose attachment is legitimately still `External` at delete time (not
+    // yet migrated, or arrived from another machine) with nothing about
+    // readability involved.
+    let mut store = temp_store("source_untouched_external");
+    let source = temp_source("source_untouched_external", "deck.png", b"do not touch me, ever");
+    let id = store.create(String::new(), NoteColor::Purple, NoteOrigin::Dictated);
+    let attachment = Attachment::Image {
+        id: "a1".into(),
+        filename: "deck.png".into(),
+        alt: None,
+        location: Location::External { path: source.clone() },
+    };
+    store.notes.iter_mut().find(|n| n.id == id).unwrap().attachments.push(attachment);
+    assert!(source.exists());
+
+    store.delete(&id);
+
+    assert!(
+        source.exists(),
+        "delete must never touch the path an External attachment's record carries,          adopted or not"
+    );
+}
+
+#[test]
+fn a_traversal_shaped_hash_is_never_used_to_remove_a_file_outside_attachments_dir() {
+    // Standing in for an attachment that arrived already `Owned` from a
+    // hand-edited, or (once notes sync) maliciously crafted, `notes.json`:
+    // never one this process adopted itself, since `adopt_into` only ever
+    // produces a valid 64-hex-digit hash.
+    let mut store = temp_store("traversal");
+    let sentinel_dir = store.attachments_dir.parent().unwrap().to_path_buf();
+    std::fs::create_dir_all(&sentinel_dir).unwrap();
+    let sentinel = sentinel_dir.join("traversal_sentinel.png");
+    std::fs::write(&sentinel, b"do not delete me").unwrap();
+
+    let id = store.create(String::new(), NoteColor::Purple, NoteOrigin::Dictated);
+    let malicious = Attachment::Image {
+        id: "a1".into(),
+        filename: "cat.png".into(),
+        alt: None,
+        location: Location::Owned { hash: "../traversal_sentinel".into(), ext: "png".into() },
+    };
+    store.notes.iter_mut().find(|n| n.id == id).unwrap().attachments.push(malicious);
+
+    store.delete(&id);
+
+    assert!(
+        sentinel.exists(),
+        "an unrecognised hash/ext must never let deletion reach outside attachments_dir"
+    );
+}
+
+#[test]
 fn attachments_survive_a_round_trip_through_disk() {
     let mut store = temp_store("roundtrip");
     let id = store.create("look".into(), NoteColor::Amber, NoteOrigin::Dictated);

@@ -31,12 +31,18 @@ fn note(id: &str, clean: StageState, extract: StageState) -> Note {
 }
 
 fn store(notes: Vec<Note>) -> NoteStore {
+    // `attachments_dir` points at the real temp directory, not an empty
+    // `PathBuf`: nothing here exercises attachment removal, but an empty
+    // base would make any future `release_attachment_bytes` call resolve
+    // relative to the process's cwd, which during `cargo test` is the repo
+    // checkout, not a throwaway location.
+    let attachments_dir = std::env::temp_dir().join("beamer_pipeline_test_attachments");
     NoteStore {
         notes,
         path: std::path::PathBuf::new(),
         dirty: false,
         machine: crate::notes::MachineStore::new(std::path::PathBuf::new()),
-        attachments_dir: std::path::PathBuf::new(),
+        attachments_dir,
     }
 }
 

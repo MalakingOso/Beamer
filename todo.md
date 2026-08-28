@@ -67,6 +67,56 @@
       defined in the token block. Pre-existing since `c709faa`, unrelated to
       notes; an undefined custom property fails silently.
 
+## Windows Remote LLM / Sync, blockers before Task 10 designs the share
+
+- [ ] **Cross-machine attachment deletion has no story yet.** Task 8 shipped
+      store-local refcounting for attachment bytes (`src/notes/edit.rs`,
+      `release_attachment_bytes`): a file under `<config_dir>/sync/attachments`
+      is removed only once nothing in *that store* references it. That is
+      correct for one machine, but Task 10 puts this same directory inside
+      what Syncthing shares, and refcounting has no visibility into what a
+      second machine still needs. Two concrete failure scenarios, both real
+      data loss, neither solved by anything shipped so far:
+      1. **A live reference gets deleted out from under it.** Machine A has a
+         note referencing hash `H`. Machine B, offline, deletes its own last
+         note referencing `H`; `release_attachment_bytes` correctly removes
+         `H.<ext>` from B's local `attachments_dir`, because at the moment of
+         deletion nothing on B references it. Syncthing later propagates that
+         deletion to A. A's note still references `H`, but the bytes are now
+         gone on both machines, permanently, since B's local refcount had no
+         way to know A still needed them.
+      2. **The remove button silently destroys the only copy that exists.**
+         On the machine where an attachment was originally dropped, deleting
+         it removes Beamer's copy and never touches the user's original file
+         (by design, and correctly). On the *other* machine, there never was
+         a "user's original": the note and its attachment arrived entirely
+         through sync. On that machine, hitting remove on the attachment (or
+         deleting the note) destroys the only copy of those bytes that ever
+         existed there, with no confirmation dialog distinguishing it from
+         the harmless case on the machine of origin.
+      Task 10 needs an actual design for this (a tombstone/grace-period
+      before physical deletion, a "still wanted elsewhere" check against the
+      sync state, or something else) before attachment sync ships. Not
+      something Task 8 could solve: the brief scoped it to store-local
+      refcounting, and a cross-machine answer needs Task 10's sync design to
+      already exist.
+- [ ] **`task_eval` cannot read a pre-Task-8 `notes.json` that carries an
+      attachment, until Beamer has run once and flushed.** `NoteStore::load`
+      upgrades a legacy path-shaped attachment (`{"kind":"image","path":
+      "..."}`) to the current shape (`{"kind":"image","filename":"...",
+      "location":{...}}`) in memory on every load, but that upgrade only
+      reaches disk on the next `flush_if_dirty()`. `src/bin/task_eval.rs`
+      `#[path]`-includes `src/notes/model.rs` directly and parses `notes.json`
+      with `Attachment`'s own strict `Deserialize`, no shape-upgrade pass,
+      because that logic lives in `mod.rs`, which is not includable (it
+      reaches for `crate::config::Config`). So: on an install that had
+      attachments before Task 8 and has not opened Beamer since upgrading,
+      `cargo run --bin task_eval` fails outright on that file until Beamer
+      itself has run once. Not a bug to fix in `task_eval.rs`; teaching it
+      the legacy shape too would duplicate migration logic in a second place.
+      Just a real ordering constraint worth having written down before
+      someone hits it and assumes `task_eval` is broken.
+
 ## Sticky Notes — surveyed and deliberately deferred
 
 Considered while planning inline attachments and left out on purpose, so nobody
