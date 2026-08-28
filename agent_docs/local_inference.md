@@ -39,6 +39,17 @@ dictation ──> sink::do_note_capture ──> flush to disk ──> pipeline r
 **Beamer never spawns the server.** It runs standalone (`deploy/llama-beamer.service`)
 and Beamer's entire connection surface is `base_url`. See `agent_docs/config_schema.md`.
 
+`llama-server` has no authentication of its own, so it stays bound to
+`127.0.0.1:8080` even when a client on another machine needs to reach it.
+`tailscale serve --bg 8080` fronts that loopback port with a proxy on the
+tailnet's own HTTPS certificate, so a client on the same tailnet can point
+`base_url` at `https://<host>.<tailnet>.ts.net` with no code change: reqwest
+is built with `native-tls`, and that validates against the OS trust store as
+soon as HTTPS certificates are turned on for the tailnet in the admin
+console. `--host 0.0.0.0` and Tailscale Funnel are both rejected on purpose:
+the first puts an unauthenticated LLM API on every network the host joins,
+the second is the same command pointed at the public internet.
+
 ## ⚠️ `src/llm/**` must contain no crate-rooted paths
 
 There is no `src/lib.rs`, so `src/bin/task_eval.rs` reaches this code by

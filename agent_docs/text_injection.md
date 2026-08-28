@@ -34,6 +34,28 @@ Text injection is the most critical subsystem. The goal: transcribed text appear
 - **Pros:** Universally works
 - **Cons:** Destructive to clipboard, timing-sensitive
 
+## UIPI: dictation is dead against elevated windows, permanently
+
+Beamer's manifest requests `asInvoker` (`build.rs`), so it always runs at the
+same integrity level as the user's normal session. Windows' User Interface
+Privilege Isolation blocks lower-integrity processes from sending input to a
+higher-integrity window: an unelevated `WH_KEYBOARD_LL` hook never receives
+key events destined for an elevated window, and `SendInput` into one is
+silently dropped. Practically, dictating into Task Manager, an elevated
+Command Prompt, or any "Run as administrator" window does nothing, and there
+is no error to catch. The only fix is a signed binary carrying
+`uiAccess="true"` and installed under Program Files, which is a code-signing
+and installer commitment well beyond what this app does today. Unverified at
+runtime (no Windows machine has run this build yet), but the mechanism is
+Windows platform behaviour, not something Beamer's code could get right or
+wrong.
+
+`injection.paste_shortcut` (Ctrl+V vs Ctrl+Shift+V, see below) is a
+Linux-only setting. On Windows the clipboard fallback in
+`src/injection/clipboard.rs:282` hardcodes Ctrl+V and does not read the
+config at all: there is no terminal-detection problem to solve there, since
+Windows terminals accept Ctrl+V.
+
 ## COM Threading
 
 All UIA calls MUST happen on a thread with COM initialized:

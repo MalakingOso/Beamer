@@ -71,8 +71,9 @@ cargo run --bin task_eval -- --limit 20   # Measure extraction against your own 
 **Read `agent_docs/sticky_notes.md` first.** It carries everything below in
 durable form, plus the facts that cost real time to learn.
 
-Phase 1 is **built and committed** on `feat/sticky-notes`. **168 tests pass**,
-up from a 101 baseline (121 at the end of Batches A–C). Zero build warnings.
+Phase 1 is **built and committed** on `master` (merged from `feat/sticky-notes`,
+which no longer exists as a branch). **168 tests pass**, up from a 101 baseline
+(121 at the end of Batches A–C). Zero build warnings.
 
 ## ⚠️ Extension is at v6 and needs a log out
 
@@ -178,7 +179,7 @@ and replaced it with a pure, tested function. Recorded in the spec §8 and
 
 - **Task 4 is done: the Windows target compiles.** `ll_hook.rs` was rewritten
   around the same binding-matching layer `linux_hotkey.rs` uses, so note
-  capture now has a real second binding on Windows too, not just dictation.
+  capture now has its own Windows binding alongside dictation's.
   `cargo xwin check --target x86_64-pc-windows-msvc` is clean. What's still
   unverified is runtime behaviour, since this was built with no Windows
   machine to run it on. See `todo.md`.

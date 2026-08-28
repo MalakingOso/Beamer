@@ -20,6 +20,16 @@
       represent a second (note) binding. `cargo xwin check --target
       x86_64-pc-windows-msvc` is clean; runtime behaviour is still unverified
       on real Windows hardware.
+      ⚠️ A plain `cargo check --target x86_64-pc-windows-msvc` does not work on
+      this Linux host and never will without `xwin`: `ring` enters the
+      dependency tree through `self_update` 0.42 (which force-enables
+      reqwest's `rustls-tls` feature), and `ring`'s build script wants MSVC's
+      `lib.exe`, which a Linux toolchain does not have. `cargo xwin check`
+      supplies the MSVC libs itself, which is why that is the working gate:
+      `XWIN_ACCEPT_LICENSE=1 cargo xwin check --target x86_64-pc-windows-msvc`.
+      A **native** build from a Windows machine has `lib.exe` on its own and
+      was never affected by this; cross-compiling from Linux is the only thing
+      that was ever blocked.
 - [x] **`HotkeyConfig` cannot express Super as a modifier.** Done: `parse()`
       now returns `None` when a Super/Win/Cmd/Meta token appears together
       with another key, instead of silently dropping Super and keying off the
