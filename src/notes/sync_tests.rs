@@ -659,3 +659,49 @@ fn an_unreadable_document_does_not_take_the_other_files_with_it() {
     assert_eq!(std::fs::read_to_string(dir.join("notes.json")).unwrap(), mirror);
     assert!(std::fs::read_to_string(dir.join("machine.json")).unwrap().contains(&id));
 }
+
+/// Critical 1: a document save that fails on one tick must be retried on the
+/// next, even when nothing new gets reconciled in between.
+///
+/// Portable, the same trick as the test above: pre-creating the exact path
+/// `SyncDoc::save` would write its temp file to, as a directory, makes that
+/// one write fail on every platform without touching permissions.
+/// `notes.json` is a different filename and lands fine, which is exactly the
+/// trap this reproduces: the mirror looks healthy, and it is never read back
+/// once the document exists, so a document save that quietly stops being
+/// retried loses the edit for good.
+#[test]
+fn a_document_save_that_fails_is_retried_on_the_next_clean_tick() {
+    let dir = temp_dir("retry_after_failed_save");
+    let blocker = dir.join(format!("notes.automerge.tmp.{}", std::process::id()));
+
+    let mut machine = Machine::open(&dir);
+    let id = machine.notes.create(
+        "written on the tick whose save failed".into(),
+        NoteColor::Purple,
+        NoteOrigin::Dictated,
+    );
+
+    std::fs::create_dir(&blocker).unwrap();
+    machine.flush();
+    assert!(!machine.document().exists(), "the save had nowhere to write its temp file");
+    assert!(
+        std::fs::read_to_string(dir.join("notes.json")).unwrap().contains(&id),
+        "the mirror has to have saved fine, which is what makes this a trap: nothing looks wrong"
+    );
+
+    // No new edit happens between the two ticks. The failed tick's own
+    // reconcile already landed the note in the in-memory document, so a
+    // `run_document_pass` that only compares heads before and after its own
+    // reconcile would see a no-op here and never retry.
+    std::fs::remove_dir(&blocker).unwrap();
+    machine.flush();
+
+    assert!(machine.document().exists(), "the retry has to actually reach disk");
+    let reloaded = Machine::open(&dir);
+    assert_eq!(
+        reloaded.body(&id),
+        "written on the tick whose save failed",
+        "the edit from the failed tick has to reach the document itself; the mirror alone is not the corpus"
+    );
+}

@@ -130,6 +130,18 @@ pub struct SyncDoc {
     /// memory, correctly reflected in the note/task signals, and never reach
     /// disk. See `SyncDoc::mark_pending_save` and `has_pending_save`.
     pending_save: bool,
+    /// The last `save()` call returned `Err`, and no later call has
+    /// succeeded since.
+    ///
+    /// `reconcile` mutates the in-memory document whether or not the save
+    /// that follows lands on disk, so once a save fails, every tick after it
+    /// with no new edit reconciles to a no-op: the heads already moved on the
+    /// failed tick, not on this one. A before/after heads comparison alone
+    /// cannot see that miss a second time. `run_document_pass` folds this
+    /// flag in alongside `has_pending_save` so a failed save is retried on
+    /// the very next tick regardless. Set and cleared inside `save` itself,
+    /// so no return path can forget it.
+    save_failed: bool,
 }
 
 impl Default for SyncDoc {
@@ -141,6 +153,7 @@ impl Default for SyncDoc {
             existed: false,
             read_only: false,
             pending_save: false,
+            save_failed: false,
         }
     }
 }
@@ -197,48 +210,75 @@ impl SyncDoc {
         let mut read_only = false;
         let mut doc = new_document();
 
-        if path.exists() {
-            existed = true;
-            match std::fs::read(&path) {
-                Ok(bytes) => match load_or_salvage(&bytes) {
-                    Ok(loaded) => doc = loaded,
+        // `Path::exists()` is `fs::metadata(...).is_ok()`, so it answers
+        // `false` for a path that is there but whose stat call errored (a
+        // permission problem, a transient I/O error), the same as for a path
+        // that genuinely is not there. std's own docs say to use
+        // `try_exists` when that distinction matters. Answering `false` here
+        // sends this machine down `existed = false`, which downstream means
+        // "seed a brand-new genesis-rooted document", minted over whatever
+        // the real bytes at `path` actually hold. A stat failure is treated
+        // as "it's there and we could not read it", the same latch as the
+        // arms below, rather than as absence.
+        match path.try_exists() {
+            Ok(true) => {
+                existed = true;
+                match std::fs::read(&path) {
+                    Ok(bytes) => match load_or_salvage(&bytes) {
+                        Ok(loaded) => doc = loaded,
+                        Err(e) => {
+                            // Quarantine before anything can write over it. The
+                            // same reasoning as the JSON stores: an unreadable
+                            // corpus is recoverable, an overwritten one is not.
+                            let backup = path.with_extension("automerge.corrupt");
+                            let message = format!(
+                                "Notes document at {} could not be read ({e}); preserved as {}",
+                                path.display(),
+                                backup.display()
+                            );
+                            tracing::error!("{message}");
+                            if let Err(e) = std::fs::rename(&path, &backup) {
+                                tracing::error!("Could not preserve the corrupt document: {e}");
+                                // The bytes are still sitting at `path` and we
+                                // could not move them aside, so writing is off.
+                                read_only = true;
+                            } else {
+                                existed = false;
+                            }
+                            error = Some(message);
+                        }
+                    },
                     Err(e) => {
-                        // Quarantine before anything can write over it. The
-                        // same reasoning as the JSON stores: an unreadable
-                        // corpus is recoverable, an overwritten one is not.
-                        let backup = path.with_extension("automerge.corrupt");
                         let message = format!(
-                            "Notes document at {} could not be read ({e}); preserved as {}",
-                            path.display(),
-                            backup.display()
+                            "Notes document at {} exists but could not be read ({e}); \
+                             it will not be written to this session",
+                            path.display()
                         );
                         tracing::error!("{message}");
-                        if let Err(e) = std::fs::rename(&path, &backup) {
-                            tracing::error!("Could not preserve the corrupt document: {e}");
-                            // The bytes are still sitting at `path` and we
-                            // could not move them aside, so writing is off.
-                            read_only = true;
-                        } else {
-                            existed = false;
-                        }
+                        read_only = true;
                         error = Some(message);
                     }
-                },
-                Err(e) => {
-                    let message = format!(
-                        "Notes document at {} exists but could not be read ({e}); \
-                         it will not be written to this session",
-                        path.display()
-                    );
-                    tracing::error!("{message}");
-                    read_only = true;
-                    error = Some(message);
                 }
+            }
+            Ok(false) => {}
+            Err(e) => {
+                let message = format!(
+                    "Could not tell whether a notes document exists at {} ({e}); \
+                     it will not be written to this session",
+                    path.display()
+                );
+                tracing::error!("{message}");
+                existed = true;
+                read_only = true;
+                error = Some(message);
             }
         }
 
         let last_write = existed.then(|| mtime(&path)).flatten();
-        (Self { doc, path, last_write, existed, read_only, pending_save: false }, error)
+        (
+            Self { doc, path, last_write, existed, read_only, pending_save: false, save_failed: false },
+            error,
+        )
     }
 
     /// Whether writing is off for this session. See the field.
@@ -325,6 +365,12 @@ impl SyncDoc {
         self.pending_save = false;
     }
 
+    /// Whether the last `save()` call failed and nothing has succeeded
+    /// since. See the field.
+    pub fn has_save_failed(&self) -> bool {
+        self.save_failed
+    }
+
     /// Whether the file on disk has been written since we last wrote it.
     ///
     /// A stat, so it is cheap enough for the 500 ms tick. A file that has
@@ -396,17 +442,27 @@ impl SyncDoc {
     /// same document format, and neither can lose changes the other reads
     /// back, since the loser's changes are already reflected in its own
     /// in-memory `AutoCommit` and get reconciled again on its next tick).
+    ///
+    /// Sets or clears `save_failed` around the actual write, in
+    /// `write_and_rename`, so every return path (the early `?`s included)
+    /// updates it and a caller cannot forget to.
     pub fn save(&mut self) -> Result<()> {
         if self.path.as_os_str().is_empty() || self.read_only {
             return Ok(());
         }
+        let result = self.write_and_rename();
+        self.save_failed = result.is_err();
+        result
+    }
+
+    fn write_and_rename(&mut self) -> Result<()> {
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir)?;
         }
         let bytes = self.doc.save();
         let tmp = self.path.with_extension(format!("automerge.tmp.{}", std::process::id()));
         std::fs::write(&tmp, bytes)?;
-        if let Err(e) = std::fs::rename(&tmp, &self.path) {
+        if let Err(e) = rename_with_retry(&tmp, &self.path) {
             let _ = std::fs::remove_file(&tmp);
             return Err(e.into());
         }
@@ -467,6 +523,35 @@ fn load_or_salvage(bytes: &[u8]) -> Result<AutoCommit, automerge::AutomergeError
 
 fn mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).ok()?.modified().ok()
+}
+
+/// Rename `from` to `to`, retrying up to three times, about 50ms apart.
+///
+/// On Windows, replacing an existing file needs `DELETE` access on the
+/// destination, so any process holding it open without `FILE_SHARE_DELETE`
+/// (a backup agent, an on-access scanner, an editor with the file open)
+/// fails the rename transiently even though nothing about our own write was
+/// wrong. On Linux `rename` is atomic against this class of failure and the
+/// loop never runs a second time in practice.
+///
+/// Shared by every store's `save`, `SyncDoc`'s included: `NoteStore`,
+/// `TaskStore`, `MachineStore`, `TranscriptionHistory` and `Config` all
+/// finish their own atomic write the same way, and all of them are exposed
+/// to the same sharing violation.
+pub(crate) fn rename_with_retry(from: &Path, to: &Path) -> std::io::Result<()> {
+    const ATTEMPTS: u32 = 3;
+    const DELAY: std::time::Duration = std::time::Duration::from_millis(50);
+    let mut last_err = None;
+    for attempt in 0..ATTEMPTS {
+        if attempt > 0 {
+            std::thread::sleep(DELAY);
+        }
+        match std::fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.expect("the loop above always runs at least once"))
 }
 
 /// Read a string property off a map.

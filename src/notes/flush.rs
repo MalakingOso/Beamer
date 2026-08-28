@@ -56,7 +56,9 @@ pub fn flush_stores(notes: &mut NoteStore, tasks: &mut TaskStore) -> bool {
     // After the mirrors, because `flush_if_dirty` sets `doc_dirty` itself and
     // would otherwise leave the flag standing on state the document already
     // holds, making every subsequent tick take a write lock for nothing. A
-    // failed document save leaves it set, which is the retry.
+    // failed document save is a separate thing from these two flags: see
+    // `SyncDoc::save_failed`, which `run_document_pass` consults on its own
+    // and which is what actually makes a failed save get retried.
     if pass.settled {
         notes.doc_dirty = false;
         tasks.doc_dirty = false;
@@ -82,6 +84,13 @@ fn run_document_pass(notes: &mut NoteStore, tasks: &mut TaskStore) -> DocPass {
         return DocPass { merged: false, saved: false, settled: true };
     }
 
+    // `doc.has_save_failed()` is read again below, folded into `changed`.
+    // Captured in words here rather than inline there: a save that failed on
+    // an earlier tick already moved the document's heads on that tick
+    // (`reconcile` mutates the document whether or not the save after it
+    // succeeds), so a tick with no new edit since then reconciles to a
+    // no-op and the heads comparison a few lines down sees nothing on its
+    // own. `save_failed` is the one thing still watching for that miss.
     let before = doc.heads();
 
     if let Err(e) = doc_notes::reconcile(&mut doc, &notes.notes, &notes.unreadable_notes) {
@@ -135,7 +144,12 @@ fn run_document_pass(notes: &mut NoteStore, tasks: &mut TaskStore) -> DocPass {
     // flag must survive to ask again next tick, since nothing else about
     // this pass would notice the miss a second time, since the mutation predates
     // `before` on every subsequent tick as much as it does on this one.
-    let changed = merged || doc.heads() != before || doc.has_pending_save();
+    //
+    // `has_save_failed` is the same reasoning applied to our own reconcile
+    // rather than the sync coroutine's: a local edit that already landed in
+    // the document on a tick whose save then failed is otherwise invisible
+    // to every comparison above, on every tick after the one that made it.
+    let changed = merged || doc.heads() != before || doc.has_pending_save() || doc.has_save_failed();
     let mut saved = changed;
     if changed {
         match doc.save() {
