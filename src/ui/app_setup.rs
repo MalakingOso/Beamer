@@ -18,6 +18,7 @@ use crate::notes::NoteStore;
 #[cfg(not(target_os = "linux"))]
 use crate::orchestrator::RecordingState;
 use crate::tray::{self, TrayMenuItems};
+use crate::ui::status_log::{log_status, LogLevel, StatusLog};
 use crate::update::{self, UpdateStatus};
 #[cfg(not(target_os = "linux"))]
 use crate::ui::pill::{RecordingPill, PILL_CSS, PILL_JS};
@@ -262,7 +263,7 @@ const NOTES_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_mill
 
 /// Drive the debounced writes for both note stores.
 ///
-/// `is_dirty()` is checked through `peek()` rather than `read()` on purpose: a
+/// Dirtiness is checked through `peek()` rather than `read()` on purpose: a
 /// `write()` on every tick would notify every subscriber — including each open
 /// sticky window — twice a second, whether or not anything had changed.
 ///
@@ -275,14 +276,41 @@ pub(super) fn setup_notes_flush(mut notes: Signal<NoteStore>, mut tasks: Signal<
         spawn(async move {
             loop {
                 tokio::time::sleep(NOTES_FLUSH_INTERVAL).await;
-                if notes.peek().is_dirty() {
-                    notes.write().flush_if_dirty();
-                }
-                if tasks.peek().is_dirty() {
-                    tasks.write().flush_if_dirty();
+                // `needs_flush` rather than `is_dirty`: an inline flush
+                // clears `dirty` as soon as the JSON mirror lands, and the
+                // automerge document still owes a write at that point. The
+                // third arm is the mtime stat that catches a document synced
+                // in from the other machine.
+                let pending = notes.peek().needs_flush()
+                    || tasks.peek().needs_flush()
+                    || notes.peek().doc_file_moved();
+                if pending {
+                    let mut notes = notes.write();
+                    let mut tasks = tasks.write();
+                    crate::notes::flush_stores(&mut notes, &mut tasks);
                 }
             }
         });
+    });
+}
+
+/// Push whatever went wrong while loading the corpus into the status log.
+///
+/// A corrupt `notes.automerge` is quarantined and replaced by an empty store,
+/// which is the right recovery and the wrong silence: the user has to be told
+/// their notes did not come back. Runs once, on the first render.
+pub(super) fn report_load_errors(
+    notes: Signal<NoteStore>,
+    tasks: Signal<TaskStore>,
+    mut status_log: Signal<StatusLog>,
+) {
+    use_hook(move || {
+        for message in [notes.peek().load_error.clone(), tasks.peek().load_error.clone()]
+            .into_iter()
+            .flatten()
+        {
+            log_status(&mut status_log, LogLevel::Error, message);
+        }
     });
 }
 
@@ -351,8 +379,7 @@ pub(super) fn setup_menu_handlers(
                 // `process::exit` below skips the 500ms flush tick along with
                 // every destructor, so any note edit still sitting in memory
                 // has to be written out here or it dies with the process.
-                notes.write().flush_if_dirty();
-                tasks.write().flush_if_dirty();
+                crate::notes::flush_stores(&mut notes.write(), &mut tasks.write());
                 // `process::exit` skips destructors, so the single-instance
                 // guard has to be handed back explicitly or the lockfile
                 // outlives us.

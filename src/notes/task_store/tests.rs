@@ -32,7 +32,7 @@ fn temp_store(tag: &str) -> TaskStore {
     let path = temp_dir().join(format!("{tag}.json"));
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(path.with_extension("json.corrupt"));
-    TaskStore { tasks: Vec::new(), path, dirty: false }
+    TaskStore { tasks: Vec::new(), path, ..TaskStore::detached() }
 }
 
 fn suggest(store: &mut TaskStore, note_id: &str, text: &str) -> String {

@@ -5,6 +5,17 @@
 
 use super::*;
 
+/// The pre-document load path, which is what every migration test here
+/// exercises: no `notes.automerge` exists, so the store seeds itself from
+/// `notes.json` exactly as an install upgrading to this task does. The
+/// document path is derived from the notes path and is never written by
+/// these tests.
+fn seed_load(path: PathBuf, machine_path: PathBuf, attachments_dir: PathBuf) -> NoteStore {
+    let doc_path = path.with_extension("automerge");
+    let _ = std::fs::remove_file(&doc_path);
+    NoteStore::load_from(path, machine_path, attachments_dir, doc_path)
+}
+
 /// PID-scoped temp path so concurrent test runs don't race and nothing
 /// touches the real user config dir. Mirrors `ui::history`'s tests.
 ///
@@ -20,7 +31,16 @@ fn temp_store(tag: &str) -> NoteStore {
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&machine_path);
     let _ = std::fs::remove_dir_all(&attachments_dir);
-    NoteStore { notes: Vec::new(), path, dirty: false, machine: MachineStore::new(machine_path), attachments_dir }
+    NoteStore {
+        notes: Vec::new(),
+        path,
+        dirty: false,
+        machine: MachineStore::new(machine_path),
+        attachments_dir,
+        doc: sync_doc::SyncHandle::default(),
+        doc_dirty: false,
+        load_error: None,
+    }
 }
 
 #[test]
@@ -297,7 +317,7 @@ fn temp_migration_paths(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
 fn migration_lifts_pos_size_and_open_off_a_legacy_notes_json_losslessly() {
     let (path, machine_path, attachments_dir) = temp_migration_paths("migrate");
 
-    let store = NoteStore::load_from(path, machine_path, attachments_dir);
+    let store = seed_load(path, machine_path, attachments_dir);
 
     assert_eq!(store.notes.len(), 2, "the notes themselves must still load");
     assert_eq!(store.pos("199012340-0000"), Some((100, 200)));
@@ -313,7 +333,7 @@ fn migration_lifts_pos_size_and_open_off_a_legacy_notes_json_losslessly() {
 fn a_note_loaded_from_a_legacy_file_no_longer_carries_pos_size_or_open_itself() {
     let (path, machine_path, attachments_dir) = temp_migration_paths("migrate_shape");
 
-    let store = NoteStore::load_from(path, machine_path, attachments_dir);
+    let store = seed_load(path, machine_path, attachments_dir);
 
     // The old keys are simply ignored by `Note`'s own deserialize (no
     // `deny_unknown_fields`, so this must not be fatal), and the content
@@ -336,7 +356,7 @@ fn loading_gcs_machine_entries_for_notes_that_no_longer_exist() {
         machine.flush_if_dirty();
     }
 
-    let store = NoteStore::load_from(path, machine_path, attachments_dir);
+    let store = seed_load(path, machine_path, attachments_dir);
 
     assert!(store.is_open("199012340-0000"), "a note still present keeps its state");
     assert!(!store.is_open("long-gone"), "an entry for a note that no longer exists must be dropped");
@@ -359,7 +379,7 @@ fn a_missing_notes_json_leaves_an_existing_machine_json_intact() {
         machine.flush_if_dirty();
     }
 
-    let store = NoteStore::load_from(path, machine_path, attachments_dir);
+    let store = seed_load(path, machine_path, attachments_dir);
 
     assert!(
         store.is_open("still-here"),
@@ -378,7 +398,7 @@ fn a_quarantined_corrupt_notes_json_leaves_an_existing_machine_json_intact() {
         machine.flush_if_dirty();
     }
 
-    let store = NoteStore::load_from(path, machine_path, attachments_dir);
+    let store = seed_load(path, machine_path, attachments_dir);
 
     assert!(
         store.is_open("still-here"),
@@ -390,7 +410,7 @@ fn a_quarantined_corrupt_notes_json_leaves_an_existing_machine_json_intact() {
 fn a_migrating_load_leaves_the_store_dirty_so_the_stale_keys_get_rewritten_away() {
     let (path, machine_path, attachments_dir) = temp_migration_paths("migrate_dirty");
 
-    let store = NoteStore::load_from(path, machine_path, attachments_dir);
+    let store = seed_load(path, machine_path, attachments_dir);
 
     assert!(
         store.is_dirty(),
@@ -415,11 +435,14 @@ fn a_load_with_nothing_to_migrate_does_not_dirty_the_store() {
         dirty: false,
         machine: MachineStore::new(machine_path.clone()),
         attachments_dir: attachments_dir.clone(),
+        doc: sync_doc::SyncHandle::default(),
+        doc_dirty: false,
+        load_error: None,
     };
     store.create("hello".into(), NoteColor::Purple, NoteOrigin::Dictated);
     store.flush_if_dirty();
 
-    let reloaded = NoteStore::load_from(path, machine_path, attachments_dir);
+    let reloaded = seed_load(path, machine_path, attachments_dir);
 
     let reason = "a notes.json already written under the current schema carries no \
                    legacy keys, so there is nothing to migrate and nothing to rewrite";
@@ -474,7 +497,7 @@ fn migrating_a_legacy_attachment_whose_file_exists_copies_it_in_and_owns_it() {
     let _ = std::fs::remove_dir_all(&attachments_dir);
     write_legacy_attachment_json(&path, &source);
 
-    let store = NoteStore::load_from(path, machine_path, attachments_dir.clone());
+    let store = seed_load(path, machine_path, attachments_dir.clone());
 
     let note = &store.notes[0];
     assert_eq!(note.attachments.len(), 1, "migration must not drop the attachment");
@@ -509,7 +532,7 @@ fn migrating_a_legacy_attachment_whose_file_is_missing_keeps_it_as_a_broken_refe
     let _ = std::fs::remove_dir_all(&attachments_dir);
     write_legacy_attachment_json(&path, &missing);
 
-    let store = NoteStore::load_from(path, machine_path, attachments_dir);
+    let store = seed_load(path, machine_path, attachments_dir);
 
     let note = &store.notes[0];
     assert_eq!(

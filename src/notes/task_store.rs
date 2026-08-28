@@ -17,7 +17,9 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use super::next_id;
+use super::sync_doc::SyncHandle;
 use super::task::{Proposal, Task, TaskStatus};
+use super::{doc_tasks, NoteStore};
 use crate::config::Config;
 
 /// No caller until the suggestion chips land in the UI batch; the store is
@@ -29,11 +31,30 @@ pub struct TaskStore {
     pub(crate) path: PathBuf,
     #[serde(skip)]
     pub(crate) dirty: bool,
+    /// The same automerge document `NoteStore` holds. Notes and tasks are one
+    /// corpus on disk even though they are two stores in memory.
+    #[serde(skip)]
+    pub(crate) doc: SyncHandle,
+    /// A decision that has reached `tasks.json` but not yet the document. See
+    /// `NoteStore::doc_dirty`.
+    #[serde(skip)]
+    pub(crate) doc_dirty: bool,
+    /// Why the corpus failed to load, if it did. Surfaced to the status log
+    /// by `App()`.
+    #[serde(skip)]
+    pub load_error: Option<String>,
 }
 
 impl Default for TaskStore {
     fn default() -> Self {
-        Self { tasks: Vec::new(), path: Self::storage_path(), dirty: false }
+        Self {
+            tasks: Vec::new(),
+            path: Self::storage_path(),
+            dirty: false,
+            doc: SyncHandle::default(),
+            doc_dirty: false,
+            load_error: None,
+        }
     }
 }
 
@@ -45,21 +66,55 @@ impl TaskStore {
         Config::config_dir().join("tasks.json")
     }
 
-    pub fn load() -> Self {
-        Self::load_from(Self::storage_path())
+    /// Load beside an already-loaded `NoteStore`, sharing its document.
+    ///
+    /// The note store is loaded first because it owns the document handle and
+    /// the machine id the document's actor is derived from. Where the
+    /// document already existed, the tasks come out of it and `tasks.json` is
+    /// a derived export from then on; otherwise the existing JSON seeds it,
+    /// once.
+    pub fn load_beside(notes: &NoteStore) -> Self {
+        Self::load_beside_at(notes, Self::storage_path())
+    }
+
+    /// `load_beside`, with the mirror path injected so a test never reaches
+    /// into the real config dir.
+    pub(crate) fn load_beside_at(notes: &NoteStore, path: PathBuf) -> Self {
+        let doc = notes.sync_doc();
+        let from_document = doc.lock().existed();
+        if from_document {
+            let tasks = doc_tasks::hydrate(&doc.lock());
+            return Self {
+                tasks,
+                path,
+                dirty: false,
+                doc,
+                doc_dirty: false,
+                load_error: None,
+            };
+        }
+        let mut store = Self::load_from(path);
+        store.doc = doc;
+        store.doc_dirty = true;
+        store
     }
 
     /// The real load, parameterized by path so the corrupt-file branch can be
-    /// exercised in a test.
+    /// exercised in a test. Only ever the seed path now: once the document
+    /// exists, `load_beside` reads that instead.
     pub(crate) fn load_from(path: PathBuf) -> Self {
+        let empty = |path: PathBuf| Self { tasks: Vec::new(), path, ..Self::detached() };
         if !path.exists() {
-            return Self { tasks: Vec::new(), path, dirty: false };
+            return empty(path);
         }
         let contents = match std::fs::read_to_string(&path) {
             Ok(c) => c,
             Err(e) => {
-                tracing::error!("Could not read tasks at {:?}: {}", path, e);
-                return Self { tasks: Vec::new(), path, dirty: false };
+                let message = format!("Could not read tasks at {}: {e}", path.display());
+                tracing::error!("{message}");
+                let mut store = empty(path);
+                store.load_error = Some(message);
+                return store;
             }
         };
         match serde_json::from_str::<TaskStore>(&contents) {
@@ -74,14 +129,18 @@ impl TaskStore {
                 // more than notes — every accept and dismiss the user has ever
                 // made is a labelled example, and they are not re-derivable.
                 let backup = path.with_extension("json.corrupt");
-                tracing::error!(
-                    "Tasks at {:?} are not valid JSON ({}); preserving as {:?}",
-                    path, e, backup
+                let message = format!(
+                    "Tasks at {} are not valid JSON ({e}); preserved as {}",
+                    path.display(),
+                    backup.display()
                 );
+                tracing::error!("{message}");
                 if let Err(e) = std::fs::rename(&path, &backup) {
                     tracing::error!("Could not preserve corrupt tasks: {}", e);
                 }
-                Self { tasks: Vec::new(), path, dirty: false }
+                let mut store = empty(path);
+                store.load_error = Some(message);
+                store
             }
         }
     }
@@ -113,6 +172,9 @@ impl TaskStore {
         if !self.dirty {
             return false;
         }
+        // The document write belongs to the 500 ms tick. See
+        // `NoteStore::flush_if_dirty`.
+        self.doc_dirty = true;
         if let Err(e) = self.save() {
             tracing::error!("Failed to save tasks: {}", e);
             // Stay dirty so the next tick retries rather than losing the row.
@@ -125,6 +187,25 @@ impl TaskStore {
     /// Whether a change is pending a write.
     pub fn is_dirty(&self) -> bool {
         self.dirty
+    }
+
+    /// Whether either the JSON mirror or the document still owes a write.
+    pub fn needs_flush(&self) -> bool {
+        self.is_dirty() || self.doc_dirty
+    }
+
+    /// An empty store with no document behind it, for the load paths that
+    /// have not been handed a handle yet and for tests that never want a
+    /// file. Saving a detached document is a no-op.
+    pub(crate) fn detached() -> Self {
+        Self {
+            tasks: Vec::new(),
+            path: PathBuf::new(),
+            dirty: false,
+            doc: SyncHandle::default(),
+            doc_dirty: false,
+            load_error: None,
+        }
     }
 
     /// Install a fresh set of proposals for one note, keeping every decision.

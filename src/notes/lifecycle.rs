@@ -127,6 +127,9 @@ mod tests {
             dirty: false,
             machine: crate::notes::MachineStore::new(machine_path),
             attachments_dir,
+            doc: crate::notes::sync_doc::SyncHandle::default(),
+            doc_dirty: false,
+            load_error: None,
         }
     }
 
