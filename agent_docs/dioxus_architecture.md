@@ -196,22 +196,32 @@ in Settings on Windows; there is no bug to chase here.
 ### Drag-and-drop diverges between platforms
 
 `.sticky-bar`'s drop handling (`src/ui/sticky.rs:191-206`) reads the same
-way on both platforms, but wry backs it differently underneath. On every
-platform but Windows, wry's native drag-drop handler merges real dropped
-files into the synthesized `DragData`, so `e.files()` is non-empty exactly
-when a real file was dropped. Windows disables that native handler and
-dioxus synthesizes the drag events from the browser's own HTML5 DnD instead,
-so `e.files()` still returns real paths there: the file-drop path works
-the same on both platforms. What does not carry over is the URL case.
-`attachments_from_drop` falls back to `dataTransfer.getData("text/uri-list")`
-when there are no files, and Windows's synthetic `dataTransfer` never
-populates that field, so dragging a URL from a browser onto a note silently
-does nothing on Windows even though it attaches a link chip on Linux. Worse
-for visual feedback, `ondragenter` (`sticky.rs:194`, the handler that flips
-`drop_target` and shows the drop-target highlight) is never synthesized on
-Windows at all, so that highlight is dead code there. It will never fire,
-on any drop, ever. None of this touches the paperclip button, which opens a
-native file dialog and is unaffected on every platform.
+way on both platforms, but wry backs it differently underneath. dioxus-desktop
+0.7.10's `with_drag_drop_handler` (`dioxus-desktop-0.7.10/src/webview.rs:411-412`)
+is installed unconditionally on every platform; only `disable_file_drop_handler`
+(default `false`) would suppress it. On every platform but Windows that native
+handler just merges real dropped files into the synthesized `DragData`, so
+`e.files()` is non-empty exactly when a real file was dropped. Windows is the
+one where the native handler causes a problem: per the comment at
+`webview.rs:328-330`, "Windows webview blocks HTML-native events when the drop
+handler is provided", so dioxus glue code mimics drag-drop events instead,
+wiring `handleWindowsDragDrop` / `handleWindowsDragOver` / `handleWindowsDragLeave`
+in `launch.rs:61-83` off the native `DragDropEvent`. `e.files()` still returns
+real paths on Windows because that glue code attaches a real `File` to the
+synthesized `drop` event, so the file-drop path works the same on both
+platforms. What does not carry over is the URL case. `attachments_from_drop`
+falls back to `dataTransfer.getData("text/uri-list")` when there are no files,
+and Windows's synthetic `dataTransfer` never populates that field, so dragging
+a URL from a browser onto a note silently does nothing on Windows even though
+it attaches a link chip on Linux. Worse for visual feedback, `ondragenter`
+(`sticky.rs:194`, the handler that flips `drop_target` and shows the
+drop-target highlight) is never synthesized on Windows at all, so that
+highlight is dead code there. The interpreter shim (`dioxus-interpreter-js-0.7.10/src/ts/native.ts:256-321`)
+only ever dispatches `dragover`, `dragleave`, and `drop` from the Windows glue
+path, with no `handleWindowsDragEnter` counterpart at all, so there is no code
+path by which a synthesized `dragenter` could fire on Windows. None of this
+touches the paperclip button, which opens a native file dialog and is
+unaffected on every platform.
 
 ### Toast branding
 

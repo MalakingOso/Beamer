@@ -74,8 +74,8 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
             None => return false,
         };
 
-        // Reset state if config was updated. Clears every binding, not just
-        // one, since a config edit resets both.
+        // Reset state if config was updated. A config edit resets both
+        // bindings, so this clears the state for all of them.
         if state.reset_flag.swap(false, Ordering::Relaxed) {
             state.binding_state = [BindingState::default(); MAX_BINDINGS];
             state.win_consumed = false;
@@ -86,7 +86,7 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
         let is_win_key_event = vk == VK_LWIN || vk == VK_RWIN;
         let norm_vk = if is_win_key_event { VK_LWIN } else { vk };
 
-        let bindings = state.bindings.lock().unwrap();
+        let bindings = state.bindings.lock().unwrap_or_else(|p| p.into_inner());
 
         // Not a trigger key for any configured binding: nothing to do. This
         // also means modifier keys (Ctrl/Alt/Shift) never reach the work
@@ -201,7 +201,7 @@ pub struct HotkeyHandle {
 
 impl HotkeyHandle {
     pub fn update_configs(&self, inject: HotkeyConfig, note: Option<HotkeyConfig>) {
-        *self.bindings.lock().unwrap() = build_bindings(inject, note);
+        *self.bindings.lock().unwrap_or_else(|p| p.into_inner()) = build_bindings(inject, note);
         self.reset_flag.store(true, Ordering::Relaxed);
     }
 }

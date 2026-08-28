@@ -139,11 +139,21 @@ pub fn App() -> Element {
     // Re-configure hotkey when config changes
     use_effect(move || {
         let cfg = config.read();
-        if let Some(new_config) =
-            HotkeyConfig::parse(&cfg.recording.hotkey, cfg.recording.mode == "toggle")
-        {
-            hotkey_handle.update_configs(new_config, cfg.recording.note_hotkey_config());
-        }
+        let new_config = HotkeyConfig::parse(&cfg.recording.hotkey, cfg.recording.mode == "toggle")
+            .unwrap_or_else(|| {
+                // Match the use_hook fallback above: a dictation hotkey that
+                // fails to parse must not stall the note binding too. Without
+                // this fallback, a hand-edited config carrying a rejected
+                // dictation string (e.g. "Ctrl+Super+Space") would silently
+                // stop every subsequent note-hotkey edit from ever reaching
+                // `update_configs`.
+                tracing::warn!(
+                    hotkey = %cfg.recording.hotkey,
+                    "dictation hotkey failed to parse; falling back to the default Ctrl+Space"
+                );
+                HotkeyConfig::default()
+            });
+        hotkey_handle.update_configs(new_config, cfg.recording.note_hotkey_config());
     });
 
     // Sticky note windows: one effect keeps the set of open windows matching
