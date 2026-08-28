@@ -325,16 +325,31 @@ the grounding gate, and a click before anything leaves the app. Extend
   is presumptuous, and S1-mini is a *transcript* normalizer — typed prose is
   outside its training distribution.
 
-This is **structural, not a runtime check**. The automatic trigger lives at
-exactly one site, `sink::do_note_capture`, which is reachable only from
-dictation. A typed note has no path to that line. Keep it that way rather than
-adding an `if origin == Dictated` somewhere — the check would be forgettable
-and the topology is not.
+This is **structural, not a runtime check**, for the *first* automatic pass on
+a fresh note. That decision lives at exactly one site, `sink::do_note_capture`,
+which is reachable only from dictation. A typed note has no path to that line.
+Keep it that way rather than adding an `if origin == Dictated` somewhere — the
+check would be forgettable and the topology is not.
 
 Either pass can be re-run from the note's footer, which reads the two stage
 fields rather than the note's origin. Keying it to origin leaves a dead end: a
 dictated note whose cleanup was superseded by an edit has spent its automatic
 trigger and would have no way back.
+
+⚠️ **A second, different kind of automatic trigger exists: the backlog sweep**
+(`pipeline::sweep_requests`, described in full under "Failure handling"
+below). It is not gated by origin at all, and that is deliberate rather than
+an oversight. `sink::do_note_capture` decides *whether a note gets cleaned and
+analysed in the first place*, and that decision does stay origin-gated exactly
+as described above. The sweep does something narrower: it re-sends a request
+that already exists, for a stage that already reached `Failed`, once a later
+success proves the server is reachable again. A typed note that reached
+`Failed` by way of a footer press is swept the same as a dictated one. The
+user already asked once, by pressing retry; the sweep is only carrying that
+same ask forward, not inventing a new automatic pass on text nobody asked to
+have touched. If that distinction ever stops holding, i.e. if the sweep starts
+running passes a note never had a human ask for, the origin gate belongs on
+`sweep_requests` too.
 
 ## The pipeline coroutine
 
@@ -400,13 +415,26 @@ first dictated.
 
 `use_pipeline` (`src/notes/pipeline.rs`) now sweeps the backlog itself: when a
 pass finishes and succeeded, it also re-sends a `PipelineRequest` for every
-other note whose `clean_state` or `extract_state` is `Failed`, asking each one
-only for the stages that actually failed (`sweep_requests`). The existing
-`in_flight` set still dedupes, so this cannot storm the server with duplicate
-requests, and a swept request is marked `swept: true` so *its own* completion
-never triggers a further sweep. Without that guard, a note that keeps
-genuinely failing would re-sweep the whole backlog forever, once per success,
-on every other note in the app.
+other, non-archived note whose `clean_state` or `extract_state` is `Failed`,
+asking each one only for the stages that actually failed (`sweep_requests`).
+Archived notes are excluded on purpose: archiving is the user saying they are
+done with a note, and a `Failed` stage on one is not backlog to keep spending
+requests on. The existing `in_flight` set still dedupes, so this cannot storm
+the server with duplicate requests, and a swept request is marked `swept:
+true` so *its own* completion never triggers a further sweep. Without that
+guard, a note that keeps genuinely failing would re-sweep the whole backlog
+forever, once per success, on every other note in the app.
+
+**"Succeeded" means a response arrived, not merely "no error".** A pass can
+finish having contacted the server zero times: the stage was disabled, the
+whole feature was disabled, the note vanished before a request could go out,
+or there was nothing to send (a blank note, an attachment-only body with no
+text runs). None of those prove the server is up, so none of them count. A
+pass is folded to `succeeded` only when at least one of its stages actually
+got a response (`RequestOutcome::Responded` in `pipeline.rs`) and none
+errored; the fold is a pure function, `succeeded_from`, kept separate from the
+stage-running code specifically so this rule is unit-testable without a
+server.
 
 **This does not violate the never-poll rule.** The rule is about a timer: a
 periodic `GET /v1/models` that runs whether or not anyone asked for anything,

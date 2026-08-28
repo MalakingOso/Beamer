@@ -43,6 +43,14 @@ use crate::notes::task_store::TaskStore;
 use crate::notes::{blocks, NoteStore, StageState};
 use crate::ui::status_log::{log_status, LogLevel, StatusLog};
 
+/// The sweep's pure decision logic (`sweep_requests`, `should_sweep`,
+/// `RequestOutcome`, `succeeded_from`), split out under `#[path]` for the same
+/// reason `pipeline/tests.rs` is: keeping this file, which is the coroutine
+/// and the stage-running code, under the 500-line limit.
+#[path = "pipeline/sweep.rs"]
+mod sweep;
+use sweep::{should_sweep, succeeded_from, sweep_requests, RequestOutcome};
+
 /// Which stages a request is asking for.
 ///
 /// Separate from "which stages are pending" on purpose: the footer's retry
@@ -81,39 +89,6 @@ impl PipelineRequest {
     pub fn retry(note_id: impl Into<String>, stages: Stages) -> Self {
         Self { note_id: note_id.into(), stages, swept: false }
     }
-}
-
-/// Every note the pipeline should retry after a success proves the server is
-/// reachable again, asking each one only for the stages that actually failed.
-///
-/// Pure: a function of the store's stage fields and nothing else, so this is
-/// testable without a server or a running coroutine. The one caller is
-/// `use_pipeline`'s own success path, never a timer. See the module-level
-/// warning on never polling the server.
-pub fn sweep_requests(notes: &NoteStore) -> Vec<PipelineRequest> {
-    notes
-        .notes
-        .iter()
-        .filter_map(|note| {
-            let stages = match (note.clean_state == StageState::Failed, note.extract_state == StageState::Failed) {
-                (true, true) => Some(Stages::Both),
-                (true, false) => Some(Stages::CleanOnly),
-                (false, true) => Some(Stages::ExtractOnly),
-                (false, false) => None,
-            };
-            stages.map(|stages| PipelineRequest { note_id: note.id.clone(), stages, swept: true })
-        })
-        .collect()
-}
-
-/// Whether a just-finished request should trigger a backlog sweep.
-///
-/// The two conditions the brief and the never-poll rule both demand: the pass
-/// that just finished actually succeeded (that is the evidence the server is
-/// reachable), and it was not itself a swept request (the guard against
-/// sweeping forever).
-fn should_sweep(succeeded: bool, was_swept: bool) -> bool {
-    succeeded && !was_swept
 }
 
 /// Start the pipeline. Call once, from `App()`.
@@ -223,42 +198,44 @@ async fn run_request(
         return Finished { note_id: id, swept, succeeded: false };
     }
 
-    // Starts true and only ever gets pulled down. A stage that is disabled
-    // in config, rather than requested, contacts no server and so cannot make
-    // this pass count as failed evidence either way.
-    let mut succeeded = true;
+    // One `RequestOutcome` per stage this request actually named, whether or
+    // not that stage went on to make a call. Folded by `succeeded_from` at
+    // the end rather than tracked as a running bool, so "disabled" and
+    // "nothing to send" cannot be silently conflated with "responded" the
+    // way the running-bool version was.
+    let mut outcomes: Vec<RequestOutcome> = Vec::with_capacity(2);
 
     if matches!(request.stages, Stages::Both | Stages::CleanOnly) {
         if cleanup_cfg.enabled {
-            if !run_cleanup(&id, &base_url, &cleanup_cfg, timeout, &mut notes, &mut status_log).await {
-                succeeded = false;
-            }
+            outcomes
+                .push(run_cleanup(&id, &base_url, &cleanup_cfg, timeout, &mut notes, &mut status_log).await);
         } else {
             let mut store = notes.write();
             if stage_is_pending(&store, &id, Stage::Clean) {
                 store.mark_clean_skipped(&id);
             }
+            outcomes.push(RequestOutcome::NotAttempted);
         }
     }
 
     if matches!(request.stages, Stages::Both | Stages::ExtractOnly) {
         if extract_cfg.enabled {
-            let extract_ok = run_extraction(
-                &id, &base_url, &extract_cfg, timeout, &mut notes, &mut tasks, &mut status_log,
-            )
-            .await;
-            if !extract_ok {
-                succeeded = false;
-            }
+            outcomes.push(
+                run_extraction(
+                    &id, &base_url, &extract_cfg, timeout, &mut notes, &mut tasks, &mut status_log,
+                )
+                .await,
+            );
         } else {
             let mut store = notes.write();
             if stage_is_pending(&store, &id, Stage::Extract) {
                 store.mark_extract_skipped(&id);
             }
+            outcomes.push(RequestOutcome::NotAttempted);
         }
     }
 
-    Finished { note_id: id, swept, succeeded }
+    Finished { note_id: id, swept, succeeded: succeeded_from(&outcomes) }
 }
 
 #[derive(Clone, Copy)]
@@ -318,10 +295,11 @@ fn stage_is_pending(store: &NoteStore, id: &str, stage: Stage) -> bool {
 /// Cost is one call per run — measured at 0.225s each, so a note with two
 /// images is ~0.7s. Serial on purpose: concurrency here would buy a fraction of
 /// a second and risk reordering the answers.
-/// Returns whether the pass completed without a request error, the evidence
-/// `should_sweep` acts on. A note that vanished before any request went out
-/// counts as `false`: nothing was attempted, so nothing was learned about
-/// whether the server is reachable.
+/// Returns the `RequestOutcome` `succeeded_from` folds over. A note that
+/// vanished before any request went out, or that had nothing but blank runs
+/// to send (an attachment-only or whitespace-only body), is `NotAttempted`:
+/// no `cleanup::clean` call was ever made, so nothing was learned about
+/// whether the server is reachable, and it must not be reported as if it had.
 async fn run_cleanup(
     id: &str,
     base_url: &str,
@@ -329,23 +307,29 @@ async fn run_cleanup(
     timeout: Duration,
     notes: &mut Signal<NoteStore>,
     status_log: &mut Signal<StatusLog>,
-) -> bool {
+) -> RequestOutcome {
     // The text the request will carry, captured now. Applying the result is a
     // compare-and-swap against exactly this string — see `lifecycle::apply_cleanup`
     // for why body equality is the guard and `modified` is not.
     let Some(sent) = notes.peek().get(id).map(|n| n.body.clone()) else {
-        return false;
+        return RequestOutcome::NotAttempted;
     };
 
     let runs: Vec<String> = blocks::text_runs(&sent).into_iter().map(str::to_string).collect();
     let mut cleaned: Vec<Option<String>> = Vec::with_capacity(runs.len());
     let mut changed = false;
+    // Set only inside the loop below, right before a `cleanup::clean` call
+    // actually goes out. A note with no non-blank runs (all attachments, or
+    // all whitespace) never sets this, and its pass must not read as evidence
+    // the server answered anything.
+    let mut contacted_server = false;
 
     for run in &runs {
         if run.trim().is_empty() {
             cleaned.push(None);
             continue;
         }
+        contacted_server = true;
         match cleanup::clean(base_url, cfg, run, timeout).await {
             Ok(Cleaned::Rewritten(text)) => {
                 changed = true;
@@ -356,7 +340,7 @@ async fn run_cleanup(
                 notes.write().mark_clean_failed(id);
                 tracing::warn!("cleanup failed for note {}: {}", id, e);
                 log_status(status_log, LogLevel::Error, format!("Note cleanup failed: {e}"));
-                return false;
+                return RequestOutcome::Errored;
             }
         }
     }
@@ -384,14 +368,22 @@ async fn run_cleanup(
             tracing::debug!("note {} disappeared during cleanup", id);
         }
     }
-    // Reached only via `Applied`, `Superseded` or `NoteGone`. The request
-    // itself got a response in all three; only the mid-flight `Err` above,
-    // and the note-vanished-before-any-call guard, return `false`.
-    true
+    // Reached only via `Applied`, `Superseded` or `NoteGone`, all of which
+    // require the loop above to have run to completion without an `Err`. Only
+    // `Responded` when a call actually went out; a zero-call body (nothing
+    // but blank runs) is `NotAttempted` regardless of which of the three this
+    // reaches, since `apply_cleanup` still runs for bookkeeping even then.
+    if contacted_server {
+        RequestOutcome::Responded
+    } else {
+        RequestOutcome::NotAttempted
+    }
 }
 
-/// Returns whether the pass completed without a request error, same contract
-/// as `run_cleanup`.
+/// Returns the `RequestOutcome` `succeeded_from` folds over, same contract as
+/// `run_cleanup`. The blank-text fast path below is `NotAttempted`, not a
+/// success: `extract::extract` is never called, so nothing was learned about
+/// whether the server is reachable.
 async fn run_extraction(
     id: &str,
     base_url: &str,
@@ -400,7 +392,7 @@ async fn run_extraction(
     notes: &mut Signal<NoteStore>,
     tasks: &mut Signal<TaskStore>,
     status_log: &mut Signal<StatusLog>,
-) -> bool {
+) -> RequestOutcome {
     // Read the body **after** cleanup, not the text cleanup was given. That
     // covers all three outcomes with one line: a cleaned note is analysed as
     // cleaned, a failed cleanup falls back to `raw` (which `body` still equals),
@@ -411,11 +403,11 @@ async fn run_extraction(
     // one. `extract::is_grounded` checks evidence against the string it was
     // handed, so this also means an evidence span can never contain token text.
     let Some(text) = notes.peek().get(id).map(|n| blocks::plain_text(&n.body)) else {
-        return false;
+        return RequestOutcome::NotAttempted;
     };
     if text.trim().is_empty() {
         notes.write().mark_analyzed(id);
-        return true;
+        return RequestOutcome::NotAttempted;
     }
 
     // Supplied here rather than read inside `extract`, so the validation gates
@@ -458,13 +450,13 @@ async fn run_extraction(
             // nagging forever on every ordinary note.
             notes.write().mark_analyzed(id);
             tracing::info!("extraction proposed {} task(s) for note {}", count, id);
-            true
+            RequestOutcome::Responded
         }
         Err(e) => {
             notes.write().mark_extract_failed(id);
             tracing::warn!("extraction failed for note {}: {}", id, e);
             log_status(status_log, LogLevel::Error, format!("Task extraction failed: {e}"));
-            false
+            RequestOutcome::Errored
         }
     }
 }

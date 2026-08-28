@@ -13,6 +13,18 @@ pub mod extract;
 pub mod prompts;
 
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
+/// Floor on `connect_timeout_ms`. `0` parses as a valid `u64` and is exactly
+/// the value that turns `.connect_timeout(Duration::ZERO)` into an instant
+/// failure on every single request, so it has to be caught somewhere that
+/// cannot be skipped. An HTML `min` attribute on the Settings input only
+/// covers the UI path; `config.toml` can be hand-edited straight past it, so
+/// the real guarantee is [`LlmConfig::connect_timeout`] clamping at the one
+/// place the value is actually turned into a `Duration`.
+///
+/// 100ms is not a recommendation, only a value nobody could mistake for "off".
+pub const MIN_CONNECT_TIMEOUT_MS: u64 = 100;
 
 /// Required attribution for the cleanup model.
 ///
@@ -106,6 +118,18 @@ fn default_styling() -> String { "semi-formal".into() }
 fn default_structure() -> String { "lists".into() }
 fn default_context() -> String { "general".into() }
 fn default_min_confidence() -> f32 { 0.5 }
+
+impl LlmConfig {
+    /// `connect_timeout_ms` as a `Duration`, clamped to
+    /// [`MIN_CONNECT_TIMEOUT_MS`]. This, not the raw field, is what
+    /// `main.rs` must pass to `llm::client::init_http_client`. The field
+    /// alone does not protect against a hand-edited `config.toml` carrying
+    /// `0`, which the field's own `#[serde(default)]` cannot catch because
+    /// `0` is a value, not a missing one.
+    pub fn connect_timeout(&self) -> Duration {
+        Duration::from_millis(self.connect_timeout_ms.max(MIN_CONNECT_TIMEOUT_MS))
+    }
+}
 
 impl Default for LlmConfig {
     fn default() -> Self {

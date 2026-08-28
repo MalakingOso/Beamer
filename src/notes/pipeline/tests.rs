@@ -37,6 +37,14 @@ fn store(notes: Vec<Note>) -> NoteStore {
     NoteStore { notes, path: std::path::PathBuf::new(), dirty: false }
 }
 
+/// Marks a note archived, for the one test that needs it. A free function
+/// rather than a `note()` parameter: every other test wants an active note,
+/// and threading an unused `bool` through all of them would be noise.
+fn archived(mut n: Note) -> Note {
+    n.archived = true;
+    n
+}
+
 #[test]
 fn a_new_note_asks_for_both_stages() {
     let req = PipelineRequest::for_new_note("abc");
@@ -125,6 +133,86 @@ fn a_mixed_backlog_asks_each_note_only_for_what_it_needs() {
     assert_eq!(by_id("extract-only"), Some(Stages::ExtractOnly));
     assert_eq!(by_id("both"), Some(Stages::Both));
     assert_eq!(reqs.len(), 3);
+}
+
+#[test]
+fn an_archived_notes_failed_stage_is_not_swept() {
+    // Archiving is the user saying they are done with the note. Without this
+    // filter a `Failed` stage on an archived note would be retried forever,
+    // once per success, for as long as the app runs.
+    let notes = store(vec![
+        archived(note("gone", StageState::Failed, StageState::Failed)),
+        note("active", StageState::Failed, StageState::Done),
+    ]);
+    let reqs = sweep_requests(&notes);
+    assert_eq!(reqs.len(), 1);
+    assert_eq!(reqs[0].note_id, "active");
+}
+
+// ─── succeeded_from ────────────────────────────────────────────────────────
+//
+// `succeeded_from` is what decides whether a finished pass counts as
+// evidence the server is reachable. The bug this replaces was a running
+// `bool` that started `true` and only ever got pulled down by an error, so a
+// pass that made zero requests still read as a success. Every case below is
+// a real code path in `run_request`/`run_cleanup`/`run_extraction`, named in
+// its own test rather than folded into one parametrized case, so a
+// regression in any one of them fails with a name that says which path broke.
+
+#[test]
+fn no_outcomes_at_all_is_not_a_success() {
+    // The shape `run_request` reports for `llm.enabled = false`: nothing was
+    // attempted, so `succeeded_from` never even runs, but the helper itself
+    // must also treat "nothing to fold" as no evidence.
+    assert!(!succeeded_from(&[]));
+}
+
+#[test]
+fn a_single_not_attempted_stage_is_not_a_success() {
+    // Three different real code paths collapse to this one outcome list:
+    // a `CleanOnly` request with `llm.cleanup.enabled = false` (the
+    // stage-disabled branch in `run_request`), an image-only or
+    // whitespace-only note where `run_cleanup`'s loop never calls
+    // `cleanup::clean` (`contacted_server` stays false), and a blank-text
+    // note where `run_extraction`'s fast path marks it analyzed without
+    // calling `extract::extract`. None of them made a request.
+    assert!(!succeeded_from(&[RequestOutcome::NotAttempted]));
+}
+
+#[test]
+fn both_stages_not_attempted_is_not_a_success() {
+    // A `Both` request where both stages are individually disabled in
+    // config, or a `Both` request against an attachment-only note whose
+    // extraction also found nothing to send.
+    assert!(!succeeded_from(&[RequestOutcome::NotAttempted, RequestOutcome::NotAttempted]));
+}
+
+#[test]
+fn a_single_response_is_a_success() {
+    assert!(succeeded_from(&[RequestOutcome::Responded]));
+}
+
+#[test]
+fn a_response_alongside_a_not_attempted_stage_is_still_a_success() {
+    // `Both`, with one stage disabled and the other actually contacting the
+    // server: the disabled stage contributes no evidence, but the other
+    // stage's response is real evidence, and it must not be diluted away.
+    assert!(succeeded_from(&[RequestOutcome::Responded, RequestOutcome::NotAttempted]));
+}
+
+#[test]
+fn a_single_error_is_not_a_success() {
+    assert!(!succeeded_from(&[RequestOutcome::Errored]));
+}
+
+#[test]
+fn an_error_alongside_a_response_is_not_a_success() {
+    // `Both`, where cleanup got a response but extraction errored (or vice
+    // versa). Folding this to `true` because *a* stage responded would let a
+    // half-broken pass sweep the rest of the backlog; folding to `false`
+    // costs nothing, since the errored stage is itself now `Failed` and will
+    // be picked up by `sweep_requests` on a later, genuinely clean success.
+    assert!(!succeeded_from(&[RequestOutcome::Responded, RequestOutcome::Errored]));
 }
 
 // ─── should_sweep ──────────────────────────────────────────────────────────

@@ -8,7 +8,7 @@
 use dioxus::prelude::*;
 
 use crate::llm::client::{self, ModelInfo};
-use crate::llm::MODEL_CREDIT;
+use crate::llm::{MODEL_CREDIT, MIN_CONNECT_TIMEOUT_MS};
 use crate::ui::components::{Card, Select, Toggle};
 
 #[derive(Clone, PartialEq)]
@@ -100,10 +100,19 @@ pub fn LocalAiCard(props: LocalAiCardProps) -> Element {
                 input {
                     class: "input input-mono",
                     r#type: "number",
+                    min: "{MIN_CONNECT_TIMEOUT_MS}",
                     value: "{props.connect_timeout_ms}",
                     onchange: move |e: Event<FormData>| {
+                        // The `min` attribute above is a hint a browser input
+                        // can ignore or a hand-typed value can bypass; this
+                        // clamp is what actually keeps `0` (and therefore a
+                        // `Duration::ZERO` connect timeout that fails every
+                        // request) out of a value this card can save. It does
+                        // not protect a hand-edited config.toml, which is why
+                        // `LlmConfig::connect_timeout()` clamps again at the
+                        // point of use.
                         if let Ok(v) = e.value().parse::<u64>() {
-                            props.on_connect_timeout_ms_change.call(v);
+                            props.on_connect_timeout_ms_change.call(v.max(MIN_CONNECT_TIMEOUT_MS));
                         }
                     },
                 }
