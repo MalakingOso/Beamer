@@ -1,29 +1,13 @@
 /* Beamer — Deploy Purple Design System */
 
-/* ===== Font Loading ===== */
-@font-face {
-  font-family: "DM Mono";
-  src: url("fonts/DMMono-Regular.woff2") format("woff2");
-  font-weight: 400;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "DM Mono";
-  src: url("fonts/DMMono-Medium.woff2") format("woff2");
-  font-weight: 500;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "Recursive";
-  src: url("fonts/Recursive-Variable.woff2") format("woff2");
-  font-weight: 300 1000;
-  font-style: normal;
-  font-display: swap;
-}
+/* Font loading lives in Rust now, not here. This file ships through
+   `asset!()` and is fetched by the `<link>` in `ui::app`, but a bundled
+   fetch has no document base for a relative `url("fonts/...")` to resolve
+   against, and the three woff2 files were never copied into the bundle
+   either way. `ui::fonts::embedded_font_css` already carries the same three
+   `@font-face` rules as `data:` URIs, and `ui::launch_app` injects them into
+   this window's head at creation time, the same way every other window
+   (sticky notes, pill, splash) already gets its fonts. */
 
 /* ===== Tokens ===== */
 :root {

@@ -214,7 +214,7 @@ pub fn App() -> Element {
 
     rsx! {
         head {
-            link { rel: "stylesheet", href: asset!("assets/styles.css") }
+            link { rel: "stylesheet", href: asset!("/assets/styles.css") }
         }
         div { class: "app-container",
             // Left column: badge + sidebar stacked vertically
@@ -222,7 +222,7 @@ pub fn App() -> Element {
                 div { class: "corner-badge",
                     img {
                         class: "corner-badge-icon",
-                        src: asset!("assets/icon.png"),
+                        src: asset!("/assets/icon.png"),
                         alt: "Beamer",
                     }
                 }
