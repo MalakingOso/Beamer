@@ -22,6 +22,8 @@ use crate::ui::status_log::{log_status, LogLevel, StatusLog};
 use crate::update::{self, UpdateStatus};
 #[cfg(not(target_os = "linux"))]
 use crate::ui::pill::{RecordingPill, PILL_CSS, PILL_JS};
+#[cfg(target_os = "windows")]
+use crate::ui::pill::PILL_BACKDROP_CSS_JS;
 use crate::ui::splash::{SplashWindow, SPLASH_CSS};
 use crate::warmup::{self, WarmupProgress};
 
@@ -136,6 +138,80 @@ pub(super) fn setup_splash(window: DesktopContext, mut app_ready: Signal<bool>) 
     });
 }
 
+/// Give the recording pill Windows 11's Acrylic material and rounded corners,
+/// so it reads as frosted glass rather than a flat CSS capsule.
+///
+/// Three `DwmSetWindowAttribute` calls:
+///
+/// - `DWMWA_SYSTEMBACKDROP_TYPE` (38) set to `DWMSBT_TRANSIENTWINDOW` (3) is
+///   Acrylic, the material for a small floating surface that comes and goes,
+///   as opposed to `DWMSBT_MAINWINDOW` (2), which is Mica and meant for a
+///   primary app window that stays put. Needs Windows 11 build 22621 or later.
+/// - `DWMWA_WINDOW_CORNER_PREFERENCE` (33) set to `DWMWCP_ROUND` (2) rounds
+///   the backdrop into a capsule; without it Acrylic paints a hard-edged box.
+///   Needs Windows 11 build 22000 or later.
+/// - `DWMWA_USE_IMMERSIVE_DARK_MODE` (20) set to `TRUE` tints the material
+///   dark, matching the pill's own design instead of the system default.
+///   Works from Windows 10 build 19041 on, though on an undecorated window
+///   like this one it has nothing visible to affect unless Acrylic is also
+///   present.
+///
+/// On a system too old for one of these, that one call fails; the others
+/// still apply. That is expected on real machines, not a bug, so each
+/// failure is logged at debug and otherwise ignored. The pill's own
+/// background is only thinned out (see `PILL_BACKDROP_CSS_JS`) once the
+/// backdrop call itself has actually succeeded, so a failure there leaves
+/// `PILL_CSS`'s opaque gradient exactly as it was. There is never a moment
+/// where the window is transparent with no material drawn behind it.
+#[cfg(target_os = "windows")]
+fn apply_windows_pill_backdrop(ctx: &DesktopContext) {
+    use dioxus::desktop::tao::platform::windows::WindowExtWindows;
+    use windows::Win32::Foundation::{BOOL, HWND, TRUE};
+    use windows::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
+        DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+    };
+
+    let hwnd = HWND(ctx.window.hwnd() as _);
+
+    let backdrop = unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_SYSTEMBACKDROP_TYPE,
+            &DWMSBT_TRANSIENTWINDOW as *const _ as *const _,
+            std::mem::size_of_val(&DWMSBT_TRANSIENTWINDOW) as u32,
+        )
+    };
+    if let Err(e) = &backdrop {
+        tracing::debug!("DWMWA_SYSTEMBACKDROP_TYPE unavailable (needs Windows 11 22621+): {e}");
+    }
+
+    unsafe {
+        if let Err(e) = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &DWMWCP_ROUND as *const _ as *const _,
+            std::mem::size_of_val(&DWMWCP_ROUND) as u32,
+        ) {
+            tracing::debug!("DWMWA_WINDOW_CORNER_PREFERENCE unavailable: {e}");
+        }
+
+        let dark: BOOL = TRUE;
+        if let Err(e) = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            &dark as *const _ as *const _,
+            std::mem::size_of_val(&dark) as u32,
+        ) {
+            tracing::debug!("DWMWA_USE_IMMERSIVE_DARK_MODE unavailable: {e}");
+        }
+    }
+
+    if backdrop.is_ok() {
+        let _ = ctx.webview.evaluate_script(PILL_BACKDROP_CSS_JS);
+    }
+}
+
 // Recording pill window — small, transparent, click-through, always-on-top.
 // Linux: the pill is replaced by an AppIndicator tray-icon swap (see
 // `linux_integration.rs`). GNOME Shell doesn't accept in-tray GTK widgets
@@ -201,12 +277,20 @@ pub(super) fn setup_recording_pill(
                 let ctx: DesktopContext = window.new_window(dom, cfg).await;
 
                 // On Windows, realize the window immediately so
-                // set_ignore_cursor_events works.
+                // set_ignore_cursor_events works, apply the Acrylic backdrop
+                // (which also needs a real HWND), then hide it again. Nothing
+                // should show until recording actually starts. CSS opacity
+                // used to be the only thing standing between the user and a
+                // visible window here, which is what left an opaque white box
+                // on screen for the life of the process when transparency
+                // didn't take.
                 #[cfg(target_os = "windows")]
                 {
                     ctx.set_visible(true);
                     let _ = ctx.set_ignore_cursor_events(true);
                     pill_click_through_set.set(true);
+                    apply_windows_pill_backdrop(&ctx);
+                    ctx.set_visible(false);
                 }
 
                 pill_ctx.set(Some(ctx));
@@ -227,10 +311,12 @@ pub(super) fn setup_recording_pill(
                     _ => unreachable!(),
                 };
 
-                // On macOS, realize the window and set click-through on first show.
+                // Windows already realized the window and set click-through at
+                // creation (see the constructor above), so it only needs
+                // showing here. macOS does both lazily, on first show.
+                ctx.set_visible(true);
                 #[cfg(not(target_os = "windows"))]
                 {
-                    ctx.set_visible(true);
                     if !*pill_click_through_set.read() {
                         let _ = ctx.set_ignore_cursor_events(true);
                         pill_click_through_set.set(true);
@@ -242,14 +328,15 @@ pub(super) fn setup_recording_pill(
                     .evaluate_script(&format!("beamerSetState('{js_state}');"));
             } else {
                 let _ = ctx.webview.evaluate_script("beamerSetState('idle');");
-                #[cfg(not(target_os = "windows"))]
-                {
-                    let ctx_clone = ctx.clone();
-                    spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                        ctx_clone.set_visible(false);
-                    });
-                }
+                // Hide on every platform this function runs on (Windows and
+                // macOS): CSS opacity alone used to be Windows's only defence
+                // against a visible idle window, and that defence only works
+                // when WebView2 transparency actually takes.
+                let ctx_clone = ctx.clone();
+                spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    ctx_clone.set_visible(false);
+                });
             }
         }
     });
