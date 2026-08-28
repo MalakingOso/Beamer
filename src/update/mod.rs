@@ -67,6 +67,11 @@ pub fn apply_update_blocking() -> Result<()> {
 /// lockfile on Linux, `ERROR_ALREADY_EXISTS` on the mutex on Windows), log
 /// "Another instance is already running" and exit. The parent then exited too,
 /// so "Restart Now" made Beamer vanish instead of relaunching.
+///
+/// ⚠️ This also `process::exit`s, same as the tray's Quit handler, and skips
+/// the flush tick along with every destructor the same way. Every caller must
+/// flush both note stores first: see `ui::settings::update_card::UpdateCard`,
+/// the only one there is.
 pub fn restart_app() -> ! {
     let exe = std::env::current_exe().expect("Failed to get current exe path");
     crate::release_single_instance();

@@ -218,46 +218,96 @@ impl Config {
         Self::config_dir().join("config.toml")
     }
 
+    /// `Path::exists()` answers `false` both for a path that genuinely is
+    /// not there and for one whose stat call itself errored (a permission
+    /// problem, a transient I/O error). std's own docs say to use
+    /// `try_exists` when that distinction matters. Conflating the two used
+    /// to mean a stat failure on a real `config.toml` fell into the same
+    /// branch as a fresh install: build `Config::default()` and save it,
+    /// overwriting the user's actual settings with defaults because the
+    /// stat, not the file, had a bad moment.
+    ///
+    /// A parse failure is different again: the file is readable, but is not
+    /// valid TOML. That is quarantined the same way the note stores
+    /// quarantine a corrupt `notes.json`, rather than silently discarded.
+    /// Every caller of `load()` on this codebase falls back to
+    /// `Config::default()` on `Err`, and a plain `?` here used to hand that
+    /// default straight back to a caller that would, on the next settings
+    /// change, save it over the still-recoverable original.
     pub fn load() -> Result<Self> {
         let path = Self::config_path();
-        if path.exists() {
-            let contents = std::fs::read_to_string(&path)?;
-            let mut config: Config = toml::from_str(&contents)?;
-            let mut dirty = false;
-
-            // Migrate old preferred_method → backends list
-            if let Some(ref method) = config.injection.preferred_method {
-                if config.injection.backends == default_backends() {
-                    config.injection.backends = match method.as_str() {
-                        "auto" => default_backends(),
-                        other => vec![other.to_string()],
-                    };
-                }
-                config.injection.preferred_method = None;
-                dirty = true;
+        match path.try_exists() {
+            Ok(true) => {}
+            Ok(false) => {
+                let config = Config::default();
+                config.save()?;
+                return Ok(config);
             }
-
-            if migrate_injection_backends(&mut config.injection.backends) {
-                dirty = true;
+            Err(e) => {
+                anyhow::bail!("Could not tell whether {} exists: {e}", path.display());
             }
-
-            if dirty {
-                let _ = config.save();
-            }
-
-            Ok(config)
-        } else {
-            let config = Config::default();
-            config.save()?;
-            Ok(config)
         }
+
+        let contents = std::fs::read_to_string(&path)?;
+        let mut config: Config = match toml::from_str(&contents) {
+            Ok(config) => config,
+            Err(e) => {
+                let backup = path.with_extension("toml.corrupt");
+                tracing::error!(
+                    "{} is not valid TOML ({e}); preserving it as {} and starting fresh",
+                    path.display(),
+                    backup.display()
+                );
+                if let Err(e) = std::fs::rename(&path, &backup) {
+                    tracing::error!("Could not preserve corrupt config: {e}");
+                }
+                let config = Config::default();
+                config.save()?;
+                return Ok(config);
+            }
+        };
+        let mut dirty = false;
+
+        // Migrate old preferred_method → backends list
+        if let Some(ref method) = config.injection.preferred_method {
+            if config.injection.backends == default_backends() {
+                config.injection.backends = match method.as_str() {
+                    "auto" => default_backends(),
+                    other => vec![other.to_string()],
+                };
+            }
+            config.injection.preferred_method = None;
+            dirty = true;
+        }
+
+        if migrate_injection_backends(&mut config.injection.backends) {
+            dirty = true;
+        }
+
+        if dirty {
+            let _ = config.save();
+        }
+
+        Ok(config)
     }
 
+    /// Persist the config, replacing the file atomically.
+    ///
+    /// Temp file plus rename, matching `NoteStore::save` and the other
+    /// stores: a crash or a full disk mid-write leaves the previous
+    /// `config.toml` intact rather than a truncated file `load()` would then
+    /// have to quarantine.
     pub fn save(&self) -> Result<()> {
         let dir = Self::config_dir();
         std::fs::create_dir_all(&dir)?;
         let contents = toml::to_string_pretty(self)?;
-        std::fs::write(Self::config_path(), contents)?;
+        let path = Self::config_path();
+        let tmp = path.with_extension("toml.tmp");
+        std::fs::write(&tmp, contents)?;
+        if let Err(e) = crate::notes::sync_doc::rename_with_retry(&tmp, &path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.into());
+        }
         Ok(())
     }
 }

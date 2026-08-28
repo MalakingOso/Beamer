@@ -20,6 +20,8 @@ use self::recording_card::RecordingCard;
 use self::transcription_card::TranscriptionCard;
 use self::update_card::UpdateCard;
 use crate::config::Config;
+use crate::notes::task_store::TaskStore;
+use crate::notes::NoteStore;
 use crate::ui::status_log::StatusLog;
 use crate::update::UpdateStatus;
 
@@ -29,6 +31,8 @@ pub struct SettingsPageProps {
     pub last_injection: Signal<String>,
     pub status_log: Signal<StatusLog>,
     pub update_status: Signal<UpdateStatus>,
+    pub notes: Signal<NoteStore>,
+    pub tasks: Signal<TaskStore>,
 }
 
 /// Apply a mutation to the config signal, then synchronously persist it.
@@ -152,6 +156,8 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                 on_auto_check_toggle: move |v: bool| {
                     save_config(config, |c| c.appearance.auto_check_updates = v);
                 },
+                notes: props.notes,
+                tasks: props.tasks,
             }
 
             DebugCard {

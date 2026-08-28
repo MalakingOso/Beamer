@@ -300,7 +300,7 @@ pub fn App() -> Element {
                         VocabPage {}
                     },
                     Page::Settings => rsx! {
-                        SettingsPage { config, last_injection, status_log, update_status }
+                        SettingsPage { config, last_injection, status_log, update_status, notes, tasks }
                     },
                 }
             }

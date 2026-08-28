@@ -90,7 +90,7 @@ impl TranscriptionHistory {
 
         let tmp = self.path.with_extension("json.tmp");
         std::fs::write(&tmp, contents)?;
-        if let Err(e) = std::fs::rename(&tmp, &self.path) {
+        if let Err(e) = crate::notes::sync_doc::rename_with_retry(&tmp, &self.path) {
             let _ = std::fs::remove_file(&tmp);
             return Err(e.into());
         }

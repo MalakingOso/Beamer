@@ -14,16 +14,26 @@ impl Vocabulary {
         crate::config::Config::config_dir().join("vocabulary.txt")
     }
 
+    /// `try_exists`, not `exists`: the latter answers `false` both for a
+    /// genuinely missing file and for one whose stat call errored (a
+    /// permission problem, a transient I/O error), and treating the second
+    /// case as the first used to start this store from an empty list. The
+    /// first `add` after that would then save that empty list over the real
+    /// file. A stat failure is surfaced as an error instead, so every caller
+    /// of `load()` (all of which already handle `Err`) leaves the file alone
+    /// rather than mutating a store that was never actually confirmed empty.
     pub fn load() -> Result<Self> {
         let path = Self::path();
-        let terms = if path.exists() {
-            std::fs::read_to_string(&path)?
+        let terms = match path.try_exists() {
+            Ok(true) => std::fs::read_to_string(&path)?
                 .lines()
                 .filter(|l| !l.trim().is_empty())
                 .map(|l| l.trim().to_string())
-                .collect()
-        } else {
-            Vec::new()
+                .collect(),
+            Ok(false) => Vec::new(),
+            Err(e) => {
+                anyhow::bail!("Could not tell whether {} exists: {e}", path.display());
+            }
         };
         Ok(Self { terms, path })
     }

@@ -1,5 +1,7 @@
 use dioxus::prelude::*;
 
+use crate::notes::task_store::TaskStore;
+use crate::notes::NoteStore;
 use crate::ui::components::{Card, Toggle};
 use crate::update::{self, UpdateStatus};
 
@@ -8,11 +10,15 @@ pub struct UpdateCardProps {
     pub update_status: Signal<UpdateStatus>,
     pub auto_check_updates: bool,
     pub on_auto_check_toggle: EventHandler<bool>,
+    pub notes: Signal<NoteStore>,
+    pub tasks: Signal<TaskStore>,
 }
 
 #[component]
 pub fn UpdateCard(props: UpdateCardProps) -> Element {
     let update_status = props.update_status;
+    let mut notes = props.notes;
+    let mut tasks = props.tasks;
 
     rsx! {
         Card { title: "Updates".to_string(),
@@ -71,7 +77,14 @@ pub fn UpdateCard(props: UpdateCardProps) -> Element {
                         button {
                             class: "btn btn-primary",
                             onclick: move |_| {
-                                // spawn_blocking so the closure itself returns ()
+                                // Flush here, on the render thread, while
+                                // `write()` is still valid to call. The
+                                // spawned thread below never returns, so this
+                                // is the only chance any note edit still
+                                // sitting in memory gets to reach disk before
+                                // `restart_app`'s `process::exit` skips the
+                                // flush tick along with everything else.
+                                crate::notes::flush_stores(&mut notes.write(), &mut tasks.write());
                                 std::thread::spawn(|| update::restart_app());
                             },
                             "Restart Now"

@@ -48,6 +48,17 @@ pub struct MachineStore {
     path: PathBuf,
     #[serde(skip)]
     dirty: bool,
+    /// Set when `load_from` could not even tell whether the file exists
+    /// (`try_exists` erroring rather than answering `false`), rather than
+    /// when the file is missing outright. A fresh, empty store is still
+    /// built in memory so the rest of the session has somewhere to put
+    /// window state, but it must never be allowed to overwrite whatever is
+    /// really on disk. Same reasoning as `SyncDoc::read_only`, applied here
+    /// because a stat failure used to read as "the file is not there yet",
+    /// which set `dirty` and let the very next flush save a fresh machine id
+    /// and an empty window map over a real one.
+    #[serde(skip)]
+    read_only: bool,
 }
 
 /// Used only as a transient placeholder while `serde_json` fills in the
@@ -56,7 +67,13 @@ pub struct MachineStore {
 /// default source.
 impl Default for MachineStore {
     fn default() -> Self {
-        Self { machine_id: String::new(), windows: HashMap::new(), path: PathBuf::new(), dirty: false }
+        Self {
+            machine_id: String::new(),
+            windows: HashMap::new(),
+            path: PathBuf::new(),
+            dirty: false,
+            read_only: false,
+        }
     }
 }
 
@@ -76,7 +93,13 @@ impl MachineStore {
     /// A fresh, in-memory store at `path`, seeded with a new machine id. No
     /// disk I/O. The caller decides when (or whether) to persist it.
     pub fn new(path: PathBuf) -> Self {
-        Self { machine_id: Self::generate_machine_id(), windows: HashMap::new(), path, dirty: false }
+        Self {
+            machine_id: Self::generate_machine_id(),
+            windows: HashMap::new(),
+            path,
+            dirty: false,
+            read_only: false,
+        }
     }
 
     /// Load from `path` (always `NoteStore::machine_storage_path()` in
@@ -85,9 +108,26 @@ impl MachineStore {
     /// survives the next flush) when the file is missing, unreadable, or
     /// corrupt. A corrupt file is quarantined rather than overwritten,
     /// matching `NoteStore::load`.
+    ///
+    /// A path that cannot even be *stat*ed is not the same as one that is
+    /// missing: `try_exists()` tells them apart where `exists()` cannot (it
+    /// answers `false` for both, per its own docs), and only the genuinely
+    /// missing case is safe to treat as "nothing here yet, mint one and save
+    /// it". The stat-failure case latches `read_only` instead, so the fresh
+    /// in-memory store this session gets never reaches disk over whatever
+    /// the real file holds.
     pub fn load_from(path: PathBuf) -> Self {
-        if !path.exists() {
-            return Self { dirty: true, ..Self::new(path) };
+        match path.try_exists() {
+            Ok(false) => return Self { dirty: true, ..Self::new(path) },
+            Err(e) => {
+                tracing::error!(
+                    "Could not tell whether machine state at {:?} exists ({}); leaving it \
+                     alone rather than risk overwriting it with a fresh, empty store",
+                    path, e
+                );
+                return Self { dirty: false, read_only: true, ..Self::new(path) };
+            }
+            Ok(true) => {}
         }
         let contents = match std::fs::read_to_string(&path) {
             Ok(c) => c,
@@ -121,7 +161,7 @@ impl MachineStore {
         let contents = serde_json::to_string_pretty(self)?;
         let tmp = self.path.with_extension("json.tmp");
         std::fs::write(&tmp, contents)?;
-        if let Err(e) = std::fs::rename(&tmp, &self.path) {
+        if let Err(e) = super::sync_doc::rename_with_retry(&tmp, &self.path) {
             let _ = std::fs::remove_file(&tmp);
             return Err(e.into());
         }
@@ -129,6 +169,13 @@ impl MachineStore {
     }
 
     pub fn flush_if_dirty(&mut self) -> bool {
+        if self.read_only {
+            // See the field: this store could not even confirm the real
+            // file's absence, so nothing it holds in memory may reach disk,
+            // dirty or not.
+            self.dirty = false;
+            return false;
+        }
         if !self.dirty {
             return false;
         }
