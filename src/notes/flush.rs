@@ -72,8 +72,13 @@ fn run_document_pass(notes: &mut NoteStore, tasks: &mut TaskStore) -> DocPass {
         // The bytes on disk are the only copy of the corpus and we could not
         // read them. Reconciling into a document nobody will ever write is
         // work for nothing, and reporting it as outstanding would make every
-        // tick take a write lock on both signals. The mirrors still get
-        // everything, and the reason is already in the status log.
+        // tick take a write lock on both signals.
+        //
+        // The mirrors are held back too, by each store's own `flush_if_dirty`:
+        // this store came up empty, so rewriting `notes.json` from it would
+        // destroy the second copy as surely as saving would destroy the first.
+        // Nothing written this session survives it. The reason reaches the
+        // status log at startup, and that is all the user gets told.
         return DocPass { merged: false, saved: false, settled: true };
     }
 

@@ -41,8 +41,12 @@ pub const TASKS_KEY: &str = "tasks";
 /// whole, everything inside the loser becomes unreachable, and `reconcile`
 /// then prunes against the winner alone. The winner is deterministic, so the
 /// same side loses on both machines and its board and its mirror both go
-/// empty. Measured before the fix: 24 of 40 runs of
-/// `a_fresh_install_that_has_already_saved_still_sees_an_incoming_corpus`.
+/// empty. Measured against the test as it now stands:
+/// `a_fresh_install_that_has_already_saved_still_sees_an_incoming_corpus`
+/// failed 50 of 50 runs with this constant taken out of `new_document`. An
+/// earlier draft of that test asserted only the incoming corpus, not the
+/// laptop's own note, and failed 24 of 40, which is the coin flip you would
+/// expect when either side losing shows up half the time.
 ///
 /// Starting every document from one shared change gives both root maps the
 /// same object id everywhere, so independent documents write into the *same*
@@ -329,8 +333,9 @@ impl SyncDoc {
     ///
     /// A no-op on a read-only document. The bytes at `path` are the user's
     /// only copy of the corpus and we could not read them; writing what we
-    /// have instead would destroy them. `notes.json` keeps receiving
-    /// everything meanwhile, and the reason is already in the status log.
+    /// have instead would destroy them. `NoteStore::flush_if_dirty` holds
+    /// back the JSON mirror for the same reason, so a session that starts
+    /// this way persists nothing at all beyond machine-local window state.
     pub fn save(&mut self) -> Result<()> {
         if self.path.as_os_str().is_empty() || self.read_only {
             return Ok(());
