@@ -8,7 +8,7 @@
 use dioxus::prelude::*;
 
 use crate::llm::client::{self, ModelInfo};
-use crate::llm::MODEL_CREDIT;
+use crate::llm::{MODEL_CREDIT, MIN_CONNECT_TIMEOUT_MS};
 use crate::ui::components::{Card, Select, Toggle};
 
 #[derive(Clone, PartialEq)]
@@ -24,10 +24,17 @@ pub struct LocalAiCardProps {
     pub enabled: bool,
     pub base_url: String,
     pub request_timeout_ms: u64,
+    /// How long to wait for the connection itself to open, separate from the
+    /// total request timeout above. Read into the shared HTTP client's
+    /// `OnceLock` once, at process start (see `llm::client::init_http_client`),
+    /// so editing it here does not take effect until the next restart. The
+    /// card says so; do not remove that note without re-plumbing the client.
+    pub connect_timeout_ms: u64,
     pub cleanup_model: String,
     pub extract_model: String,
     pub on_enabled_change: EventHandler<bool>,
     pub on_base_url_change: EventHandler<String>,
+    pub on_connect_timeout_ms_change: EventHandler<u64>,
     pub on_cleanup_model_change: EventHandler<String>,
     pub on_extract_model_change: EventHandler<String>,
 }
@@ -86,6 +93,32 @@ pub fn LocalAiCard(props: LocalAiCardProps) -> Element {
                         props.on_base_url_change.call(e.value().to_string());
                     },
                 }
+            }
+
+            div { class: "card-row",
+                span { class: "card-label", "Connect timeout (ms)" }
+                input {
+                    class: "input input-mono",
+                    r#type: "number",
+                    min: "{MIN_CONNECT_TIMEOUT_MS}",
+                    value: "{props.connect_timeout_ms}",
+                    onchange: move |e: Event<FormData>| {
+                        // The `min` attribute above is a hint a browser input
+                        // can ignore or a hand-typed value can bypass; this
+                        // clamp is what actually keeps `0` (and therefore a
+                        // `Duration::ZERO` connect timeout that fails every
+                        // request) out of a value this card can save. It does
+                        // not protect a hand-edited config.toml, which is why
+                        // `LlmConfig::connect_timeout()` clamps again at the
+                        // point of use.
+                        if let Ok(v) = e.value().parse::<u64>() {
+                            props.on_connect_timeout_ms_change.call(v.max(MIN_CONNECT_TIMEOUT_MS));
+                        }
+                    },
+                }
+            }
+            div { class: "llm-note",
+                "Takes effect after a restart \u{2014} the connection pool is built once at startup."
             }
 
             div { class: "card-row",

@@ -36,6 +36,19 @@ fn main() {
     let config = config::Config::load().unwrap_or_default();
     tracing::info!("Config loaded from {:?}", config::Config::config_path());
 
+    // Bakes `connect_timeout_ms` into the shared LLM client's `OnceLock` for
+    // the rest of the process. Must happen before anything reaches
+    // `llm::client::http_client()`, including settings::LocalAiCard's own
+    // startup probe, so this runs as early as the config is available, ahead
+    // of `ui::launch_app()`. See `llm::client::init_http_client` for why the
+    // value can't just be read per-request instead.
+    //
+    // `LlmConfig::connect_timeout()`, not the raw `connect_timeout_ms` field:
+    // it clamps to `llm::MIN_CONNECT_TIMEOUT_MS`, which is the one thing
+    // standing between a hand-edited `config.toml` carrying `0` and a client
+    // built with `Duration::ZERO`, which fails every single connection.
+    llm::client::init_http_client(config.llm.connect_timeout());
+
     if config.appearance.auto_start {
         if let Err(e) = set_auto_start(true) {
             tracing::warn!("Failed to set auto-start: {}", e);

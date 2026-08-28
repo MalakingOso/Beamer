@@ -12,7 +12,7 @@ use crate::ui::settings::hotkey_picker::{CaptureModeRadio, HotkeyPicker};
 ///
 /// Ctrl+Alt+Space, not Ctrl+Super+Space: dictation's `Ctrl+Super` is a strict
 /// prefix of the latter, so pressing Ctrl then Super would start a dictation
-/// recording before Space was ever reached. See `linux_hotkey::matching_binding`.
+/// recording before Space was ever reached. See `hotkey::matching_binding`.
 const DEFAULT_NOTE_HOTKEY: &str = "Ctrl+Alt+Space";
 
 #[derive(Props, Clone, PartialEq)]

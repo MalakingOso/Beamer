@@ -314,10 +314,7 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
                     },
                     title: "{footer.tooltip}",
                     onclick: move |_| {
-                        passes.send(PipelineRequest {
-                            note_id: pass_id.clone(),
-                            stages: footer.stages,
-                        });
+                        passes.send(PipelineRequest::retry(pass_id.clone(), footer.stages));
                     },
                     if footer.icon == FooterIcon::Check {
                         IconCheck { size: 13 }

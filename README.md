@@ -18,9 +18,13 @@ client is not allowed to do for itself: read the focused window's app id, type
 text, and draw the recording pill.
 
 The Windows code paths (UI Automation, `SendInput`, Credential Manager, the
-low-level keyboard hook) are still in the tree but **the Windows target does not
-currently compile** — `src/hotkey/ll_hook.rs` drifted from its callers when the
-note hotkey was added. See `todo.md` for the specific breakage.
+low-level keyboard hook) are in the tree and build:
+`XWIN_ACCEPT_LICENSE=1 cargo xwin check --target x86_64-pc-windows-msvc` is
+clean. That is a cross-compile check from this Linux host, not a run. Nobody
+has yet run Beamer on an actual Windows machine, so runtime behaviour (UI
+Automation, WebView2, the low-level hook, notifications) is unverified. See
+`todo.md` and `agent_docs/dioxus_architecture.md` for what is known and what
+still needs the laptop.
 
 There is no release pipeline yet. Build from source.
 

@@ -43,6 +43,14 @@ use crate::notes::task_store::TaskStore;
 use crate::notes::{blocks, NoteStore, StageState};
 use crate::ui::status_log::{log_status, LogLevel, StatusLog};
 
+/// The sweep's pure decision logic (`sweep_requests`, `should_sweep`,
+/// `RequestOutcome`, `succeeded_from`), split out under `#[path]` for the same
+/// reason `pipeline/tests.rs` is: keeping this file, which is the coroutine
+/// and the stage-running code, under the 500-line limit.
+#[path = "pipeline/sweep.rs"]
+mod sweep;
+use sweep::{should_sweep, succeeded_from, sweep_requests, RequestOutcome};
+
 /// Which stages a request is asking for.
 ///
 /// Separate from "which stages are pending" on purpose: the footer's retry
@@ -61,12 +69,25 @@ pub enum Stages {
 pub struct PipelineRequest {
     pub note_id: String,
     pub stages: Stages,
+    /// Set only by the backlog sweep, see `sweep_requests`. A swept request's
+    /// own completion never triggers another sweep, or a note that keeps
+    /// failing would re-sweep the whole backlog forever every time any other
+    /// note happened to succeed.
+    pub swept: bool,
 }
 
 impl PipelineRequest {
     /// What a freshly dictated note asks for.
     pub fn for_new_note(note_id: impl Into<String>) -> Self {
-        Self { note_id: note_id.into(), stages: Stages::Both }
+        Self { note_id: note_id.into(), stages: Stages::Both, swept: false }
+    }
+
+    /// What the footer's retry affordance asks for, and what a fresh request
+    /// for a note already worked on asks for. Not swept: a user pressing the
+    /// footer is not the backlog sweep, even if it happens to re-request a
+    /// stage that previously failed.
+    pub fn retry(note_id: impl Into<String>, stages: Stages) -> Self {
+        Self { note_id: note_id.into(), stages, swept: false }
     }
 }
 
@@ -98,23 +119,51 @@ pub fn use_pipeline(
                     running.push(run_request(request, config, notes, tasks, status_log));
                 }
                 Some(finished) = running.next(), if !running.is_empty() => {
-                    in_flight.borrow_mut().remove(&finished);
+                    in_flight.borrow_mut().remove(&finished.note_id);
+
+                    // The sweep trigger: a request that just succeeded is
+                    // itself the evidence the server is reachable, so ask it
+                    // to also carry the rest of the failed backlog. This is
+                    // never a timer, see the never-poll warning on
+                    // `client::probe`. It fires only from a request that
+                    // already completed.
+                    if should_sweep(finished.succeeded, finished.swept) {
+                        let backlog = sweep_requests(&notes.peek());
+                        for request in backlog {
+                            // `in_flight` still does its ordinary job here: a
+                            // note that is, say, mid-retry from the footer at
+                            // the exact moment its sweep would fire is left
+                            // alone rather than double-queued.
+                            if in_flight.borrow_mut().insert(request.note_id.clone()) {
+                                running.push(run_request(request, config, notes, tasks, status_log));
+                            }
+                        }
+                    }
                 }
             }
         }
     })
 }
 
-/// Run one note's requested stages. Returns the note id so the caller can clear
-/// it from the in-flight set.
+/// What one finished pass reports back to the coroutine loop: which note it
+/// was, whether it was itself a swept request, and whether it succeeded.
+/// That last fact is what the sweep trigger is built on.
+struct Finished {
+    note_id: String,
+    swept: bool,
+    succeeded: bool,
+}
+
+/// Run one note's requested stages.
 async fn run_request(
     request: PipelineRequest,
     config: Signal<Config>,
     mut notes: Signal<NoteStore>,
     mut tasks: Signal<TaskStore>,
     mut status_log: Signal<StatusLog>,
-) -> String {
+) -> Finished {
     let id = request.note_id.clone();
+    let swept = request.swept;
 
     // One snapshot, taken up front. `peek`, not `read`: this runs outside any
     // reactive scope and has no business subscribing to the config.
@@ -144,35 +193,49 @@ async fn run_request(
         if stage_is_pending(&store, &id, Stage::Extract) {
             store.mark_extract_skipped(&id);
         }
-        return id;
+        // Not `succeeded`: nothing was attempted, so there is no evidence the
+        // server is reachable for the sweep to act on.
+        return Finished { note_id: id, swept, succeeded: false };
     }
+
+    // One `RequestOutcome` per stage this request actually named, whether or
+    // not that stage went on to make a call. Folded by `succeeded_from` at
+    // the end rather than tracked as a running bool, so "disabled" and
+    // "nothing to send" cannot be silently conflated with "responded" the
+    // way the running-bool version was.
+    let mut outcomes: Vec<RequestOutcome> = Vec::with_capacity(2);
 
     if matches!(request.stages, Stages::Both | Stages::CleanOnly) {
         if cleanup_cfg.enabled {
-            run_cleanup(&id, &base_url, &cleanup_cfg, timeout, &mut notes, &mut status_log).await;
+            outcomes
+                .push(run_cleanup(&id, &base_url, &cleanup_cfg, timeout, &mut notes, &mut status_log).await);
         } else {
             let mut store = notes.write();
             if stage_is_pending(&store, &id, Stage::Clean) {
                 store.mark_clean_skipped(&id);
             }
+            outcomes.push(RequestOutcome::NotAttempted);
         }
     }
 
     if matches!(request.stages, Stages::Both | Stages::ExtractOnly) {
         if extract_cfg.enabled {
-            run_extraction(
-                &id, &base_url, &extract_cfg, timeout, &mut notes, &mut tasks, &mut status_log,
-            )
-            .await;
+            outcomes.push(
+                run_extraction(
+                    &id, &base_url, &extract_cfg, timeout, &mut notes, &mut tasks, &mut status_log,
+                )
+                .await,
+            );
         } else {
             let mut store = notes.write();
             if stage_is_pending(&store, &id, Stage::Extract) {
                 store.mark_extract_skipped(&id);
             }
+            outcomes.push(RequestOutcome::NotAttempted);
         }
     }
 
-    id
+    Finished { note_id: id, swept, succeeded: succeeded_from(&outcomes) }
 }
 
 #[derive(Clone, Copy)]
@@ -232,6 +295,11 @@ fn stage_is_pending(store: &NoteStore, id: &str, stage: Stage) -> bool {
 /// Cost is one call per run — measured at 0.225s each, so a note with two
 /// images is ~0.7s. Serial on purpose: concurrency here would buy a fraction of
 /// a second and risk reordering the answers.
+/// Returns the `RequestOutcome` `succeeded_from` folds over. A note that
+/// vanished before any request went out, or that had nothing but blank runs
+/// to send (an attachment-only or whitespace-only body), is `NotAttempted`:
+/// no `cleanup::clean` call was ever made, so nothing was learned about
+/// whether the server is reachable, and it must not be reported as if it had.
 async fn run_cleanup(
     id: &str,
     base_url: &str,
@@ -239,23 +307,29 @@ async fn run_cleanup(
     timeout: Duration,
     notes: &mut Signal<NoteStore>,
     status_log: &mut Signal<StatusLog>,
-) {
+) -> RequestOutcome {
     // The text the request will carry, captured now. Applying the result is a
     // compare-and-swap against exactly this string — see `lifecycle::apply_cleanup`
     // for why body equality is the guard and `modified` is not.
     let Some(sent) = notes.peek().get(id).map(|n| n.body.clone()) else {
-        return;
+        return RequestOutcome::NotAttempted;
     };
 
     let runs: Vec<String> = blocks::text_runs(&sent).into_iter().map(str::to_string).collect();
     let mut cleaned: Vec<Option<String>> = Vec::with_capacity(runs.len());
     let mut changed = false;
+    // Set only inside the loop below, right before a `cleanup::clean` call
+    // actually goes out. A note with no non-blank runs (all attachments, or
+    // all whitespace) never sets this, and its pass must not read as evidence
+    // the server answered anything.
+    let mut contacted_server = false;
 
     for run in &runs {
         if run.trim().is_empty() {
             cleaned.push(None);
             continue;
         }
+        contacted_server = true;
         match cleanup::clean(base_url, cfg, run, timeout).await {
             Ok(Cleaned::Rewritten(text)) => {
                 changed = true;
@@ -266,7 +340,7 @@ async fn run_cleanup(
                 notes.write().mark_clean_failed(id);
                 tracing::warn!("cleanup failed for note {}: {}", id, e);
                 log_status(status_log, LogLevel::Error, format!("Note cleanup failed: {e}"));
-                return;
+                return RequestOutcome::Errored;
             }
         }
     }
@@ -294,8 +368,22 @@ async fn run_cleanup(
             tracing::debug!("note {} disappeared during cleanup", id);
         }
     }
+    // Reached only via `Applied`, `Superseded` or `NoteGone`, all of which
+    // require the loop above to have run to completion without an `Err`. Only
+    // `Responded` when a call actually went out; a zero-call body (nothing
+    // but blank runs) is `NotAttempted` regardless of which of the three this
+    // reaches, since `apply_cleanup` still runs for bookkeeping even then.
+    if contacted_server {
+        RequestOutcome::Responded
+    } else {
+        RequestOutcome::NotAttempted
+    }
 }
 
+/// Returns the `RequestOutcome` `succeeded_from` folds over, same contract as
+/// `run_cleanup`. The blank-text fast path below is `NotAttempted`, not a
+/// success: `extract::extract` is never called, so nothing was learned about
+/// whether the server is reachable.
 async fn run_extraction(
     id: &str,
     base_url: &str,
@@ -304,7 +392,7 @@ async fn run_extraction(
     notes: &mut Signal<NoteStore>,
     tasks: &mut Signal<TaskStore>,
     status_log: &mut Signal<StatusLog>,
-) {
+) -> RequestOutcome {
     // Read the body **after** cleanup, not the text cleanup was given. That
     // covers all three outcomes with one line: a cleaned note is analysed as
     // cleaned, a failed cleanup falls back to `raw` (which `body` still equals),
@@ -315,11 +403,11 @@ async fn run_extraction(
     // one. `extract::is_grounded` checks evidence against the string it was
     // handed, so this also means an evidence span can never contain token text.
     let Some(text) = notes.peek().get(id).map(|n| blocks::plain_text(&n.body)) else {
-        return;
+        return RequestOutcome::NotAttempted;
     };
     if text.trim().is_empty() {
         notes.write().mark_analyzed(id);
-        return;
+        return RequestOutcome::NotAttempted;
     }
 
     // Supplied here rather than read inside `extract`, so the validation gates
@@ -362,38 +450,17 @@ async fn run_extraction(
             // nagging forever on every ordinary note.
             notes.write().mark_analyzed(id);
             tracing::info!("extraction proposed {} task(s) for note {}", count, id);
+            RequestOutcome::Responded
         }
         Err(e) => {
             notes.write().mark_extract_failed(id);
             tracing::warn!("extraction failed for note {}: {}", id, e);
             log_status(status_log, LogLevel::Error, format!("Task extraction failed: {e}"));
+            RequestOutcome::Errored
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_new_note_asks_for_both_stages() {
-        let req = PipelineRequest::for_new_note("abc");
-        assert_eq!(req.note_id, "abc");
-        assert_eq!(
-            req.stages,
-            Stages::Both,
-            "dictation is the one path where both passes run unasked"
-        );
-    }
-
-    #[test]
-    fn requests_are_compared_by_note_and_stages() {
-        // The in-flight set keys on `note_id` alone, deliberately: a second
-        // request for a note already being worked on is a duplicate whatever
-        // stages it names, because both would race on the same CAS.
-        let a = PipelineRequest { note_id: "n".into(), stages: Stages::Both };
-        let b = PipelineRequest { note_id: "n".into(), stages: Stages::CleanOnly };
-        assert_ne!(a, b);
-        assert_eq!(a.note_id, b.note_id);
-    }
-}
+#[path = "pipeline/tests.rs"]
+mod tests;

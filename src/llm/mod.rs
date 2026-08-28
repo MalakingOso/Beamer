@@ -13,6 +13,18 @@ pub mod extract;
 pub mod prompts;
 
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
+/// Floor on `connect_timeout_ms`. `0` parses as a valid `u64` and is exactly
+/// the value that turns `.connect_timeout(Duration::ZERO)` into an instant
+/// failure on every single request, so it has to be caught somewhere that
+/// cannot be skipped. An HTML `min` attribute on the Settings input only
+/// covers the UI path; `config.toml` can be hand-edited straight past it, so
+/// the real guarantee is [`LlmConfig::connect_timeout`] clamping at the one
+/// place the value is actually turned into a `Duration`.
+///
+/// 100ms is not a recommendation, only a value nobody could mistake for "off".
+pub const MIN_CONNECT_TIMEOUT_MS: u64 = 100;
 
 /// Required attribution for the cleanup model.
 ///
@@ -32,8 +44,8 @@ pub const MODEL_CREDIT: &str = r#""S1-mini" by "Superwhisper""#;
 pub struct LlmConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// The only connection setting. Everything else about the server is the
-    /// server's own business.
+    /// Was the only connection setting before `connect_timeout_ms` joined it.
+    /// Everything else about the server is the server's own business.
     #[serde(default = "default_base_url")]
     pub base_url: String,
     /// Deliberately generous. The extraction model can be asleep and waking it
@@ -42,6 +54,21 @@ pub struct LlmConfig {
     /// lost", so erring long costs nothing and erring short costs cleanup.
     #[serde(default = "default_timeout_ms")]
     pub request_timeout_ms: u64,
+    /// How long to wait for TCP (+ TLS, over a tailnet) to open, separate from
+    /// `request_timeout_ms`. A desktop that is asleep on a tailnet should fail
+    /// in seconds, not hang for the whole generous request timeout on every
+    /// single text run.
+    ///
+    /// Measured RTT to a laptop over Tailscale was 13-289ms (mdev 109, WiFi
+    /// power saving), so 5s leaves real margin without turning "asleep" into a
+    /// multi-second stall.
+    ///
+    /// Baked into the shared client's `OnceLock` at process start
+    /// (`llm::client::init_http_client`, called from `main.rs`) rather than
+    /// read per-request, so changing it in Settings takes effect on the next
+    /// restart, not immediately.
+    #[serde(default = "default_connect_timeout_ms")]
+    pub connect_timeout_ms: u64,
     #[serde(default)]
     pub cleanup: CleanupConfig,
     #[serde(default)]
@@ -84,6 +111,7 @@ pub struct ExtractConfig {
 fn default_true() -> bool { true }
 fn default_base_url() -> String { "http://127.0.0.1:8080".into() }
 fn default_timeout_ms() -> u64 { 15_000 }
+fn default_connect_timeout_ms() -> u64 { 5_000 }
 fn default_cleanup_model() -> String { "s1-mini-q4_k_m".into() }
 fn default_extract_model() -> String { "gemma-4-E4B_q4_0-it".into() }
 fn default_styling() -> String { "semi-formal".into() }
@@ -91,12 +119,25 @@ fn default_structure() -> String { "lists".into() }
 fn default_context() -> String { "general".into() }
 fn default_min_confidence() -> f32 { 0.5 }
 
+impl LlmConfig {
+    /// `connect_timeout_ms` as a `Duration`, clamped to
+    /// [`MIN_CONNECT_TIMEOUT_MS`]. This, not the raw field, is what
+    /// `main.rs` must pass to `llm::client::init_http_client`. The field
+    /// alone does not protect against a hand-edited `config.toml` carrying
+    /// `0`, which the field's own `#[serde(default)]` cannot catch because
+    /// `0` is a value, not a missing one.
+    pub fn connect_timeout(&self) -> Duration {
+        Duration::from_millis(self.connect_timeout_ms.max(MIN_CONNECT_TIMEOUT_MS))
+    }
+}
+
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
             enabled: default_true(),
             base_url: default_base_url(),
             request_timeout_ms: default_timeout_ms(),
+            connect_timeout_ms: default_connect_timeout_ms(),
             cleanup: CleanupConfig::default(),
             extract: ExtractConfig::default(),
         }
@@ -151,6 +192,30 @@ mod tests {
              a short timeout turns a slow answer into no answer"
         );
         assert!(!cfg.base_url.ends_with('/'), "the default must not need normalizing");
+    }
+
+    #[test]
+    fn connect_timeout_defaults_short_enough_that_asleep_fails_fast() {
+        let cfg = LlmConfig::default();
+        assert_eq!(cfg.connect_timeout_ms, 5_000);
+        assert!(
+            cfg.connect_timeout_ms < cfg.request_timeout_ms,
+            "connect is the fast fail path; it must stay well under the \
+             generous total timeout or it buys nothing over a tailnet"
+        );
+    }
+
+    #[test]
+    fn an_old_config_missing_connect_timeout_ms_still_loads() {
+        // Mirrors the pre-existing shape of config.toml before this field
+        // existed, and the field must be `#[serde(default)]`, not required.
+        let toml = r#"
+            enabled = true
+            base_url = "http://127.0.0.1:8080"
+            request_timeout_ms = 15000
+        "#;
+        let cfg: LlmConfig = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.connect_timeout_ms, 5_000);
     }
 
     #[test]

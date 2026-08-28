@@ -280,9 +280,7 @@ fn set_clipboard_wl_copy(text: &str) -> Result<()> {
 
 #[cfg(target_os = "windows")]
 fn send_ctrl_v() -> Result<()> {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_TYPE, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
-    };
+    use windows::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT, VIRTUAL_KEY};
 
     let vk_control = VIRTUAL_KEY(0x11);
     let vk_v = VIRTUAL_KEY(0x56);

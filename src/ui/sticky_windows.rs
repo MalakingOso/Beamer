@@ -337,18 +337,20 @@ pub fn setup_sticky_windows(
         // effect must re-run when notes change, never when the config does.
         let all_workspaces = config.peek().notes.all_workspaces;
 
+        // Every slot is reserved here, synchronously, before the loop below
+        // awaits anything. On restart the reconciler opens every note in one
+        // pass; if placement happened after an await, all of them would see
+        // the same empty occupied set and stack in one spot. Reserving each
+        // slot with its position means the next iteration scatters around the
+        // ones already claimed, and it has to happen up front regardless of
+        // how the opens themselves are scheduled below.
+        let mut pending: Vec<(Note, (i32, i32))> = Vec::new();
         for (index, note) in to_open.into_iter().enumerate() {
             let mut reg = registry;
             if reg.peek().contains_key(&note.id) {
                 continue;
             }
 
-            // Position is chosen HERE, synchronously, not inside
-            // `open_note_window`. On restart the reconciler opens every note in
-            // one pass; if placement happened after the await, all of them would
-            // see the same empty occupied set and stack in one spot. Reserving
-            // the slot with its position means each iteration scatters around
-            // the ones before it.
             let mut occupied: Vec<(i32, i32)> = reg.peek().values().map(|s| s.pos).collect();
             occupied.extend_from_slice(&main_window);
             let size = note.size.unwrap_or(DEFAULT_NOTE_SIZE);
@@ -359,13 +361,38 @@ pub fn setup_sticky_windows(
                 note_layout::seed_for(launch, index),
             );
             reg.write().insert(note.id.clone(), StickySlot { pos, ctx: None });
-
-            let window = window.clone();
-            spawn(async move {
-                open_note_window(window, reg, notes, tasks, passes, note, pos, all_workspaces)
-                    .await;
-            });
+            pending.push((note, pos));
         }
+
+        if pending.is_empty() {
+            return;
+        }
+
+        // Opened one at a time, in one spawned task, rather than one `spawn`
+        // per note. On Windows each open drives
+        // `CreateCoreWebView2EnvironmentWithOptions` through
+        // `wait_with_pump`, a nested Win32 message pump on the main thread,
+        // and dioxus drains every pending webview in a single event-loop
+        // iteration. That combination is the shape behind dioxus#2483
+        // ("Opening Multiple Windows on Desktop-Windows Fails 9 out of 10
+        // Times", `WebView2Error(HRESULT(0x8007139F))`). Do not turn this
+        // back into a fan-out of one `spawn` per note.
+        let window = window.clone();
+        spawn(async move {
+            for (note, pos) in pending {
+                open_note_window(
+                    window.clone(),
+                    registry,
+                    notes,
+                    tasks,
+                    passes,
+                    note,
+                    pos,
+                    all_workspaces,
+                )
+                .await;
+            }
+        });
     });
 
     registry

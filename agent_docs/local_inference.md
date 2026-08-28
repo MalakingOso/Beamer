@@ -39,6 +39,17 @@ dictation ──> sink::do_note_capture ──> flush to disk ──> pipeline r
 **Beamer never spawns the server.** It runs standalone (`deploy/llama-beamer.service`)
 and Beamer's entire connection surface is `base_url`. See `agent_docs/config_schema.md`.
 
+`llama-server` has no authentication of its own, so it stays bound to
+`127.0.0.1:8080` even when a client on another machine needs to reach it.
+`tailscale serve --bg 8080` fronts that loopback port with a proxy on the
+tailnet's own HTTPS certificate, so a client on the same tailnet can point
+`base_url` at `https://<host>.<tailnet>.ts.net` with no code change: reqwest
+is built with `native-tls`, and that validates against the OS trust store as
+soon as HTTPS certificates are turned on for the tailnet in the admin
+console. `--host 0.0.0.0` and Tailscale Funnel are both rejected on purpose:
+the first puts an unauthenticated LLM API on every network the host joins,
+the second is the same command pointed at the public internet.
+
 ## ⚠️ `src/llm/**` must contain no crate-rooted paths
 
 There is no `src/lib.rs`, so `src/bin/task_eval.rs` reaches this code by
@@ -325,16 +336,31 @@ the grounding gate, and a click before anything leaves the app. Extend
   is presumptuous, and S1-mini is a *transcript* normalizer — typed prose is
   outside its training distribution.
 
-This is **structural, not a runtime check**. The automatic trigger lives at
-exactly one site, `sink::do_note_capture`, which is reachable only from
-dictation. A typed note has no path to that line. Keep it that way rather than
-adding an `if origin == Dictated` somewhere — the check would be forgettable
-and the topology is not.
+This is **structural, not a runtime check**, for the *first* automatic pass on
+a fresh note. That decision lives at exactly one site, `sink::do_note_capture`,
+which is reachable only from dictation. A typed note has no path to that line.
+Keep it that way rather than adding an `if origin == Dictated` somewhere: the
+check would be forgettable and the topology is not.
 
 Either pass can be re-run from the note's footer, which reads the two stage
 fields rather than the note's origin. Keying it to origin leaves a dead end: a
 dictated note whose cleanup was superseded by an edit has spent its automatic
 trigger and would have no way back.
+
+⚠️ **A second, different kind of automatic trigger exists: the backlog sweep**
+(`pipeline::sweep_requests`, described in full under "Failure handling"
+below). It is not gated by origin at all, and that is deliberate rather than
+an oversight. `sink::do_note_capture` decides *whether a note gets cleaned and
+analysed in the first place*, and that decision does stay origin-gated exactly
+as described above. The sweep does something narrower: it re-sends a request
+that already exists, for a stage that already reached `Failed`, once a later
+success proves the server is reachable again. A typed note that reached
+`Failed` by way of a footer press is swept the same as a dictated one. The
+user already asked once, by pressing retry; the sweep is only carrying that
+same ask forward, not inventing a new automatic pass on text nobody asked to
+have touched. If that distinction ever stops holding, i.e. if the sweep starts
+running passes a note never had a human ask for, the origin gate belongs on
+`sweep_requests` too.
 
 ## The pipeline coroutine
 
@@ -382,11 +408,56 @@ not cleaned yet", never to a lost note.
 | Superseded by an edit | `Pending` | nothing changes; footer still offers it |
 | Network, non-2xx, timeout | `Failed` | `body` stays; footer shows a red label |
 | `llm.enabled = false` | `Skipped` | only if the stage had never run |
+| Backlog sweep, after a later success | `Failed` -> retried | see below |
 
 Extraction is independent: a failed cleanup still runs extraction, against
 `body` — which equals `raw` when cleanup failed, and equals the user's own text
 when it was superseded. `Skipped` never overwrites `Done`, so asking for a pass
 while the feature is off cannot erase the record that it once ran.
+
+### The backlog sweep
+
+Before the remote server (a tailnet host that can be asleep), a `Failed` note
+just sat there until the user noticed the red label and pressed the footer.
+That is fine for a single note failing once, and wrong for a tailnet host that
+was briefly unreachable during a run of several notes: nobody wants to click
+retry five times because their remote machine happened to be asleep when they
+first dictated.
+
+`use_pipeline` (`src/notes/pipeline.rs`) now sweeps the backlog itself: when a
+pass finishes and succeeded, it also re-sends a `PipelineRequest` for every
+non-archived note whose `clean_state` or `extract_state` is `Failed`, asking
+each one only for the stages that actually failed (`sweep_requests`). This
+includes the note that just finished: `in_flight.remove` (`pipeline.rs:122`)
+runs before the sweep (`pipeline.rs:130`), so a `CleanOnly` retry that
+succeeds while `extract_state` is still `Failed` will sweep that same note for
+`ExtractOnly`. Archived notes are excluded on purpose: archiving is the user
+saying they are done with a note, and a `Failed` stage on one is not backlog
+to keep spending requests on. The existing `in_flight` set still dedupes, so
+this cannot storm the server with duplicate requests, and a swept request is
+marked `swept: true` so *its own* completion never triggers a further sweep.
+Without that guard, a note that keeps genuinely failing would re-sweep the
+whole backlog forever, once per success, on every failed note in the app.
+
+**"Succeeded" means a response actually arrived.** A pass can finish
+having contacted the server zero times: the stage was disabled, the whole
+feature was disabled, the note vanished before a request could go out, or
+there was nothing to send (a blank note, an attachment-only body with no text
+runs). None of those prove the server is up, so none of them count. A pass is
+folded to `succeeded` only when at least one of its stages actually got a
+response (`RequestOutcome::Responded` in `src/notes/pipeline/sweep.rs`) and
+none errored; the fold is a pure function, `succeeded_from`, kept separate
+from the stage-running code specifically so this rule is unit-testable
+without a server.
+
+**This does not violate the never-poll rule.** The rule is about a timer: a
+periodic `GET /v1/models` that runs whether or not anyone asked for anything,
+which resets the server's per-model idle clock and pins a model in VRAM with
+no error and no symptom. The sweep has no timer and starts nothing on its
+own. It only ever fires as a direct, synchronous consequence of a request
+that was already going to happen, already succeeded, and already proved the
+server is reachable right now. No new request is sent unless a person's own
+action (dictating, pressing the footer) produced one first.
 
 Errors surface through `StatusLog` as well as `RUST_LOG`.
 

@@ -63,8 +63,17 @@ impl HotkeyConfig {
             }
         }
 
-        let trigger_vk = if has_win && key_str.is_empty() {
-            VK_LWIN
+        // Super/Win/Cmd/Meta alone is representable as VK_LWIN, but paired
+        // with another key it is not: `HotkeyConfig` has no Meta modifier
+        // field, so "Super+N" would otherwise parse as a bare N trigger and
+        // fire on every N keypress. Reject rather than silently drop it,
+        // since callers already treat `None` as unbound.
+        let trigger_vk = if has_win {
+            if key_str.is_empty() {
+                VK_LWIN
+            } else {
+                return None;
+            }
         } else if !key_str.is_empty() {
             key_name_to_vk(&key_str)?
         } else {
@@ -117,11 +126,67 @@ pub fn key_name_to_vk(name: &str) -> Option<u32> {
     }
 }
 
+// ─── Shared binding-matching layer ─────────────────────────────────────────
+//
+// Both platform backends (`linux_hotkey.rs`, `ll_hook.rs`) drive the same two
+// hotkeys, inject and note, through this matching logic. It lives here, not
+// in either backend, so a change to how bindings are compared can't drift
+// between platforms.
+
+/// Beamer has exactly two dictation hotkeys: inject and note.
+pub const MAX_BINDINGS: usize = 2;
+
+/// One configured hotkey and the sink it selects.
+#[derive(Clone)]
+pub struct BindingConfig {
+    pub mode: CaptureMode,
+    pub config: HotkeyConfig,
+}
+
+/// Per-binding press state. Kept separate from `BindingConfig` because the
+/// config is swapped wholesale by `update_configs` while press state must
+/// survive — a user editing the note hotkey mid-hold shouldn't strand the
+/// inject binding in `armed`.
+#[derive(Clone, Copy, Default)]
+pub struct BindingState {
+    pub armed: bool,
+    pub toggled_on: bool,
+    pub trigger_held: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Modifiers {
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+}
+
+pub fn build_bindings(inject: HotkeyConfig, note: Option<HotkeyConfig>) -> Vec<BindingConfig> {
+    let mut v = vec![BindingConfig { mode: CaptureMode::Inject, config: inject }];
+    if let Some(note) = note {
+        v.push(BindingConfig { mode: CaptureMode::Note, config: note });
+    }
+    v
+}
+
+/// Index of the binding whose trigger key and modifier set both match, or
+/// `None`. Modifiers must match *exactly*, so Ctrl+Shift+Space does not fire a
+/// binding registered for plain Ctrl+Space.
+pub fn matching_binding(bindings: &[BindingConfig], vk: u32, mods: Modifiers) -> Option<usize> {
+    bindings.iter().position(|b| {
+        b.config.trigger_vk == vk
+            && b.config.ctrl == mods.ctrl
+            && b.config.alt == mods.alt
+            && b.config.shift == mods.shift
+    })
+}
+
 // ─── Platform dispatch ────────────────────────────────────────────────────────
 
 #[cfg(target_os = "windows")]
 mod ll_hook;
 #[cfg(target_os = "windows")]
+#[allow(unused_imports)]
 pub use ll_hook::{start_ll_hook, HotkeyHandle};
 
 #[cfg(not(target_os = "windows"))]
@@ -131,30 +196,5 @@ mod linux_hotkey;
 pub use linux_hotkey::{start_ll_hook, HotkeyHandle};
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn record_start_carries_its_capture_mode() {
-        let inject = HotkeyEvent::RecordStart(CaptureMode::Inject);
-        let note = HotkeyEvent::RecordStart(CaptureMode::Note);
-
-        assert_ne!(
-            inject, note,
-            "the orchestrator must be able to tell the two hotkeys apart"
-        );
-        match note {
-            HotkeyEvent::RecordStart(mode) => assert_eq!(mode, CaptureMode::Note),
-            HotkeyEvent::RecordStop => panic!("wrong variant"),
-        }
-    }
-
-    #[test]
-    fn capture_mode_defaults_to_inject() {
-        assert_eq!(
-            CaptureMode::default(),
-            CaptureMode::Inject,
-            "an unconfigured note hotkey must never silently divert dictation"
-        );
-    }
-}
+#[path = "tests.rs"]
+mod tests;
