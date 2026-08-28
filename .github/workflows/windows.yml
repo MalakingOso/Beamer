@@ -65,12 +65,42 @@ jobs:
           if ($manifest -notmatch 'PerMonitorV2') { throw "PerMonitorV2 dpiAwareness missing" }
           Write-Host "Manifest carries asInvoker and PerMonitorV2."
 
+      # sync_server is deliberately absent here. It runs on one machine, the
+      # always-on desktop beside llama-server, and every Beamer instance
+      # connects to it. Shipping a Windows copy in the app artifact invites
+      # running two servers against two documents. The Linux job builds it.
       - uses: actions/upload-artifact@v4
         with:
-          name: beamer-windows-x86_64
-          path: |
-            target/release/beamer.exe
-            target/release/sync_server.exe
+          name: beamer-windows-portable
+          path: target/release/beamer.exe
+          if-no-files-found: error
+
+      # The NSIS config in Dioxus.toml has existed since the project started
+      # and had never been built. Beyond convenience, the installer is what
+      # creates a Start Menu shortcut carrying a real AppUserModelID, which is
+      # the only way to stop Windows branding Beamer's toasts "PowerShell".
+      - name: Install dioxus-cli
+        uses: taiki-e/install-action@v2
+        with:
+          tool: dioxus-cli@0.7.0
+
+      - name: Bundle installer
+        run: dx bundle --release --package-types nsis
+
+      - name: Locate the installer
+        id: installer
+        shell: pwsh
+        run: |
+          $nsis = Get-ChildItem -Recurse -Filter "*-setup.exe" |
+                  Sort-Object Length -Descending | Select-Object -First 1
+          if (-not $nsis) { throw "dx bundle produced no NSIS installer" }
+          Write-Host "Installer: $($nsis.FullName) ($([math]::Round($nsis.Length/1MB,1)) MB)"
+          "path=$($nsis.FullName)" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: beamer-windows-installer
+          path: ${{ steps.installer.outputs.path }}
           if-no-files-found: error
 
   linux:
@@ -94,3 +124,14 @@ jobs:
 
       - name: Test
         run: cargo test --locked
+
+      # sync_server belongs on the always-on desktop, so this is the build that
+      # matters for it.
+      - name: Build sync_server
+        run: cargo build --release --locked --bin sync_server
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: beamer-sync-server-linux
+          path: target/release/sync_server
+          if-no-files-found: error
