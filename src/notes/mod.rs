@@ -216,6 +216,12 @@ impl NoteStore {
         self.doc.lock().file_moved()
     }
 
+    /// Whether the document is there but unreadable, so nothing derived from
+    /// it may be written. See `sync_doc::SyncDoc::read_only`.
+    pub fn document_read_only(&self) -> bool {
+        self.doc.lock().is_read_only()
+    }
+
     /// The real logic behind `load()`, taking all four paths explicitly so
     /// it is testable without reaching into the user's real config dir, the
     /// same improvement `TaskStore::load_from` made over the equivalent code
@@ -266,13 +272,20 @@ impl NoteStore {
             store.migrate_legacy_attachments();
             // An entry we could not read is a read failure, not proof the
             // note is gone, so its window state is spared along with its key.
-            let valid: std::collections::HashSet<&str> = store
-                .notes
-                .iter()
-                .map(|n| n.id.as_str())
-                .chain(store.unreadable_notes.iter().map(String::as_str))
-                .collect();
-            store.machine.gc(&valid);
+            //
+            // Skipped outright when the document could not be read at all:
+            // the store came up empty, so every id would look gone and the GC
+            // would wipe `machine.json` on the strength of a file we never
+            // managed to open.
+            if !store.document_read_only() {
+                let valid: std::collections::HashSet<&str> = store
+                    .notes
+                    .iter()
+                    .map(|n| n.id.as_str())
+                    .chain(store.unreadable_notes.iter().map(String::as_str))
+                    .collect();
+                store.machine.gc(&valid);
+            }
             return store;
         }
 
@@ -318,6 +331,19 @@ impl NoteStore {
     /// if one write errors, its store stays dirty for the next tick to retry
     /// while the other still lands.
     pub fn flush_if_dirty(&mut self) -> bool {
+        if self.document_read_only() {
+            // The document is the corpus and we could not read it, so this
+            // store came up empty. Writing `notes.json` from it would destroy
+            // the second copy as surely as saving the document would have
+            // destroyed the first. The flags are cleared rather than left
+            // standing, or the tick would ask again twice a second forever.
+            //
+            // `machine.json` is unrelated to the document and still flushes:
+            // window geometry is machine-local and additive.
+            self.dirty = false;
+            self.doc_dirty = false;
+            return self.machine.flush_if_dirty();
+        }
         let mut wrote = false;
         if self.dirty {
             // The document write belongs to the 500 ms tick, which is the one

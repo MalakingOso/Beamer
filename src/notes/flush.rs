@@ -21,9 +21,12 @@ use super::{doc_notes, doc_tasks, NoteStore};
 struct DocPass {
     /// Something arrived from another machine and both vecs were rebuilt.
     merged: bool,
-    /// The document owes nothing further. True when it was written, and also
-    /// when it is read-only and never will be: either way there is no point
-    /// asking again next tick.
+    /// The document file was rewritten.
+    saved: bool,
+    /// The document owes nothing further. True when it was written, when
+    /// there was nothing to write, and when it is read-only and never will
+    /// be. Anything else and the tick would take a write lock on both signals
+    /// forever.
     settled: bool,
 }
 
@@ -42,7 +45,7 @@ pub fn flush_stores(notes: &mut NoteStore, tasks: &mut TaskStore) -> bool {
         tasks.dirty = true;
     }
 
-    let mut wrote = pass.settled;
+    let mut wrote = pass.saved;
     if notes.flush_if_dirty() {
         wrote = true;
     }
@@ -71,7 +74,7 @@ fn run_document_pass(notes: &mut NoteStore, tasks: &mut TaskStore) -> DocPass {
         // work for nothing, and reporting it as outstanding would make every
         // tick take a write lock on both signals. The mirrors still get
         // everything, and the reason is already in the status log.
-        return DocPass { merged: false, settled: true };
+        return DocPass { merged: false, saved: false, settled: true };
     }
 
     let before = doc.heads();
@@ -114,12 +117,16 @@ fn run_document_pass(notes: &mut NoteStore, tasks: &mut TaskStore) -> DocPass {
         tasks.unreadable_tasks = hydrated.unreadable;
     }
 
-    let mut settled = merged || doc.heads() != before;
-    if settled {
+    // Nothing changed is a settled document, not an outstanding one. A fresh
+    // install with no notes reconciles to zero operations, because the root
+    // maps arrive with the genesis change rather than being created here.
+    let changed = merged || doc.heads() != before;
+    let mut saved = changed;
+    if changed {
         if let Err(e) = doc.save() {
             tracing::error!("Failed to save the sync document: {e}");
-            settled = false;
+            saved = false;
         }
     }
-    DocPass { merged, settled }
+    DocPass { merged, saved, settled: saved || !changed }
 }

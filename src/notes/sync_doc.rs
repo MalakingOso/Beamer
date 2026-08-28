@@ -21,7 +21,7 @@ use std::time::SystemTime;
 
 use anyhow::Result;
 use automerge::transaction::Transactable;
-use automerge::{AutoCommit, ChangeHash, ObjType, ReadDoc, ROOT};
+use automerge::{ActorId, AutoCommit, ChangeHash, ObjType, ReadDoc, ROOT};
 
 use automerge::ObjId;
 
@@ -29,6 +29,65 @@ use automerge::ObjId;
 pub const NOTES_KEY: &str = "notes";
 /// Root key holding the task corpus.
 pub const TASKS_KEY: &str = "tasks";
+
+/// The first change of every Beamer document, byte for byte the same on every
+/// machine.
+///
+/// ⚠️ **Without this, two machines lose one machine's entire corpus on their
+/// first merge, better than half the time.** A document that creates its own
+/// root maps does so with its own random actor, so two independently created
+/// documents hold two different `Map` objects at `ROOT["notes"]`. Merging them
+/// leaves both objects there as a conflict; `ReadDoc::get` returns one winner
+/// whole, everything inside the loser becomes unreachable, and `reconcile`
+/// then prunes against the winner alone. The winner is deterministic, so the
+/// same side loses on both machines and its board and its mirror both go
+/// empty. Measured before the fix: 24 of 40 runs of
+/// `a_fresh_install_that_has_already_saved_still_sees_an_incoming_corpus`.
+///
+/// Starting every document from one shared change gives both root maps the
+/// same object id everywhere, so independent documents write into the *same*
+/// map and merge per note. Regenerate with the ignored
+/// `regenerate_the_genesis_document` test in `sync_tests.rs`;
+/// `the_genesis_document_still_has_the_object_ids_everything_depends_on` fails
+/// loudly if an automerge upgrade changes the encoding.
+const GENESIS: &[u8] = include_bytes!("genesis.automerge");
+
+/// The actor that authored [`GENESIS`]. Sixteen zero bytes, and no machine
+/// ever writes as this actor: every document is re-actored to a random id the
+/// moment it is loaded. Only [`build_genesis`] needs it, so it lives under
+/// the same `cfg`.
+#[cfg(test)]
+pub const GENESIS_ACTOR: [u8; 16] = [0; 16];
+
+/// A document holding nothing but the genesis change, with a fresh random
+/// actor of its own.
+///
+/// Used for every new document and by the test that regenerates the bytes.
+/// `AutoCommit::load` mints a random actor already, and the explicit
+/// `set_actor` here is what keeps the genesis actor from ever writing again.
+pub fn new_document() -> AutoCommit {
+    let mut doc = AutoCommit::load(GENESIS).expect("the genesis document is built into the binary");
+    doc.set_actor(ActorId::random());
+    doc
+}
+
+/// Build the genesis change from scratch. Deterministic: a fixed actor, a
+/// fixed timestamp, and two `put_object` calls in a fixed order.
+///
+/// Only the regeneration test and the test that guards the encoding call
+/// this. Everything else loads [`GENESIS`], because two machines calling this
+/// would still be two separate authorships if the bytes were not shared.
+#[cfg(test)]
+pub fn build_genesis() -> Vec<u8> {
+    use automerge::transaction::CommitOptions;
+
+    let mut doc = AutoCommit::new();
+    doc.set_actor(ActorId::from(&GENESIS_ACTOR[..]));
+    doc.put_object(ROOT, NOTES_KEY, ObjType::Map).expect("root map");
+    doc.put_object(ROOT, TASKS_KEY, ObjType::Map).expect("root map");
+    doc.commit_with(CommitOptions::default().with_time(0).with_message("beamer genesis"));
+    doc.save()
+}
 
 /// The document, plus what is needed to tell our own last write apart from
 /// somebody else's.
@@ -58,7 +117,7 @@ pub struct SyncDoc {
 impl Default for SyncDoc {
     fn default() -> Self {
         Self {
-            doc: AutoCommit::new(),
+            doc: new_document(),
             path: PathBuf::new(),
             last_write: None,
             existed: false,
@@ -117,7 +176,7 @@ impl SyncDoc {
         let mut error = None;
         let mut existed = false;
         let mut read_only = false;
-        let mut doc = AutoCommit::new();
+        let mut doc = new_document();
 
         if path.exists() {
             existed = true;
@@ -292,11 +351,18 @@ impl SyncDoc {
         Ok(())
     }
 
-    /// The map at a root key, created if it is not there yet.
+    /// The map at a root key.
+    ///
+    /// Normally already there, from [`GENESIS`]. The `put_object` fallback is
+    /// for a document written before genesis existed, and it is the thing
+    /// genesis exists to stop happening twice: a map created here carries this
+    /// machine's actor, and two of them at one key conflict rather than merge.
     pub fn root_map(&mut self, key: &str) -> Result<ObjId> {
         if let Some((_, id)) = self.doc.get(ROOT, key)? {
             return Ok(id);
         }
+        tracing::warn!("The sync document has no {key} map; creating one, which will not merge \
+                        with another machine's");
         Ok(self.doc.put_object(ROOT, key, ObjType::Map)?)
     }
 

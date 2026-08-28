@@ -182,6 +182,14 @@ impl TaskStore {
     /// Write only if something changed. Driven by the same interval task that
     /// flushes notes, so a run of `set_done` toggles coalesces into one write.
     pub fn flush_if_dirty(&mut self) -> bool {
+        if self.doc.lock().is_read_only() {
+            // See `NoteStore::flush_if_dirty`. This store came up empty from
+            // a document nobody could read, and rewriting `tasks.json` from
+            // it would take every accept and dismiss the user has ever made.
+            self.dirty = false;
+            self.doc_dirty = false;
+            return false;
+        }
         if !self.dirty {
             return false;
         }

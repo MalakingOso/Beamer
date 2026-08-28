@@ -95,9 +95,10 @@ fn two_documents_edited_offline_merge_into_one_that_holds_both_edits() {
     a.notes.create("the note they both start with".into(), NoteColor::Purple, NoteOrigin::Dictated);
     a.flush();
 
-    // The laptop receives the document and opens it. It never seeds its own
-    // from JSON: two independent seeds mint different automerge object ids
-    // for the same notes and would conflict whole instead of merging.
+    // The laptop receives the document and opens it, rather than seeding its
+    // own from JSON. Since the genesis change both machines start from, an
+    // independent seed merges per note instead of losing a whole root map,
+    // but it still resolves each field by conflict rather than by splice.
     let b = Machine::open(&b_dir);
     drop(b);
     std::fs::copy(a.document(), b_dir.join("notes.automerge")).unwrap();
@@ -407,7 +408,10 @@ fn an_unreadable_document_is_never_written_over() {
     let mut original = Machine::open(&dir);
     original.notes.create("the corpus".into(), NoteColor::Purple, NoteOrigin::Dictated);
     original.flush();
+    let corpus_id = original.notes.notes[0].id.clone();
     let intact = std::fs::read(&doc).unwrap();
+    let mirror = std::fs::read_to_string(dir.join("notes.json")).unwrap();
+    let tasks_mirror = std::fs::read_to_string(dir.join("tasks.json")).ok();
     drop(original);
 
     std::fs::set_permissions(&doc, std::fs::Permissions::from_mode(0o000)).unwrap();
@@ -436,9 +440,17 @@ fn an_unreadable_document_is_never_written_over() {
         !dir.join("notes.automerge.corrupt").exists(),
         "nothing was corrupt, so nothing should have been renamed aside"
     );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("notes.json")).unwrap(),
+        mirror,
+        "the mirror is the second copy of the same corpus, and rewriting it from a store \
+         that came up empty would destroy that one too"
+    );
+    assert_eq!(std::fs::read_to_string(dir.join("tasks.json")).ok(), tasks_mirror);
     assert!(
-        dir.join("notes.json").exists(),
-        "the mirror still receives everything while the document is off limits"
+        std::fs::read_to_string(dir.join("machine.json")).unwrap().contains(&corpus_id),
+        "every note looked gone, but only because nothing could be read. The GC must not \
+         wipe machine.json on the strength of a file we never opened"
     );
 }
 
@@ -505,4 +517,145 @@ fn a_note_deleted_on_one_machine_stays_deleted_after_the_merge() {
          upgrade that resurrected the note would otherwise pass every other test"
     );
     assert!(a.notes.get(&keep).is_some(), "the delete must take nothing else with it");
+}
+
+#[test]
+fn a_fresh_install_that_has_already_saved_still_sees_an_incoming_corpus() {
+    let a_dir = temp_dir("genesis_fresh_a");
+    let b_dir = temp_dir("genesis_fresh_b");
+
+    let mut a = Machine::open(&a_dir);
+    a.notes.create("the whole corpus".into(), NoteColor::Purple, NoteOrigin::Dictated);
+    a.notes.create("and a second note".into(), NoteColor::Teal, NoteOrigin::Dictated);
+    a.flush();
+
+    // A fresh install with nothing to seed. It writes one note of its own and
+    // therefore a document of its own, which is all it takes: before the
+    // genesis change existed, that document created its own root maps, and
+    // the merge below then dropped whichever side's maps lost the coin flip.
+    let mut b = Machine::open(&b_dir);
+    b.notes.create("made on the laptop first".into(), NoteColor::Amber, NoteOrigin::Dictated);
+    b.flush();
+    assert!(b.document().exists());
+
+    // The corpus arrives from the other machine.
+    std::fs::copy(a.document(), b.document()).unwrap();
+    b.flush();
+
+    let bodies = note_bodies(&b.notes);
+    assert!(bodies.iter().any(|x| x == "the whole corpus"), "incoming corpus lost: {bodies:?}");
+    assert!(bodies.iter().any(|x| x == "and a second note"), "incoming corpus lost: {bodies:?}");
+    assert!(bodies.iter().any(|x| x == "made on the laptop first"), "own note lost: {bodies:?}");
+}
+
+#[test]
+fn a_fresh_install_with_no_notes_asks_for_nothing() {
+    let dir = temp_dir("genesis_idle");
+    let mut m = Machine::open(&dir);
+
+    assert!(m.notes.needs_flush(), "the seed path leaves the document owed a write");
+    m.flush();
+    assert!(
+        !m.document().exists(),
+        "there are no notes and the root maps come from genesis, so there is nothing to save"
+    );
+    assert!(
+        !m.notes.needs_flush() && !m.tasks.needs_flush(),
+        "an empty document is settled, not outstanding. Reporting it as owed would make \
+         every tick take a write lock on both signals and re-render every open sticky"
+    );
+}
+
+#[test]
+fn the_genesis_document_still_has_the_object_ids_everything_depends_on() {
+    use automerge::{ReadDoc, ROOT};
+
+    let doc = super::sync_doc::new_document();
+    let notes = doc.get(ROOT, super::sync_doc::NOTES_KEY).unwrap().expect("a notes map").1;
+    let tasks = doc.get(ROOT, super::sync_doc::TASKS_KEY).unwrap().expect("a tasks map").1;
+
+    // `<counter>@<actor>`, the actor being the sixteen zero bytes nothing ever
+    // writes as. Two machines agreeing on these two strings is the whole
+    // reason their corpora merge instead of one replacing the other.
+    let genesis_actor = "0".repeat(32);
+    assert_eq!(notes.to_string(), format!("1@{genesis_actor}"));
+    assert_eq!(tasks.to_string(), format!("2@{genesis_actor}"));
+
+    assert_eq!(
+        super::sync_doc::build_genesis(),
+        include_bytes!("genesis.automerge"),
+        "the committed genesis bytes no longer match what this automerge version builds. \
+         Rerun `cargo test notes::sync_tests::regenerate_the_genesis_document -- --ignored` \
+         and check that the object ids above are unchanged, because a document already on \
+         disk carries the old ones"
+    );
+}
+
+#[test]
+fn two_documents_seeded_independently_both_keep_their_notes_after_a_merge() {
+    let a_dir = temp_dir("genesis_indep_a");
+    let b_dir = temp_dir("genesis_indep_b");
+
+    let mut a = Machine::open(&a_dir);
+    let mut b = Machine::open(&b_dir);
+    a.notes.create("only on callisto".into(), NoteColor::Purple, NoteOrigin::Dictated);
+    b.notes.create("only on the laptop".into(), NoteColor::Rose, NoteOrigin::Dictated);
+    a.flush();
+    b.flush();
+
+    carry_document(&b, &a);
+    a.flush();
+
+    let bodies = note_bodies(&a.notes);
+    assert!(bodies.iter().any(|x| x == "only on callisto"), "callisto's own note: {bodies:?}");
+    assert!(bodies.iter().any(|x| x == "only on the laptop"), "the laptop's note: {bodies:?}");
+}
+
+/// Rewrite `src/notes/genesis.automerge`. Ignored, because it is a code
+/// generator rather than a check: run it by hand after an automerge upgrade
+/// that `the_genesis_document_still_has_the_object_ids_everything_depends_on`
+/// has failed on, then commit the new bytes.
+///
+/// ```text
+/// cargo test notes::sync_tests::regenerate_the_genesis_document -- --ignored
+/// ```
+#[test]
+#[ignore]
+fn regenerate_the_genesis_document() {
+    let bytes = super::sync_doc::build_genesis();
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/notes/genesis.automerge");
+    std::fs::write(&path, &bytes).unwrap();
+    eprintln!("wrote {} bytes to {}", bytes.len(), path.display());
+}
+
+/// The portable half of `an_unreadable_document_is_never_written_over`.
+///
+/// A directory where the document should be makes `fs::read` fail on every
+/// platform, so the latch is exercised on Windows too. It cannot check that
+/// the document's bytes survive, because a directory would refuse the rename
+/// anyway, so it checks the two files that would otherwise go: the mirror,
+/// rewritten from a store that came up empty, and `machine.json`, wiped by a
+/// GC whose valid set is empty for the same reason.
+#[test]
+fn an_unreadable_document_does_not_take_the_other_files_with_it() {
+    let dir = temp_dir("unreadable_portable");
+
+    let mut original = Machine::open(&dir);
+    let id = original.notes.create("the corpus".into(), NoteColor::Purple, NoteOrigin::Dictated);
+    original.flush();
+    let mirror = std::fs::read_to_string(dir.join("notes.json")).unwrap();
+    drop(original);
+
+    std::fs::remove_file(dir.join("notes.automerge")).unwrap();
+    std::fs::create_dir(dir.join("notes.automerge")).unwrap();
+
+    let mut blocked = Machine::open(&dir);
+    assert!(blocked.notes.document_read_only(), "a path that cannot be read latches the store");
+    assert!(blocked.notes.load_error.is_some());
+    blocked.notes.create("written while blind".into(), NoteColor::Teal, NoteOrigin::Dictated);
+    blocked.flush();
+    blocked.flush();
+
+    assert_eq!(std::fs::read_to_string(dir.join("notes.json")).unwrap(), mirror);
+    assert!(std::fs::read_to_string(dir.join("machine.json")).unwrap().contains(&id));
 }
