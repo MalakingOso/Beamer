@@ -153,7 +153,7 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
                 // re-render this note and the whole board for a size that is
                 // already recorded. `set_size`'s own guard is not enough: by
                 // then the write lock has already been taken.
-                if notes.peek().get(&id).is_some_and(|n| n.size == Some(logical)) {
+                if notes.peek().size(&id) == Some(logical) {
                     return;
                 }
                 notes.write().set_size(&id, logical);

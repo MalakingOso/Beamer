@@ -20,10 +20,12 @@ pub mod ics;
 /// Public so `StageOutcome` is nameable from the model-pass callers; a private
 /// module would make it a private-in-public return type.
 pub mod lifecycle;
+mod machine;
 mod model;
 pub mod pipeline;
 pub mod task;
 pub mod task_store;
+pub use machine::MachineStore;
 pub use model::{Attachment, Note, NoteColor, NoteOrigin, StageState};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -33,25 +35,88 @@ pub struct NoteStore {
     pub(crate) path: PathBuf,
     #[serde(skip)]
     pub(crate) dirty: bool,
+    /// Window geometry and openness, keyed by note id. Never synced. See
+    /// `machine::MachineStore`'s module doc for why it lives apart from
+    /// `Note`. Skipped here too: `machine.json` is its own file, written
+    /// through its own atomic save.
+    #[serde(skip)]
+    machine: MachineStore,
 }
 
 impl Default for NoteStore {
     fn default() -> Self {
-        Self { notes: Vec::new(), path: Self::storage_path(), dirty: false }
+        Self {
+            notes: Vec::new(),
+            path: Self::storage_path(),
+            dirty: false,
+            machine: MachineStore::new(Self::machine_storage_path()),
+        }
     }
 }
 
 /// Monotonic within a process run, so two notes created in the same
 /// millisecond still get distinct ids without pulling in a uuid dependency.
 ///
-/// `pub(crate)` so attachment ids come from the same scheme — dropping three
-/// files at once must not give two of them the same id, which a timestamp
-/// alone would.
+/// `pub(crate)` so attachment and task ids come from the same scheme.
+/// Dropping three files at once, or extracting several tasks from one note,
+/// must not give two of them the same id, which a timestamp alone would.
+///
+/// Note ids are minted by `next_note_id` instead, not this function. See its
+/// doc comment for why they need a machine component and this scheme does not.
 pub(crate) fn next_id() -> String {
+    let (millis, n) = raw_id_parts();
+    format!("{millis:x}-{n:04x}")
+}
+
+/// Same counter as `next_id`, plus a per-install suffix.
+///
+/// `Task.note_id` is a foreign key into the note id namespace. Two machines
+/// creating their first note in the same millisecond both produce
+/// `…-0000` under the plain scheme above, and a sync merge would then have
+/// two machines' unrelated notes sharing one id, silently reparenting one
+/// machine's tasks onto the other's note. The suffix is `machine`, this
+/// install's `MachineStore::machine_id`, so that collision cannot happen
+/// even at the same millisecond and the same counter value.
+///
+/// Sharing `raw_id_parts`' counter with `next_id` is deliberate, for the same
+/// reason `next_id`'s doc comment gives for attachments: two notes created in
+/// the same millisecond must not draw the same counter value either.
+pub(crate) fn next_note_id(machine: &str) -> String {
+    let (millis, n) = raw_id_parts();
+    format_note_id(millis, n, machine)
+}
+
+fn raw_id_parts() -> (i64, u32) {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     let millis = Local::now().timestamp_millis();
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{millis:x}-{n:04x}")
+    (millis, n)
+}
+
+fn format_note_id(millis: i64, counter: u32, machine: &str) -> String {
+    format!("{millis:x}-{counter:04x}-{machine}")
+}
+
+/// Fields `notes.json` carried before this task, read independently of
+/// `Note`'s own (now narrower) shape so a legacy file's window state can be
+/// lifted into `machine.json` without losing anything. `Note` has no
+/// `deny_unknown_fields`, so its own parse just ignores these keys; this is
+/// the parse that catches them on the way past.
+#[derive(Deserialize)]
+struct LegacyWindowFields {
+    id: String,
+    #[serde(default)]
+    pos: Option<(i32, i32)>,
+    #[serde(default)]
+    size: Option<(u32, u32)>,
+    #[serde(default)]
+    open: bool,
+}
+
+#[derive(Deserialize)]
+struct LegacyNotesFile {
+    #[serde(default)]
+    notes: Vec<LegacyWindowFields>,
 }
 
 impl NoteStore {
@@ -59,22 +124,42 @@ impl NoteStore {
         Config::config_dir().join("notes.json")
     }
 
+    fn machine_storage_path() -> PathBuf {
+        Config::config_dir().join("machine.json")
+    }
+
     pub fn load() -> Self {
-        let path = Self::storage_path();
+        Self::load_from(Self::storage_path(), Self::machine_storage_path())
+    }
+
+    /// The real logic behind `load()`, taking both paths explicitly so it is
+    /// testable without reaching into the user's real config dir, the same
+    /// improvement `TaskStore::load_from` made over the equivalent code here
+    /// before it existed.
+    fn load_from(path: PathBuf, machine_path: PathBuf) -> Self {
+        let mut machine = MachineStore::load_from(machine_path);
+
         if !path.exists() {
-            return Self::default();
+            machine.gc(&std::collections::HashSet::new());
+            return Self { notes: Vec::new(), path, dirty: false, machine };
         }
         let contents = match std::fs::read_to_string(&path) {
             Ok(c) => c,
             Err(e) => {
                 tracing::error!("Could not read notes at {:?}: {}", path, e);
-                return Self::default();
+                machine.gc(&std::collections::HashSet::new());
+                return Self { notes: Vec::new(), path, dirty: false, machine };
             }
         };
         match serde_json::from_str::<NoteStore>(&contents) {
             Ok(mut store) => {
                 store.path = path;
                 store.dirty = false;
+                store.machine = machine;
+                store.migrate_legacy_window_state(&contents);
+                let valid: std::collections::HashSet<&str> =
+                    store.notes.iter().map(|n| n.id.as_str()).collect();
+                store.machine.gc(&valid);
                 store
             }
             Err(e) => {
@@ -86,8 +171,23 @@ impl NoteStore {
                     path, e, backup
                 );
                 let _ = std::fs::rename(&path, &backup);
-                Self::default()
+                machine.gc(&std::collections::HashSet::new());
+                Self { notes: Vec::new(), path, dirty: false, machine }
             }
+        }
+    }
+
+    /// Lift `pos`/`size`/`open` off a `notes.json` written before this task,
+    /// into `machine.json`. A no-op once every note in the file has been
+    /// migrated once (`MachineStore::migrate_legacy` will not overwrite an
+    /// existing entry), and a no-op forever after the first save, since
+    /// `Note` stops serializing these fields at all.
+    fn migrate_legacy_window_state(&mut self, contents: &str) {
+        let Ok(legacy) = serde_json::from_str::<LegacyNotesFile>(contents) else {
+            return;
+        };
+        for note in legacy.notes {
+            self.machine.migrate_legacy(&note.id, note.pos, note.size, note.open);
         }
     }
 
@@ -117,30 +217,39 @@ impl NoteStore {
 
     /// Write only if something changed since the last flush. Driven by a
     /// ~500ms interval task so per-keystroke edits coalesce into one write.
+    ///
+    /// Covers both files. `notes.json` and `machine.json` fail independently:
+    /// if one write errors, its store stays dirty for the next tick to retry
+    /// while the other still lands.
     pub fn flush_if_dirty(&mut self) -> bool {
-        if !self.dirty {
-            return false;
+        let mut wrote = false;
+        if self.dirty {
+            match self.save() {
+                Ok(()) => {
+                    self.dirty = false;
+                    wrote = true;
+                }
+                Err(e) => tracing::error!("Failed to save notes: {}", e),
+            }
         }
-        if let Err(e) = self.save() {
-            tracing::error!("Failed to save notes: {}", e);
-            // Stay dirty so the next tick retries rather than losing the edit.
-            return false;
+        if self.machine.flush_if_dirty() {
+            wrote = true;
         }
-        self.dirty = false;
-        true
+        wrote
     }
 
-    /// Whether an edit is pending a write. Read before taking a `write()` lock
-    /// on the signal so an idle tick does not notify every subscriber.
+    /// Whether either store has an edit pending a write. Read before taking a
+    /// `write()` lock on the signal so an idle tick does not notify every
+    /// subscriber.
     pub fn is_dirty(&self) -> bool {
-        self.dirty
+        self.dirty || self.machine.is_dirty()
     }
 
     /// `origin` is passed explicitly rather than defaulted: it is corpus
     /// provenance, and a silent default is exactly what corrupts a corpus.
     pub fn create(&mut self, raw: String, color: NoteColor, origin: NoteOrigin) -> String {
         let now = Local::now().to_rfc3339();
-        let id = next_id();
+        let id = next_note_id(&self.machine.machine_id);
         self.notes.push(Note {
             id: id.clone(),
             created: now.clone(),
@@ -151,18 +260,52 @@ impl NoteStore {
             extract_state: StageState::Pending,
             origin,
             color,
-            pos: None,
-            size: None,
             attachments: Vec::new(),
-            open: true,
             archived: false,
         });
+        self.machine.set_open(&id, true);
         self.dirty = true;
         id
     }
 
     pub fn get(&self, id: &str) -> Option<&Note> {
         self.notes.iter().find(|n| n.id == id)
+    }
+
+    /// Where this note's window last sat, in logical coordinates. Machine-
+    /// local, see `machine::MachineStore`.
+    ///
+    /// No production caller yet, matching `Note::pos`'s status before this
+    /// task. Nothing captures a window's actual position on Linux, and
+    /// nothing should (see `set_pos`). Kept, and given a `NoteStore` method
+    /// alongside `MachineStore`'s, because it is part of the persisted schema
+    /// and `with_position` is honoured natively on Windows. A future
+    /// placement feature reads it from here.
+    #[allow(dead_code)]
+    pub fn pos(&self, id: &str) -> Option<(i32, i32)> {
+        self.machine.pos(id)
+    }
+
+    /// This note's window size, in logical pixels. Machine-local.
+    pub fn size(&self, id: &str) -> Option<(u32, u32)> {
+        self.machine.size(id)
+    }
+
+    /// Whether this note's window is showing. Machine-local.
+    pub fn is_open(&self, id: &str) -> bool {
+        self.machine.is_open(id)
+    }
+
+    /// Record where this note's window last sat. A machine write like
+    /// `set_size`: does not bump `modified`, does not dirty `notes.json`.
+    ///
+    /// No production caller yet. See `pos`'s doc comment.
+    #[allow(dead_code)]
+    pub fn set_pos(&mut self, id: &str, pos: (i32, i32)) {
+        if self.get(id).is_none() {
+            return;
+        }
+        self.machine.set_pos(id, pos);
     }
 
     fn touch(&mut self, id: &str) -> Option<&mut Note> {
@@ -188,26 +331,24 @@ impl NoteStore {
 
     /// Record whether a note's window is showing.
     ///
-    /// A no-op when the value is unchanged. The guard matters because the
-    /// callers are event handlers, not user edits: without it a redundant
-    /// `set_open` would bump `modified`, dirty the store and trigger a write
-    /// for a fact that did not change.
+    /// Machine-local and does **not** call `touch()`. It used to. Bumping
+    /// `modified` here is what made `open` dangerous under any last-write-
+    /// wins sync merge. Closing a sticky on one machine would make that note
+    /// look newer than a real edit made on another and win a merge it had no
+    /// business winning. `MachineStore::set_open` still no-ops when the value
+    /// is unchanged, so a redundant call from an event handler costs nothing.
     pub fn set_open(&mut self, id: &str, open: bool) {
-        if self.get(id).is_none_or(|n| n.open == open) {
+        if self.get(id).is_none() {
             return;
         }
-        if let Some(note) = self.touch(id) {
-            note.open = open;
-            self.dirty = true;
-        }
+        self.machine.set_open(id, open);
     }
 
     pub fn archive(&mut self, id: &str) {
-        if let Some(note) = self.touch(id) {
-            note.archived = true;
-            note.open = false;
-            self.dirty = true;
-        }
+        let Some(note) = self.touch(id) else { return };
+        note.archived = true;
+        self.dirty = true;
+        self.machine.set_open(id, false);
     }
 
     /// Return an archived note to the active list.
@@ -269,207 +410,5 @@ impl NoteStore {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// PID-scoped temp path so concurrent test runs don't race and nothing
-    /// touches the real user config dir. Mirrors `ui::history`'s tests.
-    fn temp_store(tag: &str) -> NoteStore {
-        let dir = std::env::temp_dir().join(format!("beamer_notes_test_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(format!("{tag}.json"));
-        let _ = std::fs::remove_file(&path);
-        NoteStore { notes: Vec::new(), path, dirty: false }
-    }
-
-    #[test]
-    fn create_returns_a_unique_id_and_seeds_body_from_raw() {
-        let mut store = temp_store("create");
-        let a = store.create("call the vet".into(), NoteColor::Purple, NoteOrigin::Dictated);
-        let b = store.create("send invoice".into(), NoteColor::Teal, NoteOrigin::Dictated);
-
-        assert_ne!(a, b, "ids must be unique even within the same millisecond");
-
-        let note = store.get(&a).unwrap();
-        assert_eq!(note.raw, "call the vet");
-        assert_eq!(note.body, "call the vet", "body starts as a copy of raw");
-        assert_eq!(note.clean_state, StageState::Pending);
-        assert_eq!(note.extract_state, StageState::Pending);
-        assert_eq!(
-            note.origin, NoteOrigin::Dictated,
-            "a note created by the capture path is dictated; mislabelling it corrupts provenance"
-        );
-        assert!(!note.archived);
-    }
-
-    #[test]
-    fn set_body_never_touches_raw() {
-        let mut store = temp_store("raw_immutable");
-        let id = store.create("um so call the vet".into(), NoteColor::Purple, NoteOrigin::Dictated);
-
-        store.set_body(&id, "Call the vet.".into());
-
-        let note = store.get(&id).unwrap();
-        assert_eq!(note.body, "Call the vet.");
-        assert_eq!(
-            note.raw, "um so call the vet",
-            "raw is the only record of what was actually said and must survive cleanup"
-        );
-    }
-
-    #[test]
-    fn archive_hides_from_active_but_retains_the_note() {
-        let mut store = temp_store("archive");
-        let keep = store.create("keep".into(), NoteColor::Purple, NoteOrigin::Dictated);
-        let gone = store.create("archive me".into(), NoteColor::Rose, NoteOrigin::Dictated);
-
-        store.archive(&gone);
-
-        let active: Vec<&str> = store.active().iter().map(|n| n.raw.as_str()).collect();
-        assert_eq!(active, vec!["keep"]);
-        assert!(store.get(&gone).is_some(), "archiving must not delete");
-        let _ = keep;
-    }
-
-    #[test]
-    fn flush_writes_only_when_dirty() {
-        let mut store = temp_store("debounce");
-        store.create("something".into(), NoteColor::Purple, NoteOrigin::Dictated);
-
-        assert!(store.flush_if_dirty(), "a pending change must be written");
-        assert!(store.path.exists());
-        assert!(
-            !store.flush_if_dirty(),
-            "a second flush with no intervening edit must not rewrite the file"
-        );
-    }
-
-    #[test]
-    fn save_leaves_no_temp_file_behind() {
-        let mut store = temp_store("atomic");
-        store.create("hello".into(), NoteColor::Purple, NoteOrigin::Dictated);
-        store.flush_if_dirty();
-
-        assert!(!store.path.with_extension("json.tmp").exists());
-    }
-
-    #[test]
-    fn notes_round_trip_through_disk() {
-        let mut store = temp_store("roundtrip");
-        let id = store.create("first".into(), NoteColor::Amber, NoteOrigin::Dictated);
-        // Set directly rather than through a setter. `pos` and `size` are part
-        // of the persisted schema and must survive a round trip, but nothing
-        // writes `pos` from window geometry any more and nothing should — see
-        // the field's doc comment. A `set_geometry` that did exist would be a
-        // trap for the next person, so it was removed with the scope change
-        // that dropped position persistence.
-        {
-            let note = store.notes.iter_mut().find(|n| n.id == id).unwrap();
-            note.pos = Some((100, 200));
-            note.size = Some((320, 240));
-        }
-        store.flush_if_dirty();
-
-        let text = std::fs::read_to_string(&store.path).unwrap();
-        let reloaded: NoteStore = serde_json::from_str(&text).unwrap();
-
-        assert_eq!(reloaded.notes.len(), 1);
-        assert_eq!(reloaded.notes[0].pos, Some((100, 200)));
-        assert_eq!(reloaded.notes[0].size, Some((320, 240)));
-        assert_eq!(reloaded.notes[0].color, NoteColor::Amber);
-    }
-
-    #[test]
-    fn set_open_with_an_unchanged_value_does_not_dirty_the_store() {
-        let mut store = temp_store("set_open");
-        let id = store.create("hello".into(), NoteColor::Purple, NoteOrigin::Dictated);
-        store.flush_if_dirty();
-        let before = store.get(&id).unwrap().modified.clone();
-
-        store.set_open(&id, true); // already true
-
-        assert!(
-            !store.is_dirty(),
-            "a redundant set_open must not schedule a write — the callers are \
-             window events, not user edits"
-        );
-        assert_eq!(
-            store.get(&id).unwrap().modified,
-            before,
-            "nothing changed, so the modified timestamp must not move"
-        );
-
-        store.set_open(&id, false);
-        assert!(store.is_dirty(), "a real change must still be persisted");
-        assert!(!store.get(&id).unwrap().open);
-    }
-
-    #[test]
-    fn set_open_on_a_missing_note_is_a_no_op() {
-        let mut store = temp_store("set_open_missing");
-        store.set_open("nope", true);
-        assert!(!store.is_dirty());
-    }
-
-    #[test]
-    fn search_matches_what_was_said_not_just_what_is_displayed() {
-        let mut store = temp_store("search");
-        let id = store.create("um so call the vet about biscuit".into(), NoteColor::Purple, NoteOrigin::Dictated);
-        // A cleanup pass rewrote the body and dropped the filler word.
-        store.set_body(&id, "Call the vet about Biscuit.".into());
-
-        assert_eq!(store.search("biscuit").len(), 1, "matching must be case-insensitive");
-        assert_eq!(store.search("VET").len(), 1);
-        assert_eq!(
-            store.search("um so").len(),
-            1,
-            "raw is searched too — cleanup can remove the very words you remember saying"
-        );
-        assert!(store.search("mortgage").is_empty());
-    }
-
-    #[test]
-    fn an_empty_query_returns_every_active_note() {
-        let mut store = temp_store("search_empty");
-        store.create("one".into(), NoteColor::Purple, NoteOrigin::Dictated);
-        let gone = store.create("two".into(), NoteColor::Teal, NoteOrigin::Dictated);
-        store.archive(&gone);
-
-        assert_eq!(store.search("").len(), 1);
-        assert_eq!(store.search("   ").len(), 1, "whitespace is not a query");
-        assert!(
-            store.search("two").is_empty(),
-            "archived notes must stay out of the active board"
-        );
-    }
-
-    #[test]
-    fn restore_returns_an_archived_note_to_the_board() {
-        let mut store = temp_store("restore");
-        let id = store.create("bring me back".into(), NoteColor::Rose, NoteOrigin::Dictated);
-        store.archive(&id);
-        assert_eq!(store.archived().len(), 1);
-        assert!(store.active().is_empty());
-
-        store.restore(&id);
-
-        assert!(store.active().iter().any(|n| n.id == id));
-        assert!(store.archived().is_empty());
-        assert!(
-            !store.get(&id).unwrap().open,
-            "restoring puts a note back on the board; it does not pop a window open"
-        );
-    }
-
-    #[test]
-    fn restoring_a_note_that_is_not_archived_does_nothing() {
-        let mut store = temp_store("restore_noop");
-        let id = store.create("already here".into(), NoteColor::Purple, NoteOrigin::Dictated);
-        store.flush_if_dirty();
-
-        store.restore(&id);
-
-        assert!(!store.is_dirty(), "a no-op restore must not schedule a write");
-    }
-
-}
+#[path = "tests.rs"]
+mod tests;

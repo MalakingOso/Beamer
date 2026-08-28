@@ -116,8 +116,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("beamer_notes_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(format!("lifecycle_{tag}.json"));
+        let machine_path = dir.join(format!("lifecycle_{tag}.machine.json"));
         let _ = std::fs::remove_file(&path);
-        NoteStore { notes: Vec::new(), path, dirty: false }
+        let _ = std::fs::remove_file(&machine_path);
+        NoteStore { notes: Vec::new(), path, dirty: false, machine: crate::notes::MachineStore::new(machine_path) }
     }
 
     #[test]

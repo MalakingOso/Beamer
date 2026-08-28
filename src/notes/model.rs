@@ -168,24 +168,6 @@ pub struct Note {
     #[serde(default)]
     pub origin: NoteOrigin,
     pub color: NoteColor,
-    /// **Not read on Linux, and never written from window geometry.**
-    ///
-    /// Position memory was dropped by decision: `ui::note_layout` chooses where
-    /// each note goes, freshly, every launch. The field stays because it is
-    /// part of the persisted schema and `with_position` is still honoured
-    /// natively on Windows — but nothing captures a window's actual position
-    /// into it, and nothing should. Reading a window's own position back is
-    /// exactly what Wayland does not permit, and the API that appears to do it
-    /// returns `Ok((0, 0))` rather than an error.
-    pub pos: Option<(i32, i32)>,
-    /// Logical pixels, captured from the window's own resize events.
-    ///
-    /// Unlike `pos`, size **is** legitimately observable on Wayland — it
-    /// arrives in the configure event rather than having to be guessed — so it
-    /// is captured and restored. This does not reopen the deliberate
-    /// scatter-on-launch decision: a note still appears somewhere new each
-    /// launch, now at the size you left it.
-    pub size: Option<(u32, u32)>,
     /// Attachments referenced by `[[beamer:<id>]]` tokens in `body`, in no
     /// particular order — `body` owns reading order.
     ///
@@ -194,7 +176,6 @@ pub struct Note {
     /// stage fields above; keep it that way.
     #[serde(default)]
     pub attachments: Vec<Attachment>,
-    pub open: bool,
     pub archived: bool,
 }
 

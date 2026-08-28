@@ -7,17 +7,21 @@
 //!
 //! Two conventions carried over from `lifecycle.rs`, both load-bearing:
 //!
-//! - **`set_size` is a machine write.** It does not bump `modified`. `Resized`
-//!   fires per frame during a grip drag and once again when the window maps;
-//!   bumping the timestamp would churn the board's newest-first ordering on
-//!   every mouse move.
-//! - **A missing id is a no-op that does not dirty the store**, matching
+//! - **`set_size` is machine-local.** It lives in `machine.json`, not
+//!   `notes.json`, and does not bump `modified` or dirty the note store.
+//!   `Resized` fires per frame during a grip drag and once again when the
+//!   window maps; bumping the timestamp would churn the board's newest-first
+//!   ordering on every mouse move, and writing it into the synced note would
+//!   turn a resize into sync churn with no content change.
+//! - **A missing id is a no-op that does not dirty either store**, matching
 //!   `set_open`'s guard, so an event arriving after a note was deleted costs
 //!   nothing.
 //!
-//! ⚠️ **Nothing here ever touches a file on disk.** `Attachment` paths point at
-//! the user's own photos and documents; Beamer records where they are and
-//! nothing more. Deleting a note, or an attachment, removes a *record*.
+//! ⚠️ **Nothing here ever touches a file on disk directly.** `add_attachment`
+//! and friends go through the usual `NoteStore::save`/`MachineStore::save`
+//! paths. `Attachment` paths point at the user's own photos and documents;
+//! Beamer records where they are and nothing more. Deleting a note, or an
+//! attachment, removes a *record*.
 
 use super::blocks;
 use super::model::Attachment;
@@ -34,15 +38,14 @@ impl NoteStore {
     /// A no-op when the size is unchanged, for the same reason `set_open`
     /// guards: the caller is a window event, not a user edit, and any
     /// `notes.write()` at all notifies every subscriber — re-rendering the note
-    /// and the board once per frame of a resize drag.
+    /// and the board once per frame of a resize drag. The unchanged-value guard
+    /// itself lives in `MachineStore::set_size`; this method's own guard is
+    /// only for a missing note.
     pub fn set_size(&mut self, id: &str, size: (u32, u32)) {
-        if self.get(id).is_none_or(|n| n.size == Some(size)) {
+        if self.get(id).is_none() {
             return;
         }
-        if let Some(note) = Self::find_mut(&mut self.notes, id) {
-            note.size = Some(size);
-            self.dirty = true;
-        }
+        self.machine.set_size(id, size);
     }
 
     /// Attach something and append its token to the body.
@@ -136,6 +139,10 @@ impl NoteStore {
             return false;
         }
         self.dirty = true;
+        // Drop its window state too rather than waiting for the next load's
+        // GC pass. No reason to let a deleted note's entry sit in
+        // machine.json until the next restart.
+        self.machine.remove(id);
         true
     }
 
@@ -158,8 +165,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("beamer_notes_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(format!("edit_{tag}.json"));
+        let machine_path = dir.join(format!("edit_{tag}.machine.json"));
         let _ = std::fs::remove_file(&path);
-        NoteStore { notes: Vec::new(), path, dirty: false }
+        let _ = std::fs::remove_file(&machine_path);
+        NoteStore { notes: Vec::new(), path, dirty: false, machine: crate::notes::MachineStore::new(machine_path) }
     }
 
     fn image(id: &str, path: &str) -> Attachment {
@@ -174,7 +183,7 @@ mod tests {
 
         store.set_size(&id, (400, 320));
 
-        assert_eq!(store.get(&id).unwrap().size, Some((400, 320)));
+        assert_eq!(store.size(&id), Some((400, 320)));
         assert_eq!(
             store.get(&id).unwrap().modified,
             before,
@@ -334,6 +343,19 @@ mod tests {
         let mut store = temp_store("delete_missing");
         assert!(!store.delete("nope"));
         assert!(!store.is_dirty());
+    }
+
+    #[test]
+    fn delete_also_drops_the_note_s_machine_local_window_state() {
+        let mut store = temp_store("delete_gc");
+        let id = store.create("gone".into(), NoteColor::Purple, NoteOrigin::Dictated);
+        store.set_size(&id, (400, 300));
+        assert!(store.is_open(&id));
+
+        store.delete(&id);
+
+        assert_eq!(store.size(&id), None, "a deleted note's window state must not linger");
+        assert!(!store.is_open(&id));
     }
 
     #[test]

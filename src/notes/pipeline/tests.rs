@@ -25,16 +25,18 @@ fn note(id: &str, clean: StageState, extract: StageState) -> Note {
         extract_state: extract,
         origin: NoteOrigin::default(),
         color: NoteColor::Purple,
-        pos: None,
-        size: None,
         attachments: Vec::new(),
-        open: true,
         archived: false,
     }
 }
 
 fn store(notes: Vec<Note>) -> NoteStore {
-    NoteStore { notes, path: std::path::PathBuf::new(), dirty: false }
+    NoteStore {
+        notes,
+        path: std::path::PathBuf::new(),
+        dirty: false,
+        machine: crate::notes::MachineStore::new(std::path::PathBuf::new()),
+    }
 }
 
 /// Marks a note archived, for the one test that needs it. A free function

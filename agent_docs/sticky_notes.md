@@ -36,8 +36,10 @@ and a silent default is exactly what corrupts a corpus.
 ⚠️ **Only `notes/lifecycle.rs` writes a stage result.** Its methods are machine
 writes: none bump `modified` (that is user-facing ordering) and none touch
 `raw`. `apply_cleanup` is a compare-and-swap on the body captured at send time —
-**body equality, not a timestamp**, because `set_color` and `set_open` bump
-`modified` for things that are not edits.
+**body equality, not a timestamp**, because `set_color` bumps `modified` for
+something that is not an edit. `set_open` used to be in that list too; since
+Task 7 it is machine-local and does not touch `modified` at all. See
+"Machine-local state" below.
 
 ## Read this first: extensions do not hot-reload on Wayland
 
@@ -215,7 +217,9 @@ Two things to get right, both otherwise silent:
   notifies every subscriber whether or not the value changed — so an unguarded
   call re-renders the note and the whole board for a size already recorded.
   `set_size`'s own guard is not enough: by then the lock is taken. `set_size`
-  also does **not** bump `modified`, or the board would reshuffle per mouse move.
+  also does **not** bump `modified`, or the board would reshuffle per mouse
+  move. Since Task 7 it writes to `machine.json`, not `notes.json`, so a
+  resize does not dirty the synced note at all. See "Machine-local state" below.
 
 This does **not** reopen the decision below. Notes still appear somewhere new
 each launch, now at the size you left them — and `place_next` already takes a
@@ -250,9 +254,10 @@ This removed the hardest and least reliable part of the original design —
 reading a window's own geometry back, and the close-race that came with it —
 and replaced it with a pure function that has real tests.
 
-`Note::pos` still exists because it is part of the persisted schema and
-`with_position` is honoured natively on Windows. **Nothing writes it from window
-geometry, and nothing should.**
+`pos` still exists (`NoteStore::pos`/`set_pos`, backed by `MachineStore`) because
+it is part of the persisted schema and `with_position` is honoured natively on
+Windows. **Nothing writes it from window geometry, and nothing should.** It moved
+off `Note` itself in Task 7; see "Machine-local state" below.
 
 Placement lives in two halves:
 
@@ -413,11 +418,61 @@ Three write paths, because one is not enough:
 Dropping, pasting and attaching also flush **inline**, on the same argument as
 capture: a photo you just dropped must not be lost to a crash before the tick.
 
+### Machine-local state: pos, size, open (Task 7)
+
+`pos`, `size` and `open` are no longer fields on `Note`. They moved to
+`machine.json` beside `notes.json`, keyed by note id, owned by
+`notes::machine::MachineStore` and reachable through the same `NoteStore`
+method names call sites already used (`set_size`, `set_open`, and the new
+getters `size`, `is_open`, `pos`/`set_pos`).
+
+The reason is sync, even though sync itself is a later phase. `pos`, `size` and
+`open` describe a window on one desktop, not a note's content, and `set_open`
+used to call `touch()`, rewriting `modified` for something that is not an
+edit. Under any last-write-wins merge, closing a sticky on one machine would
+make that note look newer than a real body edit made on another and win a
+merge it had no business winning. `set_open` no longer touches `modified` at
+all, and `notes.json` no longer carries these fields, so there is nothing left
+for a merge to see. `set_size` had the milder version of the same problem
+(resizing generated sync churn with no content change) and is fixed the same
+way.
+
+`machine.json` also carries `machine_id`: four hex digits, generated once per
+install and never synced. Note ids need it because `next_id`'s old shape,
+`{millis:x}-{counter:04x}`, restarts its counter at 0 every process, so the
+first note of every session was `…-0000`. Two machines creating their first
+note in the same millisecond would produce the same id, and `Task.note_id` is
+a foreign key into that namespace, so a collision would silently reparent tasks
+onto the wrong note. `notes::next_note_id` mints note ids as
+`{millis:x}-{counter:04x}-{machine}` instead; `next_id` (no machine suffix)
+still mints attachment and task ids, whose namespaces don't cross machines the
+same way. Existing ids keep working, they are opaque strings and nothing
+parses them, on either side.
+
+Migration is one-way and, once it has run, self-erasing. `NoteStore::load`
+re-parses `notes.json` a second time into a throwaway shape that still
+declares `pos`/`size`/`open`, lifts any it finds into `machine.json` (an id
+`machine.json` already has an entry for is left alone, so a second migration
+pass can't clobber real window state with a stale file's numbers), and GCs
+`machine.json` down to the ids `notes.json` actually has. `Note`'s own
+deserialize just ignores the stale keys (no `deny_unknown_fields`, and that
+has to stay true), so after the first save `notes.json` stops carrying them at
+all and the second parse finds nothing to lift.
+
+Nothing in `ui::sticky_windows` reads `note.pos` even on Windows: it never did.
+`with_position` there is built from the placement `note_layout::place_next`
+computes fresh each launch, not from a stored value. `pos`/`set_pos` exist on
+`NoteStore` and `MachineStore` because the field is part of the persisted
+schema (see "Notes are placed, not remembered" above), not because anything
+calls them today. Both carry `#[allow(dead_code)]` for exactly that reason,
+the same status the field had before this task.
+
 ### Delete, which the store did not have until now
 
 `archive` remains the everyday, non-destructive gesture. `NoteStore::delete`
 removes a note outright and is offered **only on an archived card, behind a
-two-step confirm** on the board.
+two-step confirm** on the board. It also drops the note's `machine.json` entry
+immediately, rather than waiting for the GC pass on the next load.
 
 Deleting a note also drops its rows from `TaskStore` (`delete_for_note`). That
 is a **deliberate exception** to "dismissed rows are retained as labelled
