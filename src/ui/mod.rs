@@ -35,11 +35,18 @@ use dioxus::prelude::*;
 /// APIs (`PCWSTR`) need.
 ///
 /// Split out so it can be unit-tested without a Windows target: it is plain
-/// `char` encoding with no OS call in it, so the correctness that matters here
-/// (the terminator is present and is the only zero the encoder didn't already
-/// produce) is checkable on any host. Gated on `test` as well as `windows`,
-/// since its only non-test caller is windows-only and a plain Linux
-/// `cargo check` has no test harness to keep it alive otherwise.
+/// `char` encoding with no OS call in it, so the terminator-appending logic
+/// is checkable on any host. Gated on `test` as well as `windows`, since its
+/// only non-test caller is windows-only and a plain Linux `cargo check` has
+/// no test harness to keep it alive otherwise.
+///
+/// Does not guard against an embedded NUL in `s`: if one is present,
+/// `PCWSTR` (which reads up to the first zero code unit) truncates there
+/// silently, same as any Win32 wide-string API. A truncated target can only
+/// fail to open or open a shorter path; it cannot make `ShellExecuteW` run
+/// something else, so this is an ordinary correctness limitation rather than
+/// a reopening of the injection risk `open_external` exists to close. Note
+/// content is not expected to carry a NUL.
 #[cfg(any(target_os = "windows", test))]
 fn to_wide_null(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -47,10 +54,17 @@ fn to_wide_null(s: &str) -> Vec<u16> {
 
 /// Hand a URL or a file path to whatever the desktop has registered for it.
 ///
-/// Spawned and detached — the exit status is not waited on, because the opener
-/// keeps running for as long as the browser or calendar does. A failure to
-/// spawn is logged and nothing else: the user clicked a link, and freezing the
-/// note over it would be worse than the link not opening.
+/// Detached either way, but the two platforms detach differently. On Linux
+/// this is `Command::spawn`: the child process is left to run and its exit
+/// status is never collected, because the opener keeps running for as long
+/// as the browser or calendar does, and a failure to spawn is logged and
+/// nothing else. On Windows there is no child process to leave running:
+/// `ShellExecuteW` runs on a detached OS thread so the caller isn't blocked
+/// on it, but that thread does check the call's own outcome (the `<= 32`
+/// pseudo-handle test below) and logs a failure there, which the Linux path
+/// has no equivalent of. Either way, a failure to open does nothing more
+/// than log: the user clicked a link, and freezing the note over it would be
+/// worse than the link not opening.
 ///
 /// Not `webbrowser::open`, even though dioxus-desktop already depends on it:
 /// this also has to open a local `.ics`, which is a file association rather
@@ -132,10 +146,14 @@ mod open_external_tests {
     }
 
     #[test]
-    fn preserves_characters_needing_shell_escaping() {
-        // The whole point of ShellExecuteW over `cmd /C start`: a target
-        // carrying shell metacharacters must survive intact, not get split at
-        // them.
+    fn a_target_containing_an_ampersand_encodes_unmodified() {
+        // Pins the UTF-16 encoding step only: `to_wide_null` does not parse,
+        // escape, or otherwise treat `&` specially, so a target carrying one
+        // comes out as plain code units plus the terminator, same as any
+        // other string. This does not, and cannot, test "never reaches a
+        // shell parser" - that property comes from calling `ShellExecuteW`
+        // instead of `cmd`, which is structural to `open_external` and not
+        // unit-testable on a Linux host.
         let target = "https://example.com/?a=1&b=2";
         let wide = to_wide_null(target);
         let decoded: Vec<u16> = target.encode_utf16().collect();

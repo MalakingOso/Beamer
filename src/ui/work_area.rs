@@ -106,6 +106,21 @@ fn union_work_area(monitors: &[Rect]) -> Rect {
 /// (one display, or several matched ones) round-trips correctly; a mismatched
 /// pair does not. Modelling Windows' real per-monitor virtual-desktop layout
 /// is a bigger change than this fix, and is not attempted here.
+///
+/// ⚠️ A second, separate gap on multi-monitor Windows: `windows_work_rect`
+/// gets a real taskbar-aware rectangle per monitor, but those rectangles are
+/// still bounding-boxed together by the shared `union_work_area`. If one
+/// monitor is taller than another, or only one of them carries the taskbar,
+/// the union's bottom edge extends past the taskbar-bearing monitor's
+/// `rcWork` bottom, so a note can still be placed under the taskbar on that
+/// monitor. The single-monitor case is genuinely fixed; a mismatched pair is
+/// not. The Windows fallback rectangle (`fallback_work_area`, used when no
+/// monitor enumerates at all) has the same gap for the same reason: it is a
+/// full-resolution guess with no taskbar excluded. Fixing this would mean
+/// placing notes per-monitor-rectangle instead of against one shared union,
+/// which is the restructure `union_work_area`'s own doc comment already
+/// argues against taking on for a gap the compositor (or, here, the user's
+/// own repositioning) already handles reasonably.
 pub fn work_area(window: &DesktopContext) -> Rect {
     let mut logical: Vec<Rect> = Vec::new();
     for monitor in window.available_monitors() {
