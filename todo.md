@@ -10,32 +10,21 @@
 
 ## Sticky Notes — omissions
 
-- [ ] **The Windows target does not compile, in more places than were written
-      down.** Beyond `src/hotkey/ll_hook.rs:137,143` constructing
-      `HotkeyEvent::RecordStart` with no payload, the module's whole signature
-      drifted from its callers: `start_ll_hook` takes 2 params where `app.rs`
-      passes 3, and `update_config` was never renamed to `update_configs`. More
-      fundamentally `ll_hook.rs` has **no data structure that could hold a
-      second binding** — no `BindingConfig`, no `Modifiers`, no
-      `matching_binding`, just four loose bools. The Windows note hotkey is not
-      unwired, it is unrepresentable. Roughly 100-150 mostly-mechanical lines,
-      best fixed by hoisting the platform-neutral matching logic out of
-      `linux_hotkey.rs:20-72` into `hotkey/mod.rs` so both platforms share
-      tested code. Verifiable without a Windows machine:
-      `cargo check --target x86_64-pc-windows-msvc` works here (target and deps
-      installed, `check` never links).
-- [ ] **`HotkeyConfig` cannot express Super as a modifier.** It has `ctrl`,
-      `alt` and `shift` fields but no Super/Meta, and `parse()` only maps Super
-      to a trigger key (`VK_LWIN`) when nothing else follows it. So
-      `"Super+N"` parses to `ctrl/alt/shift = false, trigger_vk = 'N'` — the
-      Super is silently dropped and the binding fires on a **bare N keypress**.
-      Verified, not inferred. Any `Super+<key>` chord is a footgun; today the
-      only safe Super chords are those where Super *is* the trigger
-      (`Ctrl+Super`, `Ctrl+Alt+Super`). Either add a `win` field to
-      `HotkeyConfig` and thread it through `Modifiers`/`matching_binding`, or
-      reject `Super+<key>` in `parse()` so it returns `None` instead of a
-      dangerous binding. The second is the smaller fix and fails safe —
-      `note_hotkey_config()` already treats `None` as "unbound".
+- [x] **The Windows target does not compile, in more places than were written
+      down.** Done: the platform-neutral matching layer (`MAX_BINDINGS`,
+      `BindingConfig`, `BindingState`, `Modifiers`, `build_bindings`,
+      `matching_binding`) was hoisted from `linux_hotkey.rs` into
+      `hotkey/mod.rs`, and `ll_hook.rs` was rewritten around it:
+      `start_ll_hook`/`update_configs` now match `app.rs`'s calls, both
+      `RecordStart` sites carry a `CaptureMode`, and the Windows hook can
+      represent a second (note) binding. `cargo xwin check --target
+      x86_64-pc-windows-msvc` is clean; runtime behaviour is still unverified
+      on real Windows hardware.
+- [x] **`HotkeyConfig` cannot express Super as a modifier.** Done: `parse()`
+      now returns `None` when a Super/Win/Cmd/Meta token appears together
+      with another key, instead of silently dropping Super and keying off the
+      bare trigger. `Super` alone as the trigger still works (`Ctrl+Super`,
+      `Ctrl+Alt+Super`), pinned by `super_alone_still_parses_as_the_trigger`.
 - [x] `src/notes/task_store.rs` is **474 lines against the 500 limit**. Done:
       tests moved to `src/notes/task_store/tests.rs`, reached by `#[path]`.
       `prompts.rs`, `extract.rs` and `tasks_page.rs` were split the same way

@@ -12,7 +12,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_SYSKEYUP,
 };
 
-use crate::hotkey::{HotkeyConfig, HotkeyEvent, VK_LWIN};
+use crate::hotkey::{
+    build_bindings, matching_binding, BindingConfig, BindingState, HotkeyConfig, HotkeyEvent,
+    Modifiers, VK_LWIN, MAX_BINDINGS,
+};
 
 const VK_LCONTROL: u32 = 0xA2;
 const VK_RCONTROL: u32 = 0xA3;
@@ -33,15 +36,13 @@ fn modifier_physically_held(left_vk: i32, right_vk: i32) -> bool {
 }
 
 struct HookState {
-    config: Arc<Mutex<HotkeyConfig>>,
+    bindings: Arc<Mutex<Vec<BindingConfig>>>,
     reset_flag: Arc<AtomicBool>,
     tx: UnboundedSender<HotkeyEvent>,
     ctrl_held: bool,
     alt_held: bool,
     shift_held: bool,
-    armed: bool,
-    toggled_on: bool,
-    trigger_held: bool,
+    binding_state: [BindingState; MAX_BINDINGS],
     win_consumed: bool,
 }
 
@@ -71,11 +72,10 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
             None => return false,
         };
 
-        // Reset state if config was updated
+        // Reset state if config was updated. Clears every binding, not just
+        // one, since a config edit resets both.
         if state.reset_flag.swap(false, Ordering::Relaxed) {
-            state.armed = false;
-            state.toggled_on = false;
-            state.trigger_held = false;
+            state.binding_state = [BindingState::default(); MAX_BINDINGS];
             state.win_consumed = false;
         }
 
@@ -87,61 +87,57 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
             _ => {}
         }
 
-        // Read config (brief lock)
-        let config = state.config.lock().unwrap();
-        let trigger_vk = config.trigger_vk;
-        let is_win_trigger = trigger_vk == VK_LWIN;
-        let is_toggle = config.is_toggle;
-        let req_ctrl = config.ctrl;
-        let req_alt = config.alt;
-        let req_shift = config.shift;
-        drop(config);
+        // Either side of Win triggers a VK_LWIN-configured binding, same as
+        // linux_hotkey.rs normalises KEY_RIGHTMETA to VK_LWIN.
+        let is_win_key_event = vk == VK_LWIN || vk == VK_RWIN;
+        let norm_vk = if is_win_key_event { VK_LWIN } else { vk };
 
-        // Check if this event is for the trigger key
-        let is_trigger = if is_win_trigger {
-            vk == VK_LWIN || vk == VK_RWIN
-        } else {
-            vk == trigger_vk
-        };
+        let bindings = state.bindings.lock().unwrap();
 
-        if !is_trigger {
+        // Not a trigger key for any configured binding: nothing to do beyond
+        // the modifier tracking above.
+        if !bindings.iter().any(|b| b.config.trigger_vk == norm_vk) {
             return false;
         }
 
         if is_press {
-            if !state.trigger_held {
+            let already_held = bindings
+                .iter()
+                .enumerate()
+                .any(|(i, b)| b.config.trigger_vk == norm_vk && state.binding_state[i].trigger_held);
+
+            if !already_held {
                 // First press: check physical modifier state to avoid stale
-                // tracked state (key-up events can be dropped by Windows)
-                let ctrl_down = modifier_physically_held(
-                    VK_LCONTROL as i32, VK_RCONTROL as i32,
-                );
-                let alt_down = modifier_physically_held(
-                    VK_LMENU as i32, VK_RMENU as i32,
-                );
-                let shift_down = modifier_physically_held(
-                    VK_LSHIFT as i32, VK_RSHIFT as i32,
-                );
-                let mods_match = ctrl_down == req_ctrl
-                    && alt_down == req_alt
-                    && shift_down == req_shift;
-                // Sync tracked state to match reality
+                // tracked state (key-up events can be dropped by Windows).
+                // Done once per press, before matching.
+                let ctrl_down =
+                    modifier_physically_held(VK_LCONTROL as i32, VK_RCONTROL as i32);
+                let alt_down = modifier_physically_held(VK_LMENU as i32, VK_RMENU as i32);
+                let shift_down =
+                    modifier_physically_held(VK_LSHIFT as i32, VK_RSHIFT as i32);
                 state.ctrl_held = ctrl_down;
                 state.alt_held = alt_down;
                 state.shift_held = shift_down;
 
-                if mods_match {
-                    state.trigger_held = true;
+                let mods = Modifiers { ctrl: ctrl_down, alt: alt_down, shift: shift_down };
+                if let Some(idx) = matching_binding(&bindings, norm_vk, mods) {
+                    let binding = &bindings[idx];
+                    let mode = binding.mode;
+                    let is_toggle = binding.config.is_toggle;
+                    let is_win_trigger = binding.config.trigger_vk == VK_LWIN;
+                    let bs = &mut state.binding_state[idx];
+                    bs.trigger_held = true;
                     if is_toggle {
-                        state.toggled_on = !state.toggled_on;
-                        let event = if state.toggled_on {
-                            HotkeyEvent::RecordStart
+                        bs.toggled_on = !bs.toggled_on;
+                        let event = if bs.toggled_on {
+                            HotkeyEvent::RecordStart(mode)
                         } else {
                             HotkeyEvent::RecordStop
                         };
                         let _ = state.tx.send(event);
                     } else {
-                        let _ = state.tx.send(HotkeyEvent::RecordStart);
-                        state.armed = true;
+                        let _ = state.tx.send(HotkeyEvent::RecordStart(mode));
+                        bs.armed = true;
                     }
                     if is_win_trigger {
                         state.win_consumed = true;
@@ -149,19 +145,25 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
                 }
             }
             // Suppress all Win key presses while consumed (including repeats)
-            if is_win_trigger && state.win_consumed {
+            if is_win_key_event && state.win_consumed {
                 return true;
             }
         } else {
-            // Release
-            if state.trigger_held {
-                state.trigger_held = false;
-                if state.armed {
+            // Release: the modifiers may already be up by the time the
+            // trigger key is released, so re-matching the chord would find
+            // nothing and strand the binding in `armed`. Find the binding
+            // that is actually held instead.
+            let idx = (0..bindings.len())
+                .find(|&i| bindings[i].config.trigger_vk == norm_vk && state.binding_state[i].trigger_held);
+            if let Some(idx) = idx {
+                let bs = &mut state.binding_state[idx];
+                bs.trigger_held = false;
+                if bs.armed {
                     let _ = state.tx.send(HotkeyEvent::RecordStop);
-                    state.armed = false;
+                    bs.armed = false;
                 }
             }
-            if is_win_trigger && state.win_consumed {
+            if is_win_key_event && state.win_consumed {
                 state.win_consumed = false;
                 return true;
             }
@@ -180,14 +182,14 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
 /// Handle for updating the LL keyboard hook configuration from the main thread.
 #[derive(Clone)]
 pub struct HotkeyHandle {
-    config: Arc<Mutex<HotkeyConfig>>,
+    bindings: Arc<Mutex<Vec<BindingConfig>>>,
     reset_flag: Arc<AtomicBool>,
     thread_id: u32,
 }
 
 impl HotkeyHandle {
-    pub fn update_config(&self, new_config: HotkeyConfig) {
-        *self.config.lock().unwrap() = new_config;
+    pub fn update_configs(&self, inject: HotkeyConfig, note: Option<HotkeyConfig>) {
+        *self.bindings.lock().unwrap() = build_bindings(inject, note);
         self.reset_flag.store(true, Ordering::Relaxed);
     }
 }
@@ -203,13 +205,14 @@ impl Drop for HotkeyHandle {
 /// Starts a low-level keyboard hook on a dedicated thread.
 /// Returns a handle for updating the hotkey configuration.
 pub fn start_ll_hook(
-    initial_config: HotkeyConfig,
+    inject: HotkeyConfig,
+    note: Option<HotkeyConfig>,
     tx: UnboundedSender<HotkeyEvent>,
 ) -> HotkeyHandle {
-    let config = Arc::new(Mutex::new(initial_config));
+    let bindings = Arc::new(Mutex::new(build_bindings(inject, note)));
     let reset_flag = Arc::new(AtomicBool::new(false));
 
-    let config_clone = config.clone();
+    let bindings_clone = bindings.clone();
     let reset_clone = reset_flag.clone();
     let (tid_tx, tid_rx) = std::sync::mpsc::channel();
 
@@ -218,15 +221,13 @@ pub fn start_ll_hook(
         .spawn(move || {
             HOOK_STATE.with(|cell| {
                 *cell.borrow_mut() = Some(HookState {
-                    config: config_clone,
+                    bindings: bindings_clone,
                     reset_flag: reset_clone,
                     tx,
                     ctrl_held: false,
                     alt_held: false,
                     shift_held: false,
-                    armed: false,
-                    toggled_on: false,
-                    trigger_held: false,
+                    binding_state: [BindingState::default(); MAX_BINDINGS],
                     win_consumed: false,
                 });
             });
@@ -251,9 +252,5 @@ pub fn start_ll_hook(
 
     let thread_id = tid_rx.recv().expect("Hook thread failed to start");
 
-    HotkeyHandle {
-        config,
-        reset_flag,
-        thread_id,
-    }
+    HotkeyHandle { bindings, reset_flag, thread_id }
 }

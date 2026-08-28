@@ -278,23 +278,24 @@ mod tests {
         }
     }
 
-    /// Documents a KNOWN FOOTGUN, it does not endorse it. Super is expressible
+    /// The footgun this test used to document is fixed. Super is expressible
     /// only as a *trigger*: `HotkeyConfig` has no Meta modifier field, so
-    /// "Ctrl+Super+Space" silently registers as plain Ctrl+Space. todo.md
-    /// tracks the fix (either a `win` field threaded through `Modifiers`, or
-    /// `parse()` returning `None` for `Super+<key>` so it fails safe).
+    /// "Ctrl+Super+Space" has nowhere to put Super alongside a key. The
+    /// engine now rejects the combination outright, rather than silently
+    /// registering it as plain Ctrl+Space. `note_hotkey_config()` already
+    /// reads `None` as unbound, so a rejected parse just means "no binding".
     ///
-    /// The picker cannot currently emit such a chord — its Win pill drops the
-    /// trigger key — so this guards the hand-edited-config path. When the fix
-    /// lands, this test SHOULD fail; update it and teach the picker to render
-    /// Super as a modifier alongside a key.
+    /// The picker never produces such a chord anyway, since its Win pill
+    /// clears the trigger key, so the rest of this test keeps the
+    /// hand-edited-config path safe on the picker side too.
     #[test]
-    fn super_plus_a_key_is_silently_degraded_by_the_engine() {
-        let parsed = HotkeyConfig::parse("Ctrl+Super+Space", false).expect("parses");
-        assert_eq!(parsed.trigger_vk, 0x20, "Space wins the trigger slot");
-        assert!(parsed.ctrl);
+    fn super_plus_a_key_is_rejected_by_the_engine() {
+        assert!(
+            HotkeyConfig::parse("Ctrl+Super+Space", false).is_none(),
+            "Super has no modifier field to share with a trigger key"
+        );
 
-        // The picker never produces one, and normalizes one it is handed:
+        // The picker normalizes such a chord if it is handed one:
         // `HotkeyPicker` clears the key whenever Win is on, so every modifier
         // pill reassembles the chord as Super-as-trigger.
         let (c, a, sh, w, k) = parse_hotkey_parts("Ctrl+Super+Space");

@@ -107,7 +107,20 @@ pub fn App() -> Element {
 
         let cfg = config.peek();
         let initial = HotkeyConfig::parse(&cfg.recording.hotkey, cfg.recording.mode == "toggle")
-            .unwrap_or_default();
+            .unwrap_or_else(|| {
+                // Unlike `note_hotkey_config()`, a `None` here does not mean
+                // "unbound": the dictation hotkey always falls back to a
+                // working default (Ctrl+Space) rather than leaving recording
+                // unreachable. That fallback is silent unless logged: a
+                // hand-edited config like "Ctrl+Super+Space" now fails to
+                // parse (Super paired with another key is rejected) and
+                // quietly rebinds to Ctrl+Space instead.
+                tracing::warn!(
+                    hotkey = %cfg.recording.hotkey,
+                    "dictation hotkey failed to parse; falling back to the default Ctrl+Space"
+                );
+                HotkeyConfig::default()
+            });
         let note_binding = cfg.recording.note_hotkey_config();
         drop(cfg);
 

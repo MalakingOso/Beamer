@@ -6,7 +6,10 @@ use std::sync::{Arc, Mutex};
 use evdev::{Device, EventSummary, KeyCode};
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::hotkey::{CaptureMode, HotkeyConfig, HotkeyEvent, VK_LWIN};
+use crate::hotkey::{
+    build_bindings, matching_binding, BindingConfig, BindingState, HotkeyConfig, HotkeyEvent,
+    Modifiers, VK_LWIN, MAX_BINDINGS,
+};
 
 /// How often to rescan `/dev/input` for keyboards that appeared after startup.
 ///
@@ -15,61 +18,6 @@ use crate::hotkey::{CaptureMode, HotkeyConfig, HotkeyEvent, VK_LWIN};
 /// never got a listener and the hotkey silently did nothing on it until Beamer
 /// was restarted. Rescanning is a cheap directory walk plus an ioctl per node.
 const DEVICE_RESCAN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// Beamer has exactly two dictation hotkeys: inject and note.
-pub(super) const MAX_BINDINGS: usize = 2;
-
-/// One configured hotkey and the sink it selects.
-#[derive(Clone)]
-pub(super) struct BindingConfig {
-    pub mode: CaptureMode,
-    pub config: HotkeyConfig,
-}
-
-/// Per-binding press state. Kept separate from `BindingConfig` because the
-/// config is swapped wholesale by `update_configs` while press state must
-/// survive — a user editing the note hotkey mid-hold shouldn't strand the
-/// inject binding in `armed`.
-#[derive(Clone, Copy, Default)]
-pub(super) struct BindingState {
-    pub armed: bool,
-    pub toggled_on: bool,
-    pub trigger_held: bool,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) struct Modifiers {
-    pub ctrl: bool,
-    pub alt: bool,
-    pub shift: bool,
-}
-
-pub(super) fn build_bindings(
-    inject: HotkeyConfig,
-    note: Option<HotkeyConfig>,
-) -> Vec<BindingConfig> {
-    let mut v = vec![BindingConfig { mode: CaptureMode::Inject, config: inject }];
-    if let Some(note) = note {
-        v.push(BindingConfig { mode: CaptureMode::Note, config: note });
-    }
-    v
-}
-
-/// Index of the binding whose trigger key and modifier set both match, or
-/// `None`. Modifiers must match *exactly*, so Ctrl+Shift+Space does not fire a
-/// binding registered for plain Ctrl+Space.
-pub(super) fn matching_binding(
-    bindings: &[BindingConfig],
-    vk: u32,
-    mods: Modifiers,
-) -> Option<usize> {
-    bindings.iter().position(|b| {
-        b.config.trigger_vk == vk
-            && b.config.ctrl == mods.ctrl
-            && b.config.alt == mods.alt
-            && b.config.shift == mods.shift
-    })
-}
 
 struct HookState {
     bindings: Arc<Mutex<Vec<BindingConfig>>>,
@@ -390,90 +338,5 @@ fn spawn_device_listener(
 
     if let Err(e) = spawned {
         tracing::error!("Failed to spawn keyboard listener thread: {}", e);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn cfg(ctrl: bool, shift: bool, vk: u32, toggle: bool) -> HotkeyConfig {
-        HotkeyConfig { ctrl, alt: false, shift, trigger_vk: vk, is_toggle: toggle }
-    }
-
-    /// Ctrl+Space -> inject (hold), Ctrl+Shift+N -> note (toggle).
-    fn two_bindings() -> Vec<BindingConfig> {
-        vec![
-            BindingConfig { mode: CaptureMode::Inject, config: cfg(true, false, 0x20, false) },
-            BindingConfig { mode: CaptureMode::Note,   config: cfg(true, true,  0x4E, true) },
-        ]
-    }
-
-    /// Two bindings that share a trigger key and differ only by a modifier.
-    ///
-    /// This is the real-world pairing: `Ctrl+Super` dictates, `Ctrl+Alt+Super`
-    /// captures a note. Both resolve to `trigger_vk == VK_LWIN`, because the
-    /// parser can only express Super as a trigger — `HotkeyConfig` has no
-    /// Super/Meta modifier field at all. Nothing separates them except the
-    /// exact modifier comparison in `matching_binding`, so it is worth pinning:
-    /// a future `mods.ctrl >= b.config.ctrl`-style relaxation would make every
-    /// note chord also fire dictation.
-    #[test]
-    fn chords_sharing_a_trigger_key_are_told_apart_by_modifiers_alone() {
-        let bindings = vec![
-            BindingConfig {
-                mode: CaptureMode::Inject,
-                config: HotkeyConfig { ctrl: true, alt: false, shift: false, trigger_vk: VK_LWIN, is_toggle: false },
-            },
-            BindingConfig {
-                mode: CaptureMode::Note,
-                config: HotkeyConfig { ctrl: true, alt: true, shift: false, trigger_vk: VK_LWIN, is_toggle: true },
-            },
-        ];
-        let mods = |ctrl, alt| Modifiers { ctrl, alt, shift: false };
-
-        assert_eq!(matching_binding(&bindings, VK_LWIN, mods(true, false)), Some(0));
-        assert_eq!(matching_binding(&bindings, VK_LWIN, mods(true, true)), Some(1));
-        assert_eq!(
-            matching_binding(&bindings, VK_LWIN, mods(false, true)),
-            None,
-            "a chord neither binding asked for must fire neither"
-        );
-    }
-
-    #[test]
-    fn each_binding_matches_only_its_own_chord() {
-        let bindings = two_bindings();
-
-        // Ctrl held, Shift not: Space matches inject, N matches nothing.
-        let mods = Modifiers { ctrl: true, alt: false, shift: false };
-        assert_eq!(matching_binding(&bindings, 0x20, mods), Some(0));
-        assert_eq!(matching_binding(&bindings, 0x4E, mods), None);
-
-        // Ctrl+Shift held: N matches note, Space matches nothing.
-        let mods = Modifiers { ctrl: true, alt: false, shift: true };
-        assert_eq!(matching_binding(&bindings, 0x4E, mods), Some(1));
-        assert_eq!(
-            matching_binding(&bindings, 0x20, mods), None,
-            "Ctrl+Shift+Space must not trigger the plain Ctrl+Space binding"
-        );
-    }
-
-    #[test]
-    fn bindings_keep_independent_press_state() {
-        let mut state = [BindingState::default(); MAX_BINDINGS];
-
-        state[0].trigger_held = true;
-        state[0].armed = true;
-
-        assert!(!state[1].trigger_held, "note binding must not inherit inject's held state");
-        assert!(!state[1].armed, "note binding must not inherit inject's armed state");
-    }
-
-    #[test]
-    fn absent_note_binding_yields_only_one_binding() {
-        let bindings = build_bindings(cfg(true, false, 0x20, false), None);
-        assert_eq!(bindings.len(), 1);
-        assert_eq!(bindings[0].mode, CaptureMode::Inject);
     }
 }
