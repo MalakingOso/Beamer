@@ -32,9 +32,11 @@ Beamer you can already run on both machines.
 These bind every task. A change that violates one is a defect regardless of
 what its own task text says.
 
-- **Every source file stays under 500 lines.** Split with `#[path]`-included
-  `tests.rs` modules the way `task_store.rs`, `prompts.rs`, `extract.rs` and
-  `tasks_page.rs` already do.
+- **File length is a smell, not a hard cap.** 500 lines is the guideline and
+  going a little over is fine: 509 lines is not a defect, 1500 is. Split when a
+  file has genuinely become hard to navigate, not to satisfy a number. When you
+  do split, use `#[path]`-included `tests.rs` modules the way `task_store.rs`,
+  `prompts.rs`, `extract.rs`, `tasks_page.rs` and `pipeline.rs` already do.
 - **No crate-rooted paths (`crate::…`) anywhere under `src/llm/`.**
   `src/bin/task_eval.rs` `#[path]`-includes that directory and there is no
   `src/lib.rs`. Use `super::` / `self::` there.
