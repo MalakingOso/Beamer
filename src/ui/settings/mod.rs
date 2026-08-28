@@ -105,6 +105,7 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                 enabled: config.read().llm.enabled,
                 base_url: config.read().llm.base_url.clone(),
                 request_timeout_ms: config.read().llm.request_timeout_ms,
+                connect_timeout_ms: config.read().llm.connect_timeout_ms,
                 cleanup_model: config.read().llm.cleanup.model.clone(),
                 extract_model: config.read().llm.extract.model.clone(),
                 on_enabled_change: move |v: bool| {
@@ -112,6 +113,9 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                 },
                 on_base_url_change: move |url: String| {
                     save_config(config, |c| c.llm.base_url = url);
+                },
+                on_connect_timeout_ms_change: move |ms: u64| {
+                    save_config(config, |c| c.llm.connect_timeout_ms = ms);
                 },
                 on_cleanup_model_change: move |m: String| {
                     save_config(config, |c| c.llm.cleanup.model = m);

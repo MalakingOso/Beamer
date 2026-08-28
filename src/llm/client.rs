@@ -11,14 +11,49 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+/// Build the shared client with the configured connect timeout, baking it in
+/// for the process's whole lifetime. Call once, at startup, before anything
+/// reaches [`http_client`] — a `OnceLock` keeps only whichever value gets
+/// there first.
+///
+/// Takes a plain [`Duration`] rather than `crate::config::Config`: no file
+/// under `src/llm/` may use a crate-rooted path, because `src/bin/task_eval.rs`
+/// `#[path]`-includes this module directly and there is no `src/lib.rs` to
+/// give one. The caller (`main.rs`, where the config is already loaded) reads
+/// `cfg.llm.connect_timeout_ms` and passes the `Duration` in.
+///
+/// A second call is a harmless no-op: `OnceLock::get_or_init` only ever runs
+/// the closure once. That is also why this deliberately does *not* re-plumb
+/// the client through config on every request — a live-reloading connect
+/// timeout would need a client rebuilt per change, and the Local AI settings
+/// card says plainly that this setting takes effect on restart instead.
+pub fn init_http_client(connect_timeout: Duration) {
+    let _ = CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(connect_timeout)
+            .build()
+            // A builder failure here means TLS init failed; the plain
+            // constructor is no more likely to work, but falling back keeps a
+            // request possible instead of panicking at startup.
+            .unwrap_or_else(|_| reqwest::Client::new())
+    });
+}
+
 /// Shared client, mirroring `transcription::http_client()`: one connection pool
 /// for the process rather than a fresh one per probe.
 ///
 /// Visible to `chat.rs` so completions reuse this pool rather than opening a
 /// second one — a per-request `Client` would discard the kept-alive connection
 /// between the cleanup and extraction passes of the same note.
+///
+/// Falls back to `reqwest::Client::new()` — no explicit connect timeout — if
+/// [`init_http_client`] was never called first. That only happens in tests and
+/// in the `task_eval` binary, neither of which reaches the network here; the
+/// ordinary process path always calls `init_http_client` from `main.rs`,
+/// once, before the Dioxus app starts.
 pub(super) fn http_client() -> &'static reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(reqwest::Client::new)
 }
 
@@ -175,6 +210,18 @@ mod tests {
         assert_eq!(models_url("http://127.0.0.1:8080"), "http://127.0.0.1:8080/v1/models");
         assert_eq!(models_url("http://127.0.0.1:8080/"), "http://127.0.0.1:8080/v1/models");
         assert_eq!(models_url("http://127.0.0.1:8080///"), "http://127.0.0.1:8080/v1/models");
+    }
+
+    #[test]
+    fn init_http_client_is_idempotent() {
+        // The OnceLock this backs is process-global, so this only proves the
+        // call itself never panics on a second attempt — not which value won.
+        // Which value wins is exactly the "first caller wins" behaviour the
+        // task brief ruled out for config, and is why `main.rs`, not any
+        // caller inside `src/llm/`, is the one place this gets called.
+        init_http_client(Duration::from_millis(1_234));
+        init_http_client(Duration::from_millis(9_999));
+        let _ = http_client();
     }
 
     #[test]

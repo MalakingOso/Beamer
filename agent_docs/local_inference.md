@@ -382,11 +382,40 @@ not cleaned yet", never to a lost note.
 | Superseded by an edit | `Pending` | nothing changes; footer still offers it |
 | Network, non-2xx, timeout | `Failed` | `body` stays; footer shows a red label |
 | `llm.enabled = false` | `Skipped` | only if the stage had never run |
+| Backlog sweep, after a later success | `Failed` -> retried | see below |
 
 Extraction is independent: a failed cleanup still runs extraction, against
 `body` — which equals `raw` when cleanup failed, and equals the user's own text
 when it was superseded. `Skipped` never overwrites `Done`, so asking for a pass
 while the feature is off cannot erase the record that it once ran.
+
+### The backlog sweep
+
+Before the remote server (a tailnet host that can be asleep), a `Failed` note
+just sat there until the user noticed the red label and pressed the footer.
+That is fine for a single note failing once, and wrong for a tailnet host that
+was briefly unreachable during a run of several notes: nobody wants to click
+retry five times because their remote machine happened to be asleep when they
+first dictated.
+
+`use_pipeline` (`src/notes/pipeline.rs`) now sweeps the backlog itself: when a
+pass finishes and succeeded, it also re-sends a `PipelineRequest` for every
+other note whose `clean_state` or `extract_state` is `Failed`, asking each one
+only for the stages that actually failed (`sweep_requests`). The existing
+`in_flight` set still dedupes, so this cannot storm the server with duplicate
+requests, and a swept request is marked `swept: true` so *its own* completion
+never triggers a further sweep — without that guard, a note that keeps
+genuinely failing would re-sweep the whole backlog forever, once per success,
+on every other note in the app.
+
+**This does not violate the never-poll rule.** The rule is about a timer: a
+periodic `GET /v1/models` that runs whether or not anyone asked for anything,
+which resets the server's per-model idle clock and pins a model in VRAM with
+no error and no symptom. The sweep has no timer and starts nothing on its
+own — it only ever fires as a direct, synchronous consequence of a request
+that was already going to happen, already succeeded, and already proved the
+server is reachable right now. No new request is sent unless a person's own
+action (dictating, pressing the footer) produced one first.
 
 Errors surface through `StatusLog` as well as `RUST_LOG`.
 
