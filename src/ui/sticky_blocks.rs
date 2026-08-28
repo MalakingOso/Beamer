@@ -40,7 +40,7 @@ use dioxus::prelude::*;
 use std::path::{Path, PathBuf};
 
 use crate::notes::blocks::{self, Block};
-use crate::notes::{Attachment, NoteStore};
+use crate::notes::{Attachment, Location, NoteStore};
 
 /// First path segment of the URL images are served from. Routing is by this
 /// segment alone (`dioxus-desktop/src/protocol.rs`), so it must not collide
@@ -94,7 +94,7 @@ pub fn use_note_media(note_id: String, notes: Signal<NoteStore>) {
             // already reference.
             let store = notes.peek();
             let note = store.get(&note_id)?;
-            NoteStore::attachment(note, id)?.path().map(Path::to_path_buf)
+            NoteStore::attachment(note, id)?.resolved_path(&store.attachments_dir)
         });
 
         let Some(file) = file else {
@@ -236,7 +236,12 @@ fn AttachmentBlock(props: AttachmentBlockProps) -> Element {
 
     let att_id = attachment.id().to_string();
     let label = attachment.label();
-    let missing = attachment.path().is_some_and(|p| !p.exists());
+    let attachments_dir = notes.peek().attachments_dir.clone();
+    let resolved = attachment.resolved_path(&attachments_dir);
+    // Existence is checked separately from what `resolved_path` returns: an
+    // `Owned` file can still be missing (not synced yet, removed by hand
+    // outside Beamer) just as an `External` one always could be.
+    let missing = resolved.as_deref().is_some_and(|p| !p.exists());
 
     let remove = {
         let note_id = note_id.clone();
@@ -258,7 +263,7 @@ fn AttachmentBlock(props: AttachmentBlockProps) -> Element {
                         span { class: "sticky-missing-title", "Missing file" }
                         span {
                             class: "sticky-missing-name",
-                            title: "{attachment.path().map(|p| p.display().to_string()).unwrap_or_default()}",
+                            title: "{resolved.as_ref().map(|p| p.display().to_string()).unwrap_or_default()}",
                             "{label}"
                         }
                         Locate { note_id: note_id.clone(), notes, attachment_id: att_id.clone() }
@@ -289,12 +294,15 @@ fn AttachmentBlock(props: AttachmentBlockProps) -> Element {
                         "\u{1F517} {label}"
                     }
                 },
-                (Attachment::File { path, .. }, false) => rsx! {
+                (Attachment::File { .. }, false) => rsx! {
                     button {
                         class: "sticky-file",
-                        title: "{path.display()}",
+                        title: "{label}",
                         onclick: {
-                            let path = path.display().to_string();
+                            // `resolved` is `Some` here: `missing` above would
+                            // have been true otherwise, and this arm only
+                            // matches `(_, false)`.
+                            let path = resolved.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
                             move |_| crate::ui::open_external(&path)
                         },
                         "\u{1F4CE} {label}"
@@ -341,11 +349,19 @@ fn Locate(props: LocateProps) -> Element {
 }
 
 /// Turn a dropped path into the attachment it should become.
+///
+/// Built as `External`, pointing at wherever the drop or file picker says the
+/// file is right now. `NoteStore::add_attachment` is what actually tries to
+/// copy the bytes in; this function only ever inspects the path, never reads
+/// it, which is why it stays free of filesystem access.
 pub fn attachment_for_path(id: String, path: PathBuf) -> Attachment {
-    if is_image(&path) {
-        Attachment::Image { id, path, alt: None }
+    let filename = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let image = is_image(&path);
+    let location = Location::External { path };
+    if image {
+        Attachment::Image { id, filename, alt: None, location }
     } else {
-        Attachment::File { id, path }
+        Attachment::File { id, filename, location }
     }
 }
 

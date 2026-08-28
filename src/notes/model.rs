@@ -5,7 +5,7 @@
 //! persistence.
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// How far one model pass has got on a note.
 ///
@@ -79,24 +79,65 @@ impl NoteColor {
     }
 }
 
+/// Where an attachment's bytes actually are.
+///
+/// **`Owned` is the normal case, as of this task.** Beamer copies a dropped
+/// file's bytes in right away, and from then on all it stores is a sha256 hash
+/// and the extension. A hash means the same thing on any machine, which is
+/// what makes an attachment syncable at all; a raw path from one OS is
+/// meaningless on another, and rewriting it there just breaks it here.
+///
+/// **`External` is the not-yet-owned case.** It is what a `notes.json` from
+/// before this task carries until migration finds the file and copies it in,
+/// and it is also what a "Locate…" pick becomes if the chosen file cannot be
+/// read. The path may not exist; `ui::sticky_blocks` renders that as a
+/// missing-file card with a "Locate…" button rather than dropping the
+/// attachment, because a broken reference is recoverable and a deleted one
+/// is not.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Location {
+    Owned { hash: String, ext: String },
+    External { path: PathBuf },
+}
+
+impl Location {
+    /// Where to read this location's bytes from, given this machine's
+    /// attachments directory.
+    ///
+    /// Existence is a separate question from what this returns: an `External`
+    /// path can be gone, and even an `Owned` file can be, if the local copy
+    /// has not synced yet or was removed by hand outside Beamer.
+    pub fn resolved_path(&self, attachments_dir: &Path) -> PathBuf {
+        match self {
+            Self::Owned { hash, ext } => attachments_dir.join(format!("{hash}.{ext}")),
+            Self::External { path } => path.clone(),
+        }
+    }
+}
+
 /// Something a note references, rendered inline where its `[[beamer:<id>]]`
 /// token sits in `body`.
 ///
-/// ⚠️ **Paths point at the user's own files and are never copied or deleted.**
-/// Beamer does not own an image the way a document editor would: dropping a
-/// photo on a note records where that photo lives, and moving the file breaks
-/// the reference visibly (`ui::sticky_blocks` renders a missing-file card with
-/// a "Locate…" button). That is the deliberate trade — a note is never a second
-/// copy of your library, and deleting a note can never delete your photo.
+/// **Beamer owns a copy of what it can.** Dropping a photo on a note copies
+/// its bytes into `<config_dir>/sync/attachments`, content-addressed by
+/// sha256, and the note records that hash and the original file name rather
+/// than a path. Two attachments with identical bytes, even on different
+/// notes, share one file on disk; see `edit.rs` for the refcounting that
+/// keeps that file around exactly as long as something references it.
+///
+/// **Deleting a note still never touches your original.** That half of the
+/// old design survives unchanged: what gets deleted is Beamer's own copy, the
+/// one it made on attach, never the file the photo or document came from.
 ///
 /// `#[serde(tag = "kind")]` so `attachments.json`-shaped rows stay readable by
 /// eye and a new variant can be added without renumbering anything.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Attachment {
-    Image { id: String, path: PathBuf, alt: Option<String> },
+    Image { id: String, filename: String, alt: Option<String>, location: Location },
     Link { id: String, url: String, title: Option<String> },
-    File { id: String, path: PathBuf },
+    File { id: String, filename: String, location: Location },
 }
 
 impl Attachment {
@@ -107,21 +148,42 @@ impl Attachment {
         }
     }
 
-    /// The file this points at, if it points at one. `None` for a link.
-    pub fn path(&self) -> Option<&std::path::Path> {
+    /// Where this attachment's bytes are, if it points at bytes at all.
+    /// `None` for a link, which has no file.
+    pub fn location(&self) -> Option<&Location> {
         match self {
-            Self::Image { path, .. } | Self::File { path, .. } => Some(path.as_path()),
+            Self::Image { location, .. } | Self::File { location, .. } => Some(location),
             Self::Link { .. } => None,
         }
     }
 
-    /// What to call it in the UI: the file name, or the link's host.
+    /// Repoint this attachment at a new location. A no-op on a link.
+    pub fn set_location(&mut self, new: Location) {
+        match self {
+            Self::Image { location, .. } | Self::File { location, .. } => *location = new,
+            Self::Link { .. } => {}
+        }
+    }
+
+    /// Rename the display name, e.g. when "Locate…" points at a file that is
+    /// not called what the original was. A no-op on a link.
+    pub fn set_filename(&mut self, name: String) {
+        match self {
+            Self::Image { filename, .. } | Self::File { filename, .. } => *filename = name,
+            Self::Link { .. } => {}
+        }
+    }
+
+    /// Where to read this attachment's bytes from, given this machine's
+    /// attachments directory. `None` for a link.
+    pub fn resolved_path(&self, attachments_dir: &Path) -> Option<PathBuf> {
+        self.location().map(|loc| loc.resolved_path(attachments_dir))
+    }
+
+    /// What to call it in the UI: the original file name, or the link's host.
     pub fn label(&self) -> String {
         match self {
-            Self::Image { path, .. } | Self::File { path, .. } => path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.to_string_lossy().into_owned()),
+            Self::Image { filename, .. } | Self::File { filename, .. } => filename.clone(),
             Self::Link { url, title, .. } => match title {
                 Some(t) if !t.trim().is_empty() => t.clone(),
                 _ => link_label(url),

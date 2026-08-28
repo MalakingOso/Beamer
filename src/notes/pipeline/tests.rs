@@ -36,6 +36,7 @@ fn store(notes: Vec<Note>) -> NoteStore {
         path: std::path::PathBuf::new(),
         dirty: false,
         machine: crate::notes::MachineStore::new(std::path::PathBuf::new()),
+        attachments_dir: std::path::PathBuf::new(),
     }
 }
 

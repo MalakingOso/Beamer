@@ -16,9 +16,11 @@ fn temp_store(tag: &str) -> NoteStore {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(format!("{tag}.json"));
     let machine_path = dir.join(format!("{tag}.machine.json"));
+    let attachments_dir = dir.join(format!("{tag}_attachments"));
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&machine_path);
-    NoteStore { notes: Vec::new(), path, dirty: false, machine: MachineStore::new(machine_path) }
+    let _ = std::fs::remove_dir_all(&attachments_dir);
+    NoteStore { notes: Vec::new(), path, dirty: false, machine: MachineStore::new(machine_path), attachments_dir }
 }
 
 #[test]
@@ -279,21 +281,23 @@ const LEGACY_NOTES_JSON: &str = r#"{
     ]
 }"#;
 
-fn temp_migration_paths(tag: &str) -> (PathBuf, PathBuf) {
+fn temp_migration_paths(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
     let dir = std::env::temp_dir().join(format!("beamer_notes_test_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(format!("{tag}.json"));
     let machine_path = dir.join(format!("{tag}.machine.json"));
+    let attachments_dir = dir.join(format!("{tag}_attachments"));
     std::fs::write(&path, LEGACY_NOTES_JSON).unwrap();
     let _ = std::fs::remove_file(&machine_path);
-    (path, machine_path)
+    let _ = std::fs::remove_dir_all(&attachments_dir);
+    (path, machine_path, attachments_dir)
 }
 
 #[test]
 fn migration_lifts_pos_size_and_open_off_a_legacy_notes_json_losslessly() {
-    let (path, machine_path) = temp_migration_paths("migrate");
+    let (path, machine_path, attachments_dir) = temp_migration_paths("migrate");
 
-    let store = NoteStore::load_from(path, machine_path);
+    let store = NoteStore::load_from(path, machine_path, attachments_dir);
 
     assert_eq!(store.notes.len(), 2, "the notes themselves must still load");
     assert_eq!(store.pos("199012340-0000"), Some((100, 200)));
@@ -307,9 +311,9 @@ fn migration_lifts_pos_size_and_open_off_a_legacy_notes_json_losslessly() {
 
 #[test]
 fn a_note_loaded_from_a_legacy_file_no_longer_carries_pos_size_or_open_itself() {
-    let (path, machine_path) = temp_migration_paths("migrate_shape");
+    let (path, machine_path, attachments_dir) = temp_migration_paths("migrate_shape");
 
-    let store = NoteStore::load_from(path, machine_path);
+    let store = NoteStore::load_from(path, machine_path, attachments_dir);
 
     // The old keys are simply ignored by `Note`'s own deserialize (no
     // `deny_unknown_fields`, so this must not be fatal), and the content
@@ -322,7 +326,7 @@ fn a_note_loaded_from_a_legacy_file_no_longer_carries_pos_size_or_open_itself() 
 
 #[test]
 fn loading_gcs_machine_entries_for_notes_that_no_longer_exist() {
-    let (path, machine_path) = temp_migration_paths("gc_on_load");
+    let (path, machine_path, attachments_dir) = temp_migration_paths("gc_on_load");
     // Simulate a stale machine.json left over from a note that was since
     // deleted from notes.json by hand (or on another machine, synced).
     {
@@ -332,7 +336,7 @@ fn loading_gcs_machine_entries_for_notes_that_no_longer_exist() {
         machine.flush_if_dirty();
     }
 
-    let store = NoteStore::load_from(path, machine_path);
+    let store = NoteStore::load_from(path, machine_path, attachments_dir);
 
     assert!(store.is_open("199012340-0000"), "a note still present keeps its state");
     assert!(!store.is_open("long-gone"), "an entry for a note that no longer exists must be dropped");
@@ -346,7 +350,7 @@ fn loading_gcs_machine_entries_for_notes_that_no_longer_exist() {
 /// `notes.json` when a load lands.
 #[test]
 fn a_missing_notes_json_leaves_an_existing_machine_json_intact() {
-    let (path, machine_path) = temp_migration_paths("missing_notes");
+    let (path, machine_path, attachments_dir) = temp_migration_paths("missing_notes");
     std::fs::remove_file(&path).unwrap();
     {
         let mut machine = MachineStore::new(machine_path.clone());
@@ -355,7 +359,7 @@ fn a_missing_notes_json_leaves_an_existing_machine_json_intact() {
         machine.flush_if_dirty();
     }
 
-    let store = NoteStore::load_from(path, machine_path);
+    let store = NoteStore::load_from(path, machine_path, attachments_dir);
 
     assert!(
         store.is_open("still-here"),
@@ -366,7 +370,7 @@ fn a_missing_notes_json_leaves_an_existing_machine_json_intact() {
 
 #[test]
 fn a_quarantined_corrupt_notes_json_leaves_an_existing_machine_json_intact() {
-    let (path, machine_path) = temp_migration_paths("corrupt_notes");
+    let (path, machine_path, attachments_dir) = temp_migration_paths("corrupt_notes");
     std::fs::write(&path, "not valid json").unwrap();
     {
         let mut machine = MachineStore::new(machine_path.clone());
@@ -374,7 +378,7 @@ fn a_quarantined_corrupt_notes_json_leaves_an_existing_machine_json_intact() {
         machine.flush_if_dirty();
     }
 
-    let store = NoteStore::load_from(path, machine_path);
+    let store = NoteStore::load_from(path, machine_path, attachments_dir);
 
     assert!(
         store.is_open("still-here"),
@@ -384,9 +388,9 @@ fn a_quarantined_corrupt_notes_json_leaves_an_existing_machine_json_intact() {
 
 #[test]
 fn a_migrating_load_leaves_the_store_dirty_so_the_stale_keys_get_rewritten_away() {
-    let (path, machine_path) = temp_migration_paths("migrate_dirty");
+    let (path, machine_path, attachments_dir) = temp_migration_paths("migrate_dirty");
 
-    let store = NoteStore::load_from(path, machine_path);
+    let store = NoteStore::load_from(path, machine_path, attachments_dir);
 
     assert!(
         store.is_dirty(),
@@ -400,21 +404,127 @@ fn a_load_with_nothing_to_migrate_does_not_dirty_the_store() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("no_migration.json");
     let machine_path = dir.join("no_migration.machine.json");
+    let attachments_dir = dir.join("no_migration_attachments");
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&machine_path);
+    let _ = std::fs::remove_dir_all(&attachments_dir);
 
     let mut store = NoteStore {
         notes: Vec::new(),
         path: path.clone(),
         dirty: false,
         machine: MachineStore::new(machine_path.clone()),
+        attachments_dir: attachments_dir.clone(),
     };
     store.create("hello".into(), NoteColor::Purple, NoteOrigin::Dictated);
     store.flush_if_dirty();
 
-    let reloaded = NoteStore::load_from(path, machine_path);
+    let reloaded = NoteStore::load_from(path, machine_path, attachments_dir);
 
     let reason = "a notes.json already written under the current schema carries no \
                    legacy keys, so there is nothing to migrate and nothing to rewrite";
     assert!(!reloaded.is_dirty(), "{}", reason);
+}
+
+/// A single note carrying one attachment in the pre-Task-8 shape: `path`
+/// directly on the object, no `filename` and no `location`. `__PATH__` is
+/// substituted per-test, since one test's path exists on disk and the
+/// other's deliberately does not.
+const LEGACY_NOTES_WITH_ATTACHMENT_JSON: &str = r#"{
+    "notes": [
+        {
+            "id": "18f2a1b3-0002",
+            "created": "2026-08-01T09:15:00+01:00",
+            "modified": "2026-08-01T09:15:00+01:00",
+            "raw": "look at this",
+            "body": "look at this\n[[beamer:a1]]",
+            "color": "amber",
+            "attachments": [
+                {"kind": "image", "id": "a1", "path": "__PATH__", "alt": null}
+            ],
+            "pos": null,
+            "size": null,
+            "open": true,
+            "archived": false
+        }
+    ]
+}"#;
+
+fn write_legacy_attachment_json(path: &Path, referenced: &Path) {
+    // `to_string_lossy` plus a manual backslash escape rather than
+    // `serde_json::to_string`, because this is standing in for the literal
+    // bytes a pre-Task-8 `notes.json` would have carried, on either OS: a
+    // Windows path with `\` in it must still land as valid JSON.
+    let escaped = referenced.to_string_lossy().replace('\\', "\\\\");
+    let json = LEGACY_NOTES_WITH_ATTACHMENT_JSON.replace("__PATH__", &escaped);
+    std::fs::write(path, json).unwrap();
+}
+
+#[test]
+fn migrating_a_legacy_attachment_whose_file_exists_copies_it_in_and_owns_it() {
+    let dir = std::env::temp_dir().join(format!("beamer_notes_test_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("migrate_attachment_source.png");
+    std::fs::write(&source, b"legacy attachment bytes, present on disk").unwrap();
+
+    let path = dir.join("migrate_attachment_present.json");
+    let machine_path = dir.join("migrate_attachment_present.machine.json");
+    let attachments_dir = dir.join("migrate_attachment_present_attachments");
+    let _ = std::fs::remove_file(&machine_path);
+    let _ = std::fs::remove_dir_all(&attachments_dir);
+    write_legacy_attachment_json(&path, &source);
+
+    let store = NoteStore::load_from(path, machine_path, attachments_dir.clone());
+
+    let note = &store.notes[0];
+    assert_eq!(note.attachments.len(), 1, "migration must not drop the attachment");
+    match note.attachments[0].location() {
+        Some(Location::Owned { hash, ext }) => {
+            assert_eq!(ext, "png");
+            let copy = attachments_dir.join(format!("{hash}.{ext}"));
+            assert!(copy.exists(), "migration must copy the bytes in, rather than only relabeling the record");
+            assert_eq!(std::fs::read(&copy).unwrap(), b"legacy attachment bytes, present on disk");
+        }
+        other => panic!("expected the attachment to be adopted on load, got {other:?}"),
+    }
+    assert!(
+        store.is_dirty(),
+        "the rewritten location must reach notes.json on the next flush, or every \
+         restart re-copies the same file and re-derives the same hash for nothing"
+    );
+    assert!(source.exists(), "migration copies the file, it does not move or delete the original");
+}
+
+#[test]
+fn migrating_a_legacy_attachment_whose_file_is_missing_keeps_it_as_a_broken_reference() {
+    let dir = std::env::temp_dir().join(format!("beamer_notes_test_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let missing = dir.join("migrate_attachment_gone.png");
+    let _ = std::fs::remove_file(&missing);
+
+    let path = dir.join("migrate_attachment_missing.json");
+    let machine_path = dir.join("migrate_attachment_missing.machine.json");
+    let attachments_dir = dir.join("migrate_attachment_missing_attachments");
+    let _ = std::fs::remove_file(&machine_path);
+    let _ = std::fs::remove_dir_all(&attachments_dir);
+    write_legacy_attachment_json(&path, &missing);
+
+    let store = NoteStore::load_from(path, machine_path, attachments_dir);
+
+    let note = &store.notes[0];
+    assert_eq!(
+        note.attachments.len(), 1,
+        "a broken reference is recoverable through Locate…; dropping it is not"
+    );
+    assert_eq!(
+        note.attachments[0].location(),
+        Some(&Location::External { path: missing }),
+        "with nothing to copy, the attachment keeps its original, still-broken path"
+    );
+    assert!(
+        store.is_dirty(),
+        "the JSON shape itself was rewritten even though nothing was adopted; without \
+         this the old path-only shape would never leave disk, and task_eval's own \
+         strict parse of notes.json would break on it"
+    );
 }
