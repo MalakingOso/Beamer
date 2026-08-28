@@ -440,15 +440,17 @@ async fn run_extraction(
                     })
                     .collect();
                 store.replace_suggestions(id, rows);
-                // Written now rather than on a tick. Nothing else flushes this
-                // store on a timer — the debounce in `app_setup` is notes-only
-                // — so a suggestion left dirty here would live only in memory.
-                store.flush_if_dirty();
             }
             // An empty list is a successful answer and the common one. Marking
             // it Done rather than leaving it Pending is what stops the footer
             // nagging forever on every ordinary note.
             notes.write().mark_analyzed(id);
+            // Written now rather than waiting on the tick, and through
+            // `flush_stores` because that is the only thing that writes the
+            // document. `flush_if_dirty` would leave the suggestions in the
+            // JSON mirror alone, which nothing reads back. Placed after the
+            // stage mark so one write carries both.
+            crate::notes::flush_stores(&mut notes.write(), &mut tasks.write());
             tracing::info!("extraction proposed {} task(s) for note {}", count, id);
             RequestOutcome::Responded
         }

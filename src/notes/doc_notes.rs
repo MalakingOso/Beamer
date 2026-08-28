@@ -21,15 +21,30 @@ use super::sync_doc::{
     NOTES_KEY,
 };
 
+/// A hydrate's result: the notes it could read, and the ids of the entries it
+/// could not.
+pub struct Hydrated {
+    pub notes: Vec<Note>,
+    /// Entries `read_note` rejected. Carried back so `reconcile` keeps their
+    /// keys and `machine.gc` keeps their window state: dropping an entry from
+    /// the vec is a read failure, and treating it as proof the note is gone
+    /// would delete it from the document on the next tick.
+    pub unreadable: Vec<String>,
+}
+
 /// Push `notes` into the document.
 ///
 /// Every write is guarded on the stored value, so a tick where nothing
 /// changed produces no operations at all and the document stops growing.
-pub fn reconcile(sync: &mut SyncDoc, notes: &[Note]) -> Result<()> {
+///
+/// `unreadable` holds ids that were in the document but could not be read
+/// back into a `Note`. They are kept, not pruned. See [`Hydrated`].
+pub fn reconcile(sync: &mut SyncDoc, notes: &[Note], unreadable: &[String]) -> Result<()> {
     let root = sync.root_map(NOTES_KEY)?;
     let doc = sync.doc_mut();
 
-    let keep: Vec<String> = notes.iter().map(|n| n.id.clone()).collect();
+    let mut keep: Vec<String> = notes.iter().map(|n| n.id.clone()).collect();
+    keep.extend_from_slice(unreadable);
     retain_keys(doc, &root, &keep)?;
 
     for note in notes {
@@ -58,27 +73,37 @@ pub fn reconcile(sync: &mut SyncDoc, notes: &[Note]) -> Result<()> {
 /// the order the file already had, and it stays stable across machines where
 /// a map's key order would not.
 ///
-/// An entry missing the fields a note cannot do without is dropped with a
-/// warning rather than filled in with invented values. Nothing writes such an
-/// entry; one appearing means the document was edited by something else.
-pub fn hydrate(sync: &SyncDoc) -> Vec<Note> {
+/// An entry missing the fields a note cannot do without is reported rather
+/// than filled in with invented values, and its id comes back in
+/// [`Hydrated::unreadable`] so nothing downstream deletes it. Nothing this
+/// code writes produces such an entry; one appearing means the document was
+/// written by something else.
+pub fn hydrate(sync: &SyncDoc) -> Hydrated {
     let Some(root) = sync.root_map_if_present(NOTES_KEY) else {
-        return Vec::new();
+        return Hydrated { notes: Vec::new(), unreadable: Vec::new() };
     };
     let doc = sync.doc();
     let mut notes: Vec<Note> = Vec::new();
+    let mut unreadable: Vec<String> = Vec::new();
     for key in doc.keys(&root).collect::<Vec<_>>() {
-        let Ok(Some((value, obj))) = doc.get(&root, key.as_str()) else { continue };
+        let Ok(Some((value, obj))) = doc.get(&root, key.as_str()) else {
+            unreadable.push(key);
+            continue;
+        };
         if !value.is_object() {
+            unreadable.push(key);
             continue;
         }
         match read_note(doc, &obj, &key) {
             Some(note) => notes.push(note),
-            None => tracing::warn!("Skipping malformed note {key} in the sync document"),
+            None => {
+                tracing::warn!("Cannot read note {key} out of the sync document; keeping it");
+                unreadable.push(key);
+            }
         }
     }
     notes.sort_by(|a, b| a.created.cmp(&b.created).then_with(|| a.id.cmp(&b.id)));
-    notes
+    Hydrated { notes, unreadable }
 }
 
 fn read_note(doc: &AutoCommit, obj: &ObjId, key: &str) -> Option<Note> {

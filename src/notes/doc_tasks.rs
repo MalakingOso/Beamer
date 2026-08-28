@@ -17,11 +17,20 @@ use super::sync_doc::{
 };
 use super::task::{Task, TaskKind, TaskStatus};
 
-pub fn reconcile(sync: &mut SyncDoc, tasks: &[Task]) -> Result<()> {
+/// A hydrate's result. See `doc_notes::Hydrated`, which this mirrors.
+pub struct Hydrated {
+    pub tasks: Vec<Task>,
+    pub unreadable: Vec<String>,
+}
+
+/// Push `tasks` into the document. `unreadable` holds ids that were in the
+/// document but could not be read back; they are kept, not pruned.
+pub fn reconcile(sync: &mut SyncDoc, tasks: &[Task], unreadable: &[String]) -> Result<()> {
     let root = sync.root_map(TASKS_KEY)?;
     let doc = sync.doc_mut();
 
-    let keep: Vec<String> = tasks.iter().map(|t| t.id.clone()).collect();
+    let mut keep: Vec<String> = tasks.iter().map(|t| t.id.clone()).collect();
+    keep.extend_from_slice(unreadable);
     retain_keys(doc, &root, &keep)?;
 
     for task in tasks {
@@ -48,24 +57,32 @@ pub fn reconcile(sync: &mut SyncDoc, tasks: &[Task]) -> Result<()> {
 /// `created` then id, the same ordering rule `doc_notes::hydrate` uses and
 /// for the same reason: `tasks.json` is append-only, so this is the order the
 /// file already had.
-pub fn hydrate(sync: &SyncDoc) -> Vec<Task> {
+pub fn hydrate(sync: &SyncDoc) -> Hydrated {
     let Some(root) = sync.root_map_if_present(TASKS_KEY) else {
-        return Vec::new();
+        return Hydrated { tasks: Vec::new(), unreadable: Vec::new() };
     };
     let doc = sync.doc();
     let mut tasks: Vec<Task> = Vec::new();
+    let mut unreadable: Vec<String> = Vec::new();
     for key in doc.keys(&root).collect::<Vec<_>>() {
-        let Ok(Some((value, obj))) = doc.get(&root, key.as_str()) else { continue };
+        let Ok(Some((value, obj))) = doc.get(&root, key.as_str()) else {
+            unreadable.push(key);
+            continue;
+        };
         if !value.is_object() {
+            unreadable.push(key);
             continue;
         }
         match read_task(doc, &obj, &key) {
             Some(task) => tasks.push(task),
-            None => tracing::warn!("Skipping malformed task {key} in the sync document"),
+            None => {
+                tracing::warn!("Cannot read task {key} out of the sync document; keeping it");
+                unreadable.push(key);
+            }
         }
     }
     tasks.sort_by(|a, b| a.created.cmp(&b.created).then_with(|| a.id.cmp(&b.id)));
-    tasks
+    Hydrated { tasks, unreadable }
 }
 
 fn read_task(doc: &AutoCommit, obj: &ObjId, key: &str) -> Option<Task> {

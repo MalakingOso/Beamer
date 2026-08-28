@@ -14,10 +14,26 @@ use super::task::{Proposal, TaskStatus};
 use super::task_store::TaskStore;
 use super::{flush_stores, NoteColor, NoteOrigin, NoteStore};
 
-/// A `notes.json` shaped exactly like the one this install has been writing,
-/// with invented text. Fourteen notes, two archived, three attachments across
-/// two of them, ascending creation times.
+/// A `notes.json` shaped like the one this install has been writing, with
+/// invented text. Fourteen notes, two archived, three attachments across two
+/// of them, ascending creation times, and `pos`/`size`/`open` on every note,
+/// which the live file still carries and the migration still has to lift into
+/// `machine.json`.
 const FIXTURE: &str = include_str!("../../tests/fixtures/notes-14.json");
+
+/// The fixture with the machine-local keys removed, which is what the mirror
+/// looks like once they have been lifted out. `Note` stopped serializing them
+/// two tasks ago, so this is the only honest thing to compare against.
+fn fixture_without_window_keys() -> serde_json::Value {
+    let mut value: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+    for note in value["notes"].as_array_mut().unwrap() {
+        let note = note.as_object_mut().unwrap();
+        note.remove("pos");
+        note.remove("size");
+        note.remove("open");
+    }
+    value
+}
 
 fn temp_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir()
@@ -251,6 +267,15 @@ fn an_existing_notes_json_round_trips_through_the_document_and_back_out_unchange
     // to this task does.
     let mut seeded = Machine::open(&dir);
     assert_eq!(seeded.notes.notes.len(), 14, "every note in the file must reach the document");
+
+    // The window keys go to `machine.json`, not into the document. Anything
+    // else and one machine's geometry and open set would sync to the other.
+    let first = seeded.notes.notes[0].id.clone();
+    let second = seeded.notes.notes[1].id.clone();
+    assert_eq!(seeded.notes.size(&first), Some((268, 208)));
+    assert!(seeded.notes.is_open(&first));
+    assert_eq!(seeded.notes.pos(&second), Some((1170, 640)));
+    assert!(!seeded.notes.is_open(&second));
     seeded.flush();
 
     // Delete the mirror, so the second load has nothing to fall back on and
@@ -261,8 +286,17 @@ fn an_existing_notes_json_round_trips_through_the_document_and_back_out_unchange
 
     let written: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("notes.json")).unwrap()).unwrap();
-    let expected: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
-    assert_eq!(written, expected, "the round trip through the document must lose nothing");
+    assert_eq!(
+        written,
+        fixture_without_window_keys(),
+        "the round trip through the document must lose nothing but the machine-local keys"
+    );
+    assert!(
+        !std::fs::read_to_string(dir.join("notes.json")).unwrap().contains("\"open\""),
+        "the mirror must not carry window state onward to the other machine"
+    );
+    let machine = std::fs::read_to_string(dir.join("machine.json")).unwrap();
+    assert!(machine.contains(&first), "the lifted window state must land in machine.json");
 }
 
 #[test]
@@ -348,4 +382,127 @@ fn decisions_made_on_two_machines_both_survive_the_merge() {
         "a dismissal is a labelled negative and the scarce half of the corpus; losing it \
          to a merge would be the worst kind of quiet data loss"
     );
+}
+
+
+/// The critical case: a document that is there and cannot be read.
+///
+/// Not a parse failure, so nothing gets quarantined, and the store used to
+/// come up empty over intact bytes. The next edit then wrote a one-note
+/// document over the user's whole corpus, with no `.corrupt` copy anywhere,
+/// because from the store's point of view nothing had gone wrong.
+///
+/// Unix only: the failure needs a real `fs::read` error on a path that
+/// `exists()`, and mode 000 is the portable way to get one. Running as root
+/// defeats it, which the guard below says out loud rather than passing.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_document_is_never_written_over() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = temp_dir("unreadable");
+    let doc = dir.join("notes.automerge");
+
+    // Build a real corpus first, then take away the ability to read it.
+    let mut original = Machine::open(&dir);
+    original.notes.create("the corpus".into(), NoteColor::Purple, NoteOrigin::Dictated);
+    original.flush();
+    let intact = std::fs::read(&doc).unwrap();
+    drop(original);
+
+    std::fs::set_permissions(&doc, std::fs::Permissions::from_mode(0o000)).unwrap();
+    assert!(
+        std::fs::read(&doc).is_err(),
+        "this test needs a document it genuinely cannot read; running as root defeats it"
+    );
+
+    let mut blocked = Machine::open(&dir);
+    assert!(blocked.notes.load_error.is_some(), "the reason has to reach the status log");
+    assert!(blocked.notes.notes.is_empty(), "nothing could be read, so nothing is on the board");
+
+    // The user carries on and writes a note. Every tick from here would have
+    // saved an empty-plus-one document over the original.
+    blocked.notes.create("written while blind".into(), NoteColor::Teal, NoteOrigin::Dictated);
+    blocked.flush();
+    blocked.flush();
+
+    std::fs::set_permissions(&doc, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(
+        std::fs::read(&doc).unwrap(),
+        intact,
+        "the only copy of the corpus must come through untouched"
+    );
+    assert!(
+        !dir.join("notes.automerge.corrupt").exists(),
+        "nothing was corrupt, so nothing should have been renamed aside"
+    );
+    assert!(
+        dir.join("notes.json").exists(),
+        "the mirror still receives everything while the document is off limits"
+    );
+}
+
+#[test]
+fn an_incoming_document_that_will_not_parse_is_moved_aside_before_the_save() {
+    let dir = temp_dir("bad_incoming");
+    let mut m = Machine::open(&dir);
+    m.notes.create("ours".into(), NoteColor::Purple, NoteOrigin::Dictated);
+    m.flush();
+
+    // A delivery that is not a document. The flush that follows writes our own
+    // to the same path, so leaving it there would destroy it.
+    std::fs::write(m.document(), b"half a file, or none of one").unwrap();
+    m.notes.create("also ours".into(), NoteColor::Rose, NoteOrigin::Dictated);
+    m.flush();
+
+    let preserved: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("notes.automerge.unreadable-"))
+        .collect();
+    assert_eq!(preserved.len(), 1, "the delivered bytes must be kept, found {preserved:?}");
+    assert_eq!(
+        std::fs::read(dir.join(&preserved[0])).unwrap(),
+        b"half a file, or none of one",
+        "kept verbatim, so a half-written file can be looked at rather than guessed about"
+    );
+
+    let reopened = Machine::open(&dir).notes;
+    assert_eq!(note_bodies(&reopened).len(), 2, "our own notes still made it to disk");
+    assert!(
+        !m.notes.doc_file_moved(),
+        "moving the file aside is also what stops the tick asking for the same failed \
+         merge twice a second"
+    );
+}
+
+#[test]
+fn a_note_deleted_on_one_machine_stays_deleted_after_the_merge() {
+    let a_dir = temp_dir("delete_wins_a");
+    let b_dir = temp_dir("delete_wins_b");
+
+    let mut a = Machine::open(&a_dir);
+    let keep = a.notes.create("keep me".into(), NoteColor::Purple, NoteOrigin::Dictated);
+    let doomed = a.notes.create("delete me".into(), NoteColor::Rose, NoteOrigin::Dictated);
+    a.flush();
+    std::fs::copy(a.document(), b_dir.join("notes.automerge")).unwrap();
+    let mut b = Machine::open(&b_dir);
+
+    // Callisto deletes the note while the laptop is editing it.
+    a.notes.delete(&doomed);
+    a.flush();
+    b.notes.set_body(&doomed, "edited on the laptop".into());
+    b.flush();
+
+    carry_document(&b, &a);
+    a.flush();
+
+    assert!(
+        a.notes.get(&doomed).is_none(),
+        "an explicit delete outranks a concurrent edit. This falls out of the map-keyed \
+         layout rather than being enforced anywhere, so it is pinned here: an automerge \
+         upgrade that resurrected the note would otherwise pass every other test"
+    );
+    assert!(a.notes.get(&keep).is_some(), "the delete must take nothing else with it");
 }

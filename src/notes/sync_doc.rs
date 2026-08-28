@@ -43,11 +43,27 @@ pub struct SyncDoc {
     /// Drives the one-time seed from the legacy JSON: a machine that received
     /// the document through sync must never re-seed from its own stale JSON.
     existed: bool,
+    /// A file that is there but could not be read, and could not be
+    /// quarantined either, latches this and no write ever goes out.
+    ///
+    /// Without it, an `fs::read` that fails on an existing file (a permission
+    /// change, an I/O error, a race on the synced mount Task 10 puts this on)
+    /// would leave an empty in-memory document that the very next flush
+    /// writes over the intact bytes. The corpus would be gone, with no
+    /// `.corrupt` copy, because nothing failed to *parse*. The parse arm has
+    /// always quarantined first; this is the arm that cannot.
+    read_only: bool,
 }
 
 impl Default for SyncDoc {
     fn default() -> Self {
-        Self { doc: AutoCommit::new(), path: PathBuf::new(), last_write: None, existed: false }
+        Self {
+            doc: AutoCommit::new(),
+            path: PathBuf::new(),
+            last_write: None,
+            existed: false,
+            read_only: false,
+        }
     }
 }
 
@@ -100,12 +116,13 @@ impl SyncDoc {
     pub fn open(path: PathBuf) -> (Self, Option<String>) {
         let mut error = None;
         let mut existed = false;
+        let mut read_only = false;
         let mut doc = AutoCommit::new();
 
         if path.exists() {
             existed = true;
             match std::fs::read(&path) {
-                Ok(bytes) => match AutoCommit::load(&bytes) {
+                Ok(bytes) => match load_or_salvage(&bytes) {
                     Ok(loaded) => doc = loaded,
                     Err(e) => {
                         // Quarantine before anything can write over it. The
@@ -120,22 +137,66 @@ impl SyncDoc {
                         tracing::error!("{message}");
                         if let Err(e) = std::fs::rename(&path, &backup) {
                             tracing::error!("Could not preserve the corrupt document: {e}");
+                            // The bytes are still sitting at `path` and we
+                            // could not move them aside, so writing is off.
+                            read_only = true;
+                        } else {
+                            existed = false;
                         }
-                        existed = false;
                         error = Some(message);
                     }
                 },
                 Err(e) => {
-                    let message =
-                        format!("Notes document at {} could not be read ({e})", path.display());
+                    let message = format!(
+                        "Notes document at {} exists but could not be read ({e}); \
+                         it will not be written to this session",
+                        path.display()
+                    );
                     tracing::error!("{message}");
+                    read_only = true;
                     error = Some(message);
                 }
             }
         }
 
         let last_write = existed.then(|| mtime(&path)).flatten();
-        (Self { doc, path, last_write, existed }, error)
+        (Self { doc, path, last_write, existed, read_only }, error)
+    }
+
+    /// Whether writing is off for this session. See the field.
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
+    /// Move an incoming document we could not parse out of the way, so the
+    /// save that follows does not overwrite it.
+    ///
+    /// `merge_incoming` leaves an unparseable file alone on the theory that a
+    /// sync client is mid-write and the next tick will find it whole. That
+    /// only holds if nothing writes over it in between, and the same flush
+    /// goes on to save our own document to the same path. The quarantine name
+    /// carries a timestamp so a second bad delivery cannot overwrite the
+    /// first, and a sync client that really was mid-write simply delivers it
+    /// again.
+    pub fn quarantine_incoming(&mut self) {
+        let stamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or_default();
+        let backup = self.path.with_extension(format!("automerge.unreadable-{stamp}"));
+        match std::fs::rename(&self.path, &backup) {
+            Ok(()) => {
+                tracing::error!(
+                    "An incoming sync document at {} could not be parsed; preserved as {}",
+                    self.path.display(),
+                    backup.display()
+                );
+                // The file is gone from `path`, so `file_moved` goes quiet
+                // rather than asking for the same failed merge every tick.
+                self.last_write = None;
+            }
+            Err(e) => tracing::error!("Could not move the unreadable sync document aside: {e}"),
+        }
     }
 
     pub fn doc(&self) -> &AutoCommit {
@@ -189,6 +250,14 @@ impl SyncDoc {
     /// Used after a merge that turned out to bring nothing new. Without it a
     /// sync client rewriting the file with content we already have would keep
     /// `file_moved` true for the rest of the session.
+    ///
+    /// ⚠️ There is a window here that mtime detection cannot close. A sync
+    /// client that rewrites the file between `merge_incoming`'s read and this
+    /// stat leaves us recording the newer mtime against the older content,
+    /// and the next save then overwrites a delivery we never merged. Task
+    /// 11's live sync is what removes the guesswork; until then the exposure
+    /// is one flush interval wide and the delivery is re-sent by any client
+    /// that notices the file changed under it.
     pub fn mark_seen(&mut self) {
         self.last_write = mtime(&self.path);
     }
@@ -198,8 +267,13 @@ impl SyncDoc {
     /// Temp file plus rename, matching the JSON stores: a crash mid-write
     /// leaves the previous corpus intact rather than a truncated file the
     /// next launch would quarantine.
+    ///
+    /// A no-op on a read-only document. The bytes at `path` are the user's
+    /// only copy of the corpus and we could not read them; writing what we
+    /// have instead would destroy them. `notes.json` keeps receiving
+    /// everything meanwhile, and the reason is already in the status log.
     pub fn save(&mut self) -> Result<()> {
-        if self.path.as_os_str().is_empty() {
+        if self.path.as_os_str().is_empty() || self.read_only {
             return Ok(());
         }
         if let Some(dir) = self.path.parent() {
@@ -232,6 +306,31 @@ impl SyncDoc {
             Ok(Some((_, id))) => Some(id),
             _ => None,
         }
+    }
+}
+
+/// Load a document, falling back to `load_unverified_heads` when the strict
+/// load rejects it.
+///
+/// The strict load verifies each change's hash. A file that fails only that
+/// check still holds every operation, with its original object ids, so
+/// accepting it keeps the character-level merge with the other machine
+/// working. Rebuilding from `notes.json` instead would mint fresh object ids
+/// for every note, and a merge against a peer that still holds the originals
+/// then resolves each field by conflict rather than by splice.
+fn load_or_salvage(bytes: &[u8]) -> Result<AutoCommit, automerge::AutomergeError> {
+    match AutoCommit::load(bytes) {
+        Ok(doc) => Ok(doc),
+        Err(strict) => match AutoCommit::load_unverified_heads(bytes) {
+            Ok(doc) => {
+                tracing::warn!(
+                    "The notes document failed verification ({strict}) but its operations \
+                     are intact; loading it unverified rather than rebuilding it"
+                );
+                Ok(doc)
+            }
+            Err(_) => Err(strict),
+        },
     }
 }
 

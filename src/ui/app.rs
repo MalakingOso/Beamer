@@ -101,6 +101,7 @@ pub fn App() -> Element {
             history,
             status_log,
             notes,
+            tasks,
             active_mode,
             note_passes,
         )

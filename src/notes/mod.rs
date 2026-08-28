@@ -102,6 +102,11 @@ pub struct NoteStore {
     /// one, with nothing said, is the failure this exists to stop.
     #[serde(skip)]
     pub load_error: Option<String>,
+    /// Document entries that could not be read back into a `Note`. Kept so
+    /// the next reconcile does not prune them and `machine.gc` does not wipe
+    /// their window state. See `doc_notes::Hydrated`.
+    #[serde(skip)]
+    pub(crate) unreadable_notes: Vec<String>,
 }
 
 impl Default for NoteStore {
@@ -115,6 +120,7 @@ impl Default for NoteStore {
             doc: SyncHandle::default(),
             doc_dirty: false,
             load_error: None,
+            unreadable_notes: Vec::new(),
         }
     }
 }
@@ -238,20 +244,34 @@ impl NoteStore {
         let handle = SyncHandle::new(doc);
 
         if from_document {
-            let notes = doc_notes::hydrate(&handle.lock());
+            let hydrated = doc_notes::hydrate(&handle.lock());
+            let unreadable_message = (!hydrated.unreadable.is_empty()).then(|| {
+                format!(
+                    "{} entries in the notes document could not be read and are being left \
+                     alone; they are not on the board",
+                    hydrated.unreadable.len()
+                )
+            });
             let mut store = Self {
-                notes,
+                notes: hydrated.notes,
                 path,
                 dirty: false,
                 machine,
                 attachments_dir,
                 doc: handle,
                 doc_dirty: false,
-                load_error,
+                load_error: load_error.or(unreadable_message),
+                unreadable_notes: hydrated.unreadable,
             };
             store.migrate_legacy_attachments();
-            let valid: std::collections::HashSet<&str> =
-                store.notes.iter().map(|n| n.id.as_str()).collect();
+            // An entry we could not read is a read failure, not proof the
+            // note is gone, so its window state is spared along with its key.
+            let valid: std::collections::HashSet<&str> = store
+                .notes
+                .iter()
+                .map(|n| n.id.as_str())
+                .chain(store.unreadable_notes.iter().map(String::as_str))
+                .collect();
             store.machine.gc(&valid);
             return store;
         }

@@ -40,6 +40,7 @@ fn temp_store(tag: &str) -> NoteStore {
         doc: sync_doc::SyncHandle::default(),
         doc_dirty: false,
         load_error: None,
+        unreadable_notes: Vec::new(),
     }
 }
 
@@ -438,6 +439,7 @@ fn a_load_with_nothing_to_migrate_does_not_dirty_the_store() {
         doc: sync_doc::SyncHandle::default(),
         doc_dirty: false,
         load_error: None,
+        unreadable_notes: Vec::new(),
     };
     store.create("hello".into(), NoteColor::Purple, NoteOrigin::Dictated);
     store.flush_if_dirty();

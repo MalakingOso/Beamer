@@ -15,6 +15,7 @@ use crate::config::Config;
 use crate::hotkey::CaptureMode;
 use crate::injection;
 use crate::notes::pipeline::PipelineRequest;
+use crate::notes::task_store::TaskStore;
 use crate::notes::{NoteColor, NoteOrigin, NoteStore};
 use crate::ui::history::TranscriptionHistory;
 use crate::ui::status_log::{log_status, LogLevel, StatusLog};
@@ -35,15 +36,23 @@ pub(super) fn sink_injects(mode: CaptureMode) -> bool {
 /// Returns the new note's id so the caller can open its window, or `None` when
 /// there was nothing worth keeping.
 ///
-/// The store is flushed to disk immediately rather than left to the ~500ms
+/// The corpus is flushed to disk immediately rather than left to the ~500ms
 /// debounce tick. The debounce exists for per-keystroke body edits, which are
 /// cheap to lose and instantly retypeable; a just-captured transcript is
 /// neither, and the spec's hard constraint is that a note must never be lost
 /// because something downstream failed. This mirrors `TranscriptionHistory`,
 /// which also writes inline from the orchestrator coroutine.
+///
+/// ⚠️ It has to be `flush_stores`, not `NoteStore::flush_if_dirty`. That one
+/// writes `notes.json`, which is a derived export nothing reads back once
+/// `notes.automerge` exists, so a crash inside the tick would lose a note
+/// whose audio is already gone. `flush_stores` is the single document writer,
+/// so calling it here adds a call site and not a second writer, which is why
+/// `tasks` is threaded down to this function at all.
 pub(super) async fn do_note_capture(
     text: &str,
     notes: &mut Signal<NoteStore>,
+    tasks: &mut Signal<TaskStore>,
     config: &Signal<Config>,
     status_log: &mut Signal<StatusLog>,
     note_passes: Coroutine<PipelineRequest>,
@@ -54,12 +63,8 @@ pub(super) async fn do_note_capture(
     }
 
     let color = NoteColor::from_config_name(&config.peek().notes.default_color);
-    let id = {
-        let mut store = notes.write();
-        let id = store.create(text.to_string(), color, NoteOrigin::Dictated);
-        store.flush_if_dirty();
-        id
-    };
+    let id = notes.write().create(text.to_string(), color, NoteOrigin::Dictated);
+    crate::notes::flush_stores(&mut notes.write(), &mut tasks.write());
 
     log_status(
         status_log,
@@ -95,12 +100,15 @@ pub(super) async fn deliver(
     history: &mut Signal<TranscriptionHistory>,
     status_log: &mut Signal<StatusLog>,
     notes: &mut Signal<NoteStore>,
+    tasks: &mut Signal<TaskStore>,
     config: &Signal<Config>,
     note_passes: Coroutine<PipelineRequest>,
 ) {
     if sink_injects(capture_mode) {
         do_injection(text, backends, paste_shortcut, last_injection, history, status_log).await;
-    } else if let Some(id) = do_note_capture(text, notes, config, status_log, note_passes).await {
+    } else if let Some(id) =
+        do_note_capture(text, notes, tasks, config, status_log, note_passes).await
+    {
         // Nothing here opens or places a window. The reconciler in
         // `ui::sticky_windows` watches the store and does both.
         tracing::info!("note {} created", id);

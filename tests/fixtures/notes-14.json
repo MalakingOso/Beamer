@@ -11,7 +11,13 @@
       "origin": "dictated",
       "color": "purple",
       "attachments": [],
-      "archived": false
+      "archived": false,
+      "pos": null,
+      "size": [
+        268,
+        208
+      ],
+      "open": true
     },
     {
       "id": "199022340-0001-a3f1",
@@ -24,7 +30,16 @@
       "origin": "dictated",
       "color": "violet",
       "attachments": [],
-      "archived": false
+      "archived": false,
+      "pos": [
+        1170,
+        640
+      ],
+      "size": [
+        272,
+        212
+      ],
+      "open": false
     },
     {
       "id": "199032340-0002-a3f1",
@@ -49,7 +64,16 @@
           }
         }
       ],
-      "archived": false
+      "archived": false,
+      "pos": [
+        1220,
+        690
+      ],
+      "size": [
+        276,
+        216
+      ],
+      "open": false
     },
     {
       "id": "199042340-0003-a3f1",
@@ -62,7 +86,13 @@
       "origin": "dictated",
       "color": "teal",
       "attachments": [],
-      "archived": false
+      "archived": false,
+      "pos": null,
+      "size": [
+        280,
+        220
+      ],
+      "open": true
     },
     {
       "id": "199052340-0004-a3f1",
@@ -75,7 +105,16 @@
       "origin": "dictated",
       "color": "rose",
       "attachments": [],
-      "archived": true
+      "archived": true,
+      "pos": [
+        1320,
+        790
+      ],
+      "size": [
+        284,
+        224
+      ],
+      "open": false
     },
     {
       "id": "199062340-0005-a3f1",
@@ -88,7 +127,16 @@
       "origin": "dictated",
       "color": "slate",
       "attachments": [],
-      "archived": false
+      "archived": false,
+      "pos": [
+        1370,
+        840
+      ],
+      "size": [
+        288,
+        228
+      ],
+      "open": false
     },
     {
       "id": "199072340-0006-a3f1",
@@ -117,7 +165,13 @@
           }
         }
       ],
-      "archived": false
+      "archived": false,
+      "pos": null,
+      "size": [
+        292,
+        232
+      ],
+      "open": false
     },
     {
       "id": "199082340-0007-a3f1",
@@ -130,7 +184,16 @@
       "origin": "dictated",
       "color": "violet",
       "attachments": [],
-      "archived": false
+      "archived": false,
+      "pos": [
+        1470,
+        940
+      ],
+      "size": [
+        296,
+        236
+      ],
+      "open": true
     },
     {
       "id": "199092340-0008-a3f1",
@@ -143,7 +206,16 @@
       "origin": "dictated",
       "color": "amber",
       "attachments": [],
-      "archived": false
+      "archived": false,
+      "pos": [
+        1520,
+        990
+      ],
+      "size": [
+        300,
+        240
+      ],
+      "open": false
     },
     {
       "id": "1990a2340-0009-a3f1",
@@ -156,7 +228,13 @@
       "origin": "dictated",
       "color": "teal",
       "attachments": [],
-      "archived": false
+      "archived": false,
+      "pos": null,
+      "size": [
+        304,
+        244
+      ],
+      "open": false
     },
     {
       "id": "1990b2340-000a-a3f1",
@@ -169,7 +247,16 @@
       "origin": "dictated",
       "color": "rose",
       "attachments": [],
-      "archived": true
+      "archived": true,
+      "pos": [
+        1620,
+        1090
+      ],
+      "size": [
+        308,
+        248
+      ],
+      "open": false
     },
     {
       "id": "1990c2340-000b-a3f1",
@@ -182,7 +269,16 @@
       "origin": "typed",
       "color": "slate",
       "attachments": [],
-      "archived": false
+      "archived": false,
+      "pos": [
+        1670,
+        1140
+      ],
+      "size": [
+        312,
+        252
+      ],
+      "open": false
     },
     {
       "id": "1990d2340-000c-a3f1",
@@ -195,7 +291,13 @@
       "origin": "dictated",
       "color": "purple",
       "attachments": [],
-      "archived": false
+      "archived": false,
+      "pos": null,
+      "size": [
+        316,
+        256
+      ],
+      "open": false
     },
     {
       "id": "1990e2340-000d-a3f1",
@@ -208,7 +310,16 @@
       "origin": "typed",
       "color": "violet",
       "attachments": [],
-      "archived": false
+      "archived": false,
+      "pos": [
+        1770,
+        1240
+      ],
+      "size": [
+        320,
+        260
+      ],
+      "open": false
     }
   ]
 }

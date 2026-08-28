@@ -6,6 +6,7 @@ use crate::audio::{try_send_reserving, warn_channel_full, AudioPipeline, SendOut
 use crate::config::Config;
 use crate::hotkey::{CaptureMode, HotkeyEvent};
 use crate::notes::pipeline::PipelineRequest;
+use crate::notes::task_store::TaskStore;
 use crate::notes::NoteStore;
 use crate::transcription::{self, TranscriptKind};
 use crate::ui::history::TranscriptionHistory;
@@ -39,6 +40,7 @@ pub async fn run(
     mut history: Signal<TranscriptionHistory>,
     mut status_log: Signal<StatusLog>,
     mut notes: Signal<NoteStore>,
+    mut tasks: Signal<TaskStore>,
     mut active_mode: Signal<CaptureMode>,
     note_passes: Coroutine<PipelineRequest>,
 ) {
@@ -61,6 +63,7 @@ pub async fn run(
                     &mut hotkey_rx,
                     &mut status_log,
                     &mut notes,
+                    &mut tasks,
                     capture_mode,
                     note_passes,
                 )
@@ -87,6 +90,7 @@ async fn handle_recording(
     hotkey_rx: &mut UnboundedReceiver<HotkeyEvent>,
     status_log: &mut Signal<StatusLog>,
     notes: &mut Signal<NoteStore>,
+    tasks: &mut Signal<TaskStore>,
     capture_mode: CaptureMode,
     note_passes: Coroutine<PipelineRequest>,
 ) -> Result<()> {
@@ -129,7 +133,7 @@ async fn handle_recording(
         return handle_batch_recording(
             backend, &api_key, language, &backends, &cfg, config,
             rec_state, last_injection, history, hotkey_rx, status_log,
-            notes, capture_mode, note_passes,
+            notes, tasks, capture_mode, note_passes,
         ).await;
     }
 
@@ -266,7 +270,7 @@ async fn handle_recording(
                             tracing::info!("[final] {}", ev.text);
                             log_status(status_log, LogLevel::Info, format!("[final] {}", ev.text));
                             sink::deliver(&ev.text, capture_mode, &backends, &paste_shortcut,
-                                    last_injection, history, status_log, notes, config,
+                                    last_injection, history, status_log, notes, tasks, config,
                                     note_passes).await;
                         }
                     }
@@ -313,7 +317,7 @@ async fn handle_recording(
     log_status(status_log, LogLevel::Info, "Sent commit, waiting for final transcript...");
     drain_final_transcripts(
         &mut session, &backends, &paste_shortcut, last_injection, history, status_log,
-        notes, config, capture_mode, note_passes,
+        notes, tasks, config, capture_mode, note_passes,
     )
     .await;
 
@@ -331,6 +335,7 @@ async fn drain_final_transcripts(
     history: &mut Signal<TranscriptionHistory>,
     status_log: &mut Signal<StatusLog>,
     notes: &mut Signal<NoteStore>,
+    tasks: &mut Signal<TaskStore>,
     config: &Signal<Config>,
     capture_mode: CaptureMode,
     note_passes: Coroutine<PipelineRequest>,
@@ -347,7 +352,7 @@ async fn drain_final_transcripts(
                                 tracing::info!("[final] {}", ev.text);
                                 log_status(status_log, LogLevel::Info, format!("[final] {}", ev.text));
                                 sink::deliver(&ev.text, capture_mode, backends, paste_shortcut,
-                                        last_injection, history, status_log, notes, config,
+                                        last_injection, history, status_log, notes, tasks, config,
                                         note_passes).await;
                             }
                         }
@@ -374,6 +379,7 @@ async fn handle_batch_recording(
     hotkey_rx: &mut UnboundedReceiver<HotkeyEvent>,
     status_log: &mut Signal<StatusLog>,
     notes: &mut Signal<NoteStore>,
+    tasks: &mut Signal<TaskStore>,
     capture_mode: CaptureMode,
     note_passes: Coroutine<PipelineRequest>,
 ) -> Result<()> {
@@ -494,7 +500,8 @@ async fn handle_batch_recording(
             );
             if !text.trim().is_empty() {
                 sink::deliver(&text, capture_mode, backends, &cfg.injection.paste_shortcut,
-                        last_injection, history, status_log, notes, config, note_passes).await;
+                        last_injection, history, status_log, notes, tasks, config,
+                        note_passes).await;
             }
         }
         Err(e) => {

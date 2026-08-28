@@ -43,6 +43,10 @@ pub struct TaskStore {
     /// by `App()`.
     #[serde(skip)]
     pub load_error: Option<String>,
+    /// Document entries that could not be read back into a `Task`. Kept so
+    /// the next reconcile does not prune them.
+    #[serde(skip)]
+    pub(crate) unreadable_tasks: Vec<String>,
 }
 
 impl Default for TaskStore {
@@ -54,6 +58,7 @@ impl Default for TaskStore {
             doc: SyncHandle::default(),
             doc_dirty: false,
             load_error: None,
+            unreadable_tasks: Vec::new(),
         }
     }
 }
@@ -83,14 +88,22 @@ impl TaskStore {
         let doc = notes.sync_doc();
         let from_document = doc.lock().existed();
         if from_document {
-            let tasks = doc_tasks::hydrate(&doc.lock());
+            let hydrated = doc_tasks::hydrate(&doc.lock());
+            let load_error = (!hydrated.unreadable.is_empty()).then(|| {
+                format!(
+                    "{} rows in the tasks document could not be read and are being left \
+                     alone; they are not on the Tasks page",
+                    hydrated.unreadable.len()
+                )
+            });
             return Self {
-                tasks,
+                tasks: hydrated.tasks,
                 path,
                 dirty: false,
                 doc,
                 doc_dirty: false,
-                load_error: None,
+                load_error,
+                unreadable_tasks: hydrated.unreadable,
             };
         }
         let mut store = Self::load_from(path);
@@ -205,6 +218,7 @@ impl TaskStore {
             doc: SyncHandle::default(),
             doc_dirty: false,
             load_error: None,
+            unreadable_tasks: Vec::new(),
         }
     }
 

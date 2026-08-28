@@ -89,7 +89,7 @@ pub struct StickyNoteProps {
 
 #[component]
 pub fn StickyNote(props: StickyNoteProps) -> Element {
-    let StickyNoteProps { id, mut notes, tasks, passes } = props;
+    let StickyNoteProps { id, mut notes, mut tasks, passes } = props;
 
     // Wayland gives a client no way to set its own position, but it may ask the
     // compositor to take over an interactive move — `drag()` wraps tao's
@@ -200,13 +200,17 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
                 if dropped.is_empty() {
                     return;
                 }
-                let mut store = notes.write();
-                for attachment in dropped {
-                    store.add_attachment(&drop_id, attachment);
+                {
+                    let mut store = notes.write();
+                    for attachment in dropped {
+                        store.add_attachment(&drop_id, attachment);
+                    }
                 }
-                // Inline, like `do_note_capture`: a photo you just dropped must
-                // not be lost to a crash before the debounce tick.
-                store.flush_if_dirty();
+                // Inline, like `do_note_capture`, and through `flush_stores`
+                // for the same reason: `flush_if_dirty` writes only the JSON
+                // mirror, which nothing reads back, so a photo you just
+                // dropped would still be lost to a crash before the tick.
+                crate::notes::flush_stores(&mut notes.write(), &mut tasks.write());
             },
             onpaste: move |e: Event<ClipboardData>| {
                 // ⚠️ `ClipboardData` carries **nothing** on desktop —
@@ -219,12 +223,11 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
                     Pasted::Url(url) => {
                         e.prevent_default();
                         paste_hint.set(false);
-                        let mut store = notes.write();
-                        store.add_attachment(
+                        notes.write().add_attachment(
                             &paste_id,
                             Attachment::Link { id: next_id(), url, title: None },
                         );
-                        store.flush_if_dirty();
+                        crate::notes::flush_stores(&mut notes.write(), &mut tasks.write());
                     }
                     Pasted::ImageBytes => {
                         e.prevent_default();
@@ -278,14 +281,22 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
                                 if files.is_empty() {
                                     return;
                                 }
-                                let mut store = notes.write();
-                                for file in files {
-                                    store.add_attachment(
-                                        &pick_id,
-                                        sticky_blocks::attachment_for_path(next_id(), file.path()),
-                                    );
+                                {
+                                    let mut store = notes.write();
+                                    for file in files {
+                                        store.add_attachment(
+                                            &pick_id,
+                                            sticky_blocks::attachment_for_path(
+                                                next_id(),
+                                                file.path(),
+                                            ),
+                                        );
+                                    }
                                 }
-                                store.flush_if_dirty();
+                                crate::notes::flush_stores(
+                                    &mut notes.write(),
+                                    &mut tasks.write(),
+                                );
                             },
                         }
                     }

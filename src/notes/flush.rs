@@ -21,8 +21,10 @@ use super::{doc_notes, doc_tasks, NoteStore};
 struct DocPass {
     /// Something arrived from another machine and both vecs were rebuilt.
     merged: bool,
-    /// The document file was rewritten.
-    saved: bool,
+    /// The document owes nothing further. True when it was written, and also
+    /// when it is read-only and never will be: either way there is no point
+    /// asking again next tick.
+    settled: bool,
 }
 
 /// Reconcile, merge, save. Returns whether anything was written.
@@ -40,7 +42,7 @@ pub fn flush_stores(notes: &mut NoteStore, tasks: &mut TaskStore) -> bool {
         tasks.dirty = true;
     }
 
-    let mut wrote = pass.saved;
+    let mut wrote = pass.settled;
     if notes.flush_if_dirty() {
         wrote = true;
     }
@@ -52,7 +54,7 @@ pub fn flush_stores(notes: &mut NoteStore, tasks: &mut TaskStore) -> bool {
     // would otherwise leave the flag standing on state the document already
     // holds, making every subsequent tick take a write lock for nothing. A
     // failed document save leaves it set, which is the retry.
-    if pass.saved {
+    if pass.settled {
         notes.doc_dirty = false;
         tasks.doc_dirty = false;
     }
@@ -62,12 +64,22 @@ pub fn flush_stores(notes: &mut NoteStore, tasks: &mut TaskStore) -> bool {
 fn run_document_pass(notes: &mut NoteStore, tasks: &mut TaskStore) -> DocPass {
     let handle = notes.sync_doc();
     let mut doc = handle.lock();
+
+    if doc.is_read_only() {
+        // The bytes on disk are the only copy of the corpus and we could not
+        // read them. Reconciling into a document nobody will ever write is
+        // work for nothing, and reporting it as outstanding would make every
+        // tick take a write lock on both signals. The mirrors still get
+        // everything, and the reason is already in the status log.
+        return DocPass { merged: false, settled: true };
+    }
+
     let before = doc.heads();
 
-    if let Err(e) = doc_notes::reconcile(&mut doc, &notes.notes) {
+    if let Err(e) = doc_notes::reconcile(&mut doc, &notes.notes, &notes.unreadable_notes) {
         tracing::error!("Could not write notes into the sync document: {e}");
     }
-    if let Err(e) = doc_tasks::reconcile(&mut doc, &tasks.tasks) {
+    if let Err(e) = doc_tasks::reconcile(&mut doc, &tasks.tasks, &tasks.unreadable_tasks) {
         tracing::error!("Could not write tasks into the sync document: {e}");
     }
 
@@ -82,23 +94,32 @@ fn run_document_pass(notes: &mut NoteStore, tasks: &mut TaskStore) -> DocPass {
                 // write lock on both signals for nothing.
                 doc.mark_seen();
             }
-            // Very likely a half-written file. Leave the recorded mtime alone
-            // so the next tick tries again.
-            Err(e) => tracing::warn!("Could not merge the incoming sync document: {e}"),
+            Err(e) => {
+                // The save below writes our own document to this same path,
+                // so leaving the file where it is would destroy the delivery
+                // rather than retry it. Move it aside first, keeping the
+                // bytes; a client that really was mid-write delivers again.
+                tracing::warn!("Could not merge the incoming sync document: {e}");
+                doc.quarantine_incoming();
+            }
         }
     }
 
     if merged {
-        notes.notes = doc_notes::hydrate(&doc);
-        tasks.tasks = doc_tasks::hydrate(&doc);
+        let hydrated = doc_notes::hydrate(&doc);
+        notes.notes = hydrated.notes;
+        notes.unreadable_notes = hydrated.unreadable;
+        let hydrated = doc_tasks::hydrate(&doc);
+        tasks.tasks = hydrated.tasks;
+        tasks.unreadable_tasks = hydrated.unreadable;
     }
 
-    let mut saved = merged || doc.heads() != before;
-    if saved {
+    let mut settled = merged || doc.heads() != before;
+    if settled {
         if let Err(e) = doc.save() {
             tracing::error!("Failed to save the sync document: {e}");
-            saved = false;
+            settled = false;
         }
     }
-    DocPass { merged, saved }
+    DocPass { merged, settled }
 }

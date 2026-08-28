@@ -130,6 +130,7 @@ mod tests {
             doc: crate::notes::sync_doc::SyncHandle::default(),
             doc_dirty: false,
             load_error: None,
+            unreadable_notes: Vec::new(),
         }
     }
 

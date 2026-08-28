@@ -55,6 +55,7 @@ impl NoteStore {
                     doc,
                     doc_dirty: false,
                     load_error: None,
+                    unreadable_notes: Vec::new(),
                 }
             };
 
