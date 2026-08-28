@@ -211,7 +211,9 @@ impl MachineStore {
     }
 
     /// Lift a legacy note's `pos`/`size`/`open` into this store, for the
-    /// `notes.json` migration in `NoteStore::load`.
+    /// `notes.json` migration in `NoteStore::load`. Returns whether anything
+    /// was actually inserted, so the caller knows to also rewrite
+    /// `notes.json` and drop the stale keys there.
     ///
     /// Only fills a window with no entry yet. After the first migration,
     /// `Note` no longer serializes these fields, so a legacy notes.json is
@@ -219,12 +221,13 @@ impl MachineStore {
     /// second load before the first save (say, a crash in between) cannot
     /// clobber real window state that arrived in the meantime with stale
     /// `None`s and `false`s reconstructed from the same old file.
-    pub fn migrate_legacy(&mut self, id: &str, pos: Option<(i32, i32)>, size: Option<(u32, u32)>, open: bool) {
+    pub fn migrate_legacy(&mut self, id: &str, pos: Option<(i32, i32)>, size: Option<(u32, u32)>, open: bool) -> bool {
         if self.windows.contains_key(id) {
-            return;
+            return false;
         }
         self.windows.insert(id.to_string(), WindowState { pos, size, open });
         self.dirty = true;
+        true
     }
 }
 
@@ -311,7 +314,7 @@ mod tests {
     fn migrate_legacy_fills_an_empty_entry_but_never_clobbers_a_real_one() {
         let mut store = MachineStore::new(temp_path("migrate"));
 
-        store.migrate_legacy("n1", Some((10, 20)), Some((300, 200)), true);
+        assert!(store.migrate_legacy("n1", Some((10, 20)), Some((300, 200)), true));
         assert_eq!(store.pos("n1"), Some((10, 20)));
         assert_eq!(store.size("n1"), Some((300, 200)));
         assert!(store.is_open("n1"));
@@ -320,7 +323,10 @@ mod tests {
         // (say, from a load before the first save landed) must not overwrite
         // that with the old file's numbers.
         store.set_size("n1", (400, 300));
-        store.migrate_legacy("n1", Some((10, 20)), Some((300, 200)), true);
+        assert!(
+            !store.migrate_legacy("n1", Some((10, 20)), Some((300, 200)), true),
+            "an id already present must report nothing was inserted"
+        );
         assert_eq!(store.size("n1"), Some((400, 300)), "an existing entry must not be clobbered");
     }
 

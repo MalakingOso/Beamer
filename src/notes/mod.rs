@@ -136,18 +136,25 @@ impl NoteStore {
     /// testable without reaching into the user's real config dir, the same
     /// improvement `TaskStore::load_from` made over the equivalent code here
     /// before it existed.
+    ///
+    /// GC only runs in the `Ok` branch below, deliberately. A missing,
+    /// unreadable or quarantined `notes.json` tells us nothing about which
+    /// notes exist; it is a read failure, not proof of absence. GCing on any
+    /// of those would permanently wipe `machine.json` on a transient error, a
+    /// risk that stops being theoretical once a sync writer (Task 9) can be
+    /// mid-replace of `notes.json` when this reads it. A genuine fresh
+    /// install pays nothing for the restriction: its `machine.json` is
+    /// already empty.
     fn load_from(path: PathBuf, machine_path: PathBuf) -> Self {
-        let mut machine = MachineStore::load_from(machine_path);
+        let machine = MachineStore::load_from(machine_path);
 
         if !path.exists() {
-            machine.gc(&std::collections::HashSet::new());
             return Self { notes: Vec::new(), path, dirty: false, machine };
         }
         let contents = match std::fs::read_to_string(&path) {
             Ok(c) => c,
             Err(e) => {
                 tracing::error!("Could not read notes at {:?}: {}", path, e);
-                machine.gc(&std::collections::HashSet::new());
                 return Self { notes: Vec::new(), path, dirty: false, machine };
             }
         };
@@ -171,7 +178,6 @@ impl NoteStore {
                     path, e, backup
                 );
                 let _ = std::fs::rename(&path, &backup);
-                machine.gc(&std::collections::HashSet::new());
                 Self { notes: Vec::new(), path, dirty: false, machine }
             }
         }
@@ -182,12 +188,23 @@ impl NoteStore {
     /// migrated once (`MachineStore::migrate_legacy` will not overwrite an
     /// existing entry), and a no-op forever after the first save, since
     /// `Note` stops serializing these fields at all.
+    ///
+    /// Sets `self.dirty` when anything was actually lifted, so the next flush
+    /// rewrites `notes.json` without the stale keys. Leaving them on disk
+    /// looked harmless locally (an unrelated edit would eventually flush them
+    /// away), but once `notes.json` syncs (Task 10), a legacy file that never
+    /// gets a content edit before it reaches a second machine would carry its
+    /// `pos`/`size`/`open` there and let that machine's own migration import
+    /// the first machine's geometry and open set. Machine-local state leaking
+    /// through the synced file is exactly what this task exists to prevent.
     fn migrate_legacy_window_state(&mut self, contents: &str) {
         let Ok(legacy) = serde_json::from_str::<LegacyNotesFile>(contents) else {
             return;
         };
         for note in legacy.notes {
-            self.machine.migrate_legacy(&note.id, note.pos, note.size, note.open);
+            if self.machine.migrate_legacy(&note.id, note.pos, note.size, note.open) {
+                self.dirty = true;
+            }
         }
     }
 

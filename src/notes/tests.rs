@@ -337,3 +337,84 @@ fn loading_gcs_machine_entries_for_notes_that_no_longer_exist() {
     assert!(store.is_open("199012340-0000"), "a note still present keeps its state");
     assert!(!store.is_open("long-gone"), "an entry for a note that no longer exists must be dropped");
 }
+
+/// GC only ever runs against a successfully parsed `notes.json`. A missing,
+/// unreadable or corrupt (quarantined) file tells us nothing about which
+/// notes exist, and must not be read as "no notes exist". That would wipe
+/// `machine.json` permanently on what may be a transient read error, which
+/// stops being theoretical once a sync writer can be mid-replace of
+/// `notes.json` when a load lands.
+#[test]
+fn a_missing_notes_json_leaves_an_existing_machine_json_intact() {
+    let (path, machine_path) = temp_migration_paths("missing_notes");
+    std::fs::remove_file(&path).unwrap();
+    {
+        let mut machine = MachineStore::new(machine_path.clone());
+        machine.set_open("still-here", true);
+        machine.set_size("still-here", (400, 300));
+        machine.flush_if_dirty();
+    }
+
+    let store = NoteStore::load_from(path, machine_path);
+
+    assert!(
+        store.is_open("still-here"),
+        "a missing notes.json is a read failure, not proof the note is gone"
+    );
+    assert_eq!(store.size("still-here"), Some((400, 300)));
+}
+
+#[test]
+fn a_quarantined_corrupt_notes_json_leaves_an_existing_machine_json_intact() {
+    let (path, machine_path) = temp_migration_paths("corrupt_notes");
+    std::fs::write(&path, "not valid json").unwrap();
+    {
+        let mut machine = MachineStore::new(machine_path.clone());
+        machine.set_open("still-here", true);
+        machine.flush_if_dirty();
+    }
+
+    let store = NoteStore::load_from(path, machine_path);
+
+    assert!(
+        store.is_open("still-here"),
+        "quarantining a corrupt notes.json must not also wipe machine.json"
+    );
+}
+
+#[test]
+fn a_migrating_load_leaves_the_store_dirty_so_the_stale_keys_get_rewritten_away() {
+    let (path, machine_path) = temp_migration_paths("migrate_dirty");
+
+    let store = NoteStore::load_from(path, machine_path);
+
+    assert!(
+        store.is_dirty(),
+        "lifting legacy fields off notes.json must dirty the store, or a          never-edited legacy file could sync to a second machine and leak          the first machine's window state into that machine's own migration"
+    );
+}
+
+#[test]
+fn a_load_with_nothing_to_migrate_does_not_dirty_the_store() {
+    let dir = std::env::temp_dir().join(format!("beamer_notes_test_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("no_migration.json");
+    let machine_path = dir.join("no_migration.machine.json");
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&machine_path);
+
+    let mut store = NoteStore {
+        notes: Vec::new(),
+        path: path.clone(),
+        dirty: false,
+        machine: MachineStore::new(machine_path.clone()),
+    };
+    store.create("hello".into(), NoteColor::Purple, NoteOrigin::Dictated);
+    store.flush_if_dirty();
+
+    let reloaded = NoteStore::load_from(path, machine_path);
+
+    let reason = "a notes.json already written under the current schema carries no \
+                   legacy keys, so there is nothing to migrate and nothing to rewrite";
+    assert!(!reloaded.is_dirty(), "{}", reason);
+}
