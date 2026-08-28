@@ -1,7 +1,16 @@
 fn main() {
-    // Embed Windows application manifest for DPI awareness and asInvoker
-    #[cfg(target_os = "windows")]
-    {
+    // Embed Windows application manifest for DPI awareness and asInvoker.
+    //
+    // This has to be a runtime `std::env::var("CARGO_CFG_TARGET_OS")` check,
+    // not `#[cfg(target_os = "windows")]` or `cfg!(target_os = "windows")`.
+    // Both of those read as obviously correct and are not: build.rs is
+    // compiled and run for the *host*, so any `cfg`-based check, including
+    // the `cfg!` macro, evaluates against the host's OS. Cross-compiling from
+    // Linux to Windows would make the whole block vanish silently: no error,
+    // no icon, no manifest, and `winresource` never runs. `CARGO_CFG_TARGET_OS`
+    // is the one thing Cargo sets to the *target* triple's OS, which is what
+    // this block actually needs to know.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         let mut res = winresource::WindowsResource::new();
         res.set_icon("assets/icon.ico");
         res.set_manifest(

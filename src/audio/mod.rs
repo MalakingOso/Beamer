@@ -92,6 +92,10 @@ fn level_channel() -> &'static (watch::Sender<f32>, watch::Receiver<f32>) {
 }
 
 /// Subscribe to live mic levels. Receivers see the most recent value only.
+///
+/// Linux-only: sole caller `ui::linux_integration` feeds the GNOME shell
+/// pill's waveform and is itself `#![cfg(target_os = "linux")]`.
+#[cfg(target_os = "linux")]
 pub fn subscribe_levels() -> watch::Receiver<f32> {
     level_channel().1.clone()
 }

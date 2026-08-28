@@ -30,6 +30,11 @@ use crate::ui::note_layout::Rect;
 /// A `GetWorkArea` extension method would be more correct — it would account
 /// for docks and any other struts — but it is speculative, and adding it later
 /// costs only the log out that any other extension change costs anyway.
+///
+/// Windows-only note: this constant is a GNOME concept and must never apply
+/// there. Windows gets its own taskbar-aware rectangle per monitor (see
+/// `windows_work_rect`), and `work_area` compensates `union_work_area`'s
+/// unconditional use of this constant back out on that target.
 const PANEL_INSET: i32 = 40;
 
 /// A plain 1080p desktop, assumed when no monitor can be enumerated.
@@ -91,25 +96,40 @@ fn union_work_area(monitors: &[Rect]) -> Rect {
 /// 1.0 and diverge at every other scale, so the factor is divided out here —
 /// per monitor, using that monitor's own scale, since a mixed-DPI desktop has
 /// no single factor to divide by.
+///
+/// ⚠️ That per-monitor division is also why mixed-DPI multi-monitor placement
+/// stays wrong on Windows even after this function accounts for the taskbar.
+/// There is no global logical coordinate space to place a note in: each
+/// monitor's physical rectangle is divided by *its own* scale factor and the
+/// results are unioned as if they shared one coordinate system, which is only
+/// actually true when every monitor uses the same scale. A uniform-DPI desktop
+/// (one display, or several matched ones) round-trips correctly; a mismatched
+/// pair does not. Modelling Windows' real per-monitor virtual-desktop layout
+/// is a bigger change than this fix, and is not attempted here.
 pub fn work_area(window: &DesktopContext) -> Rect {
     let mut logical: Vec<Rect> = Vec::new();
     for monitor in window.available_monitors() {
         let scale = monitor.scale_factor();
-        let size = monitor.size();
-        let origin = monitor.position();
+
+        #[cfg(target_os = "windows")]
+        let (origin_x, origin_y, phys_w, phys_h) =
+            windows_work_rect(&monitor).unwrap_or_else(|| physical_monitor_rect(&monitor));
+        #[cfg(not(target_os = "windows"))]
+        let (origin_x, origin_y, phys_w, phys_h) = physical_monitor_rect(&monitor);
+
         let rect = Rect {
-            x: (f64::from(origin.x) / scale) as i32,
-            y: (f64::from(origin.y) / scale) as i32,
-            w: (f64::from(size.width) / scale) as u32,
-            h: (f64::from(size.height) / scale) as u32,
+            x: (f64::from(origin_x) / scale) as i32,
+            y: (f64::from(origin_y) / scale) as i32,
+            w: (f64::from(phys_w) / scale) as u32,
+            h: (f64::from(phys_h) / scale) as u32,
         };
         tracing::info!(
             "Monitor {:?}: physical {}x{} at ({}, {}), scale {} -> logical {}x{} at ({}, {})",
             monitor.name().unwrap_or_default(),
-            size.width,
-            size.height,
-            origin.x,
-            origin.y,
+            phys_w,
+            phys_h,
+            origin_x,
+            origin_y,
             scale,
             rect.w,
             rect.h,
@@ -119,7 +139,16 @@ pub fn work_area(window: &DesktopContext) -> Rect {
         logical.push(rect);
     }
 
-    let area = union_work_area(&logical);
+    // `union_work_area` always reserves `PANEL_INSET` on the top edge for the
+    // GNOME panel, and that logic is shared and stays that way (see its own
+    // doc comment). Windows has no such panel: `windows_work_rect` above
+    // already excludes the taskbar per monitor via `rcWork`, so applying the
+    // GNOME inset on top of that would double-reserve space nothing occupies.
+    // `undo_gnome_inset` cancels the fixed inset back out on that target
+    // rather than forking `union_work_area`, keeping the tested union math in
+    // one place.
+    let area = undo_gnome_inset(union_work_area(&logical));
+
     // At info!, not debug!. A wrong work area misplaces every note at once and
     // is otherwise indistinguishable from the scatter being broken, so the
     // rectangle actually used has to be readable without a special log level.
@@ -132,6 +161,53 @@ pub fn work_area(window: &DesktopContext) -> Rect {
         logical.len(),
     );
     area
+}
+
+/// Cancel `union_work_area`'s fixed GNOME-panel inset back out on Windows,
+/// where `windows_work_rect` already produced a taskbar-aware rectangle and
+/// no further reservation is wanted. A no-op everywhere else.
+#[cfg(target_os = "windows")]
+fn undo_gnome_inset(mut area: Rect) -> Rect {
+    area.y -= PANEL_INSET;
+    area.h += PANEL_INSET as u32;
+    area
+}
+
+#[cfg(not(target_os = "windows"))]
+fn undo_gnome_inset(area: Rect) -> Rect {
+    area
+}
+
+/// A monitor's full physical rectangle (position and size), the fallback used
+/// when a taskbar-aware rectangle either isn't available (non-Windows) or
+/// couldn't be read (`GetMonitorInfoW` failing on Windows).
+fn physical_monitor_rect(monitor: &dioxus::desktop::tao::monitor::MonitorHandle) -> (i32, i32, u32, u32) {
+    let size = monitor.size();
+    let origin = monitor.position();
+    (origin.x, origin.y, size.width, size.height)
+}
+
+/// A monitor's usable rectangle (excluding the taskbar and any other appbar),
+/// in the same physical-pixel space as `physical_monitor_rect`.
+///
+/// `None` means `GetMonitorInfoW` failed for this monitor (or tao's
+/// `hmonitor()` doesn't correspond to a monitor Win32 still knows about,
+/// possible on a hot-unplug race). Callers fall back to the full rectangle.
+#[cfg(target_os = "windows")]
+fn windows_work_rect(
+    monitor: &dioxus::desktop::tao::monitor::MonitorHandle,
+) -> Option<(i32, i32, u32, u32)> {
+    use dioxus::desktop::tao::platform::windows::MonitorHandleExtWindows;
+    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFO};
+
+    let hmonitor = HMONITOR(monitor.hmonitor() as *mut std::ffi::c_void);
+    let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+    let ok = unsafe { GetMonitorInfoW(hmonitor, &mut info) };
+    if !ok.as_bool() {
+        return None;
+    }
+    let rc = info.rcWork;
+    Some((rc.left, rc.top, (rc.right - rc.left).max(0) as u32, (rc.bottom - rc.top).max(0) as u32))
 }
 
 /// Logical size the main window is built with — see `ui::launch_app`.
