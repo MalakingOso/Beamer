@@ -42,17 +42,41 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+      - name: Install dioxus-cli
+        uses: taiki-e/install-action@v2
+        with:
+          tool: dioxus-cli@0.7.10
+
+      # `dx build`, not `cargo build`. The app uses manganis `asset!()` at
+      # `src/ui/app.rs` for the stylesheet and the icon, and only the dioxus
+      # CLI runs the asset pipeline that resolves them. A `cargo build` binary
+      # links and runs but ships unprocessed asset references, which is how the
+      # main window ends up unstyled.
+      #
       # `build.rs` guards on CARGO_CFG_TARGET_OS rather than a cfg attribute,
       # so the icon and the asInvoker/PerMonitorV2 manifest are embedded here.
       # winresource fails silently when it does not run, which is why the
       # manifest is extracted and checked below rather than assumed.
       - name: Build release
-        run: cargo build --release --locked
+        run: dx build --release
+
+      # dx puts the binary under a platform-specific profile directory rather
+      # than `target/release`, so find it instead of hardcoding the path.
+      - name: Locate the app binary
+        id: appexe
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path target -Recurse -Filter beamer.exe -ErrorAction SilentlyContinue |
+                 Where-Object { $_.FullName -notmatch '\\(build|incremental)\\' } |
+                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $exe) { throw "dx build produced no beamer.exe" }
+          Write-Host "App binary: $($exe.FullName) ($([math]::Round($exe.Length/1MB,1)) MB)"
+          "path=$($exe.FullName)" >> $env:GITHUB_OUTPUT
 
       - name: Verify the manifest and icon were embedded
         shell: pwsh
         run: |
-          $exe = "target\release\beamer.exe"
+          $exe = "${{ steps.appexe.outputs.path }}"
           if (-not (Test-Path $exe)) { throw "beamer.exe was not produced" }
 
           $mt = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter mt.exe -ErrorAction SilentlyContinue |
@@ -72,7 +96,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: beamer-windows-portable
-          path: target/release/beamer.exe
+          path: ${{ steps.appexe.outputs.path }}
           if-no-files-found: error
           retention-days: 14
 
@@ -80,11 +104,6 @@ jobs:
       # and had never been built. Beyond convenience, the installer is what
       # creates a Start Menu shortcut carrying a real AppUserModelID, which is
       # the only way to stop Windows branding Beamer's toasts "PowerShell".
-      - name: Install dioxus-cli
-        uses: taiki-e/install-action@v2
-        with:
-          tool: dioxus-cli@0.7.0
-
       - name: Bundle installer
         run: dx bundle --release --package-types nsis
 
@@ -131,6 +150,9 @@ jobs:
       # matters for it. It also has to exist at this path before the bundle
       # step below: the .deb's [bundle.deb.files] entry in Dioxus.toml copies
       # it straight out of target/release, it does not build it itself.
+      # Plain cargo is right here. sync_server is headless, has no UI and no
+      # manganis assets, so there is no asset pipeline for dx to run. The
+      # .deb picks this binary up through [bundle.deb.files].
       - name: Build sync_server
         run: cargo build --release --locked --bin sync_server
 
@@ -148,7 +170,7 @@ jobs:
       - name: Install dioxus-cli
         uses: taiki-e/install-action@v2
         with:
-          tool: dioxus-cli@0.7.0
+          tool: dioxus-cli@0.7.10
 
       - name: Bundle .deb
         run: dx bundle --release --package-types deb
