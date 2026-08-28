@@ -88,28 +88,73 @@ pub fn requested_id(path: &str) -> Option<&str> {
 pub fn use_note_media(note_id: String, notes: Signal<NoteStore>) {
     use_asset_handler(MEDIA_ROUTE, move |request: AssetRequest, responder: RequestAsyncResponder| {
         let path = request.uri().path().to_string();
-        let file = requested_id(&path).and_then(|id| {
+        // `AssetRequest` is `wry::http::Request`, which carries the request's
+        // headers straight through from the webview, so the browser's own
+        // revalidation header is reachable here without inventing anything.
+        let if_none_match = request
+            .headers()
+            .get("if-none-match")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+
+        let resolved = requested_id(&path).and_then(|id| {
             // Resolved through the note's own attachment list. There is no path
             // in the URL, so no request can name a file this note does not
             // already reference.
             let store = notes.peek();
             let note = store.get(&note_id)?;
-            NoteStore::attachment(note, id)?.resolved_path(&store.attachments_dir)
+            let attachment = NoteStore::attachment(note, id)?;
+            let file = attachment.resolved_path(&store.attachments_dir)?;
+            // Only `Owned` is content-addressed: its filename is its hash, so
+            // the bytes at this path can never change while the hash stays
+            // the same. `External` has no such guarantee, so it gets no ETag
+            // and falls through to `no-store` below, same as before.
+            let etag = match attachment.location() {
+                Some(Location::Owned { hash, .. }) => Some(format!("\"{hash}\"")),
+                _ => None,
+            };
+            Some((file, etag))
         });
 
-        let Some(file) = file else {
+        let Some((file, etag)) = resolved else {
             return responder.respond(not_found("no such attachment on this note"));
         };
+
+        if let (Some(etag), Some(if_none_match)) = (&etag, &if_none_match) {
+            if etag == if_none_match {
+                tracing::debug!("note media {:?} matched If-None-Match, sending 304", file);
+                return responder.respond(
+                    Response::builder()
+                        .status(StatusCode::NOT_MODIFIED)
+                        .header("ETag", etag.as_str())
+                        .body(Vec::new())
+                        .unwrap_or_else(|_| not_found("could not build a response")),
+                );
+            }
+        }
+
         match std::fs::read(&file) {
-            Ok(bytes) => responder.respond(
-                Response::builder()
-                    .header("Content-Type", content_type(&file))
+            Ok(bytes) => {
+                let builder = Response::builder().header("Content-Type", content_type(&file));
+                let builder = match &etag {
+                    // `no-cache` means cache it, but ask again every time,
+                    // not "never ask again". The URL is keyed on attachment
+                    // id, not on the hash: "Locate…" can repoint an id at a
+                    // new file, which is a new `Owned` hash and a new ETag
+                    // under the same URL, and `no-cache` is what makes the
+                    // next request notice that instead of serving stale
+                    // bytes forever.
+                    Some(etag) => builder.header("ETag", etag.as_str()).header("Cache-Control", "no-cache"),
                     // The file can be replaced under us by "Locate…", and the
                     // URL does not change when it is.
-                    .header("Cache-Control", "no-store")
-                    .body(bytes)
-                    .unwrap_or_else(|_| not_found("could not build a response")),
-            ),
+                    None => builder.header("Cache-Control", "no-store"),
+                };
+                responder.respond(
+                    builder
+                        .body(bytes)
+                        .unwrap_or_else(|_| not_found("could not build a response")),
+                )
+            }
             // The whole failure mode reference-by-path buys. Not an error worth
             // logging loudly: the block renders a missing-file card, which is
             // the user-facing half of the same fact.

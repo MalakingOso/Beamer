@@ -70,6 +70,11 @@ pub async fn warm_all(mut progress: Signal<WarmupProgress>) {
     {
         tracing::warn!("warmup: audio step panicked: {}", e);
     }
+    // Starts the shared sound-effect output thread. On Windows this is where
+    // the one-time WASAPI activation now happens, instead of on the user's
+    // first hotkey press. See `sounds::spawn_audio_thread`. Not
+    // `spawn_blocking`: it only starts a thread and returns.
+    crate::sounds::warm();
     tracing::debug!("warmup: audio took {:?}", t1.elapsed());
 
     let after_audio = if cfg!(target_os = "linux") { 50 } else { 66 };

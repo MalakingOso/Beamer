@@ -168,8 +168,29 @@ mod open_external_tests {
 }
 
 /// WebView user-data dir must be writable and persistent across launches.
+///
+/// `dirs::data_local_dir()`, not `dirs::data_dir()`. On Windows those two
+/// resolve to different folders (`data_dir` is Roaming `%APPDATA%`,
+/// `data_local_dir` is `%LOCALAPPDATA%`; verified against `dirs-6.0.0`'s
+/// `src/win.rs`), and Roaming is also where `notes.json`, `machine.json`,
+/// `config.toml` and `sync/` live. WebView2's `EBWebView` profile held open
+/// file handles in that same folder for the whole process lifetime, so any
+/// "delete `%APPDATA%\Beamer` to reset" instruction, or a future cleanup
+/// walking the config dir, could hit locked files mid-delete. It is also a
+/// browser cache, and Roaming profiles get copied at logon in managed
+/// environments.
+///
+/// On Linux and macOS this is a no-op: checked against the same crate's
+/// `src/lin.rs` and `src/mac.rs`, `data_dir()` and `data_local_dir()` are the
+/// same function on both platforms (`$XDG_DATA_HOME`/`~/.local/share` on
+/// Linux, `~/Library/Application Support` on macOS), so only Windows users
+/// see a change here.
+///
+/// Existing Windows installs get a fresh WebView2 profile the first time
+/// this ships. That is a cache, so it costs one slower first launch and
+/// nothing else.
 pub fn webview_data_dir() -> PathBuf {
-    dirs::data_dir()
+    dirs::data_local_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("Beamer")
 }

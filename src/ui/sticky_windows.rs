@@ -33,6 +33,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use dioxus::desktop::tao::dpi::{LogicalPosition, LogicalSize};
+#[cfg(target_os = "windows")]
+use dioxus::desktop::tao::platform::windows::WindowBuilderExtWindows;
 use dioxus::desktop::{Config as DesktopConfig, DesktopContext, WeakDesktopContext, WindowBuilder};
 use dioxus::prelude::*;
 
@@ -103,7 +105,8 @@ async fn open_note_window(
 ) {
     let (w, h) = notes.peek().size(&note.id).unwrap_or(DEFAULT_NOTE_SIZE);
     let title = window_title(&note.id);
-    let builder = WindowBuilder::new()
+    #[allow(unused_mut)]
+    let mut builder = WindowBuilder::new()
         .with_title(title.clone())
         .with_decorations(false)
         .with_always_on_top(false)
@@ -120,6 +123,19 @@ async fn open_note_window(
         // GNOME extension exists. Set on both so the Windows build needs no
         // special case and gets the same scatter for free.
         .with_position(LogicalPosition::new(f64::from(pos.0), f64::from(pos.1)));
+    // Windows only, deliberately: this reverses an earlier ruling in
+    // agent_docs/sticky_notes.md that kept notes in the taskbar, on the
+    // reasoning that a note is not always-on-top and would otherwise have no
+    // way back once buried under other windows. That reasoning held until the
+    // notes board shipped: it is now the way back to any note, buried or not,
+    // so the owner asked for the taskbar to be cleaned up instead. Splash and
+    // the recording pill already do this; notes did not because they are the
+    // one sticky window kind meant to sit on the desktop like paper, not pop
+    // to the front on demand.
+    #[cfg(target_os = "windows")]
+    {
+        builder = builder.with_skip_taskbar(true);
+    }
 
     let cfg = DesktopConfig::new()
         .with_data_directory(super::webview_data_dir())
