@@ -1,3 +1,13 @@
+// Windows GUI subsystem in release builds, so launching Beamer does not open a
+// console window behind the tray icon. Debug builds keep the console, which is
+// where RUST_LOG output goes.
+//
+// This is also what `dx bundle` requires. It links with `/SUBSYSTEM:WINDOWS`,
+// which looks for `WinMain` rather than `main`, so without this the bundler
+// fails at link time with LNK2019 while a plain `cargo build` succeeds against
+// the default console subsystem.
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+
 mod assets;
 mod audio;
 mod config;
