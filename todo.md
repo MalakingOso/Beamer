@@ -199,3 +199,26 @@ worth its complexity yet.
 - [x] Remove dead HotkeyHandler code — stripped hotkey/mod.rs to just the HotkeyEvent enum, removed #![allow(dead_code)]
 - [x] Deduplicate load_api_key/save_api_key — moved to config/mod.rs, removed copies from orchestrator.rs and settings/mod.rs
 - [x] Clean up dead code — removed OverlayApp, GlowApp, AdvancedConfig, Vocabulary::import_from_file, unused CSS classes
+
+## Windows recording pill: Acrylic never applies
+
+Confirmed on bearcave 2026-08-28: the pill renders correctly and looks fine, but
+the background is the CSS capsule, not the system Acrylic material.
+
+Likely cause, unverified without a Windows machine to test on: a DWM system
+backdrop does not apply to a transparent (layered) window, and the pill is built
+`with_transparent(true)` so its rounded capsule can sit over nothing. The two
+approaches exclude each other. Either the window stays transparent and the
+capsule is drawn in CSS, which is what happens today and looks right, or the
+window becomes opaque and DWM paints Acrylic behind the content, which means
+giving up the CSS rounding and relying on `DWMWA_WINDOW_CORNER_PREFERENCE`.
+
+`DWMWA_SYSTEMBACKDROP_TYPE` also needs Windows 11 22621 or newer, so a build
+older than that would fail the same way. Check `winver` before assuming the
+transparency explanation.
+
+Not worth chasing unless the look actually bothers you. The current appearance
+is the intended fallback, the `DwmSetWindowAttribute` calls fail harmlessly, and
+nothing else depends on it. If it does get picked up, the experiment is one
+build with `with_transparent(false)` on the pill window and the CSS background
+removed, and it can only be judged on a real Windows desktop.
