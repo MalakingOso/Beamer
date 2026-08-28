@@ -93,7 +93,6 @@ windows = { version = "0.58", features = [
 # it from the Linux host's build graph, and cross-compiling from Linux is
 # exactly the case this crate needs to run in. See build.rs for the matching
 # runtime check.
-winresource = "0.1"
 
 [profile.release]
 lto = "thin"
