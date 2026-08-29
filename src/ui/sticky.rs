@@ -162,6 +162,40 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
         });
     }
 
+    // ⚠️ Windows/macOS only, and it is working around dioxus-desktop, not tao.
+    //
+    // A note window is built visible (tao's default), but dioxus hides it
+    // again the moment its webview finishes loading: `handle_initialize_msg`
+    // ends with `window.set_visible(self.is_visible_before_start)`, under
+    // that same `#[cfg(not(target_os = "linux"))]`. `is_visible_before_start`
+    // is one app-wide field captured from the *first* window's config
+    // (`handle_start_cause_init`), and Beamer's main window is deliberately
+    // built `.with_visible(false)` so the splash owns the launch moment — so
+    // every window opened afterwards inherits `false` and is hidden on
+    // arrival. That is why notes appear on Linux (the block is compiled out
+    // there) and had to be reopened by hand from the board on Windows:
+    // `sticky_windows::reopen_note`'s Focus arm calls `set_visible(true)`,
+    // which is exactly the manual step this removes.
+    //
+    // In an effect, not straight after `new_window().await`: that await
+    // resolves in `create_window`, before the webview has loaded, so anything
+    // set there is overwritten by the initialize handler later. Effects run
+    // off the `Poll` event that handler sends *after* hiding the window, so
+    // this lands last and sticks.
+    //
+    // Visible only — deliberately no `set_focus()`. Linux does not focus a
+    // new note either, so this matches it; and tao's Windows `set_focus`
+    // falls back to `force_window_active`, which fakes an Alt keypress
+    // through `SendInput` to bypass the foreground lock. Synthesising Alt
+    // inside a dictation app that is itself injecting keystrokes risks both
+    // a stray ribbon/menu activation in the app being dictated into and
+    // interleaving with an injection already in flight.
+    #[cfg(not(target_os = "linux"))]
+    {
+        let window = window.clone();
+        use_effect(move || window.set_visible(true));
+    }
+
     let Some(note) = note() else {
         // The note was archived or deleted from another window while this one
         // was open.

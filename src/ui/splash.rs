@@ -8,6 +8,17 @@ use dioxus::prelude::*;
 pub fn SplashWindow() -> Element {
     let icon_data_url = crate::assets::icon_png_data_url();
 
+    // Windows/macOS: dioxus hides every window but the first as its webview
+    // finishes loading — see the long note in `ui::sticky`, which works
+    // around the same thing. Without this the splash never appears there and
+    // `setup_splash`'s 1500ms minimum-visible floor waits out a window
+    // nobody sees.
+    #[cfg(not(target_os = "linux"))]
+    {
+        let window = dioxus::desktop::use_window();
+        use_effect(move || window.set_visible(true));
+    }
+
     rsx! {
         div { class: "splash-root",
             div { class: "splash-card",
