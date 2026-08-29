@@ -93,9 +93,9 @@ fn level_channel() -> &'static (watch::Sender<f32>, watch::Receiver<f32>) {
 
 /// Subscribe to live mic levels. Receivers see the most recent value only.
 ///
-/// Linux-only: sole caller `ui::linux_integration` feeds the GNOME shell
-/// pill's waveform and is itself `#![cfg(target_os = "linux")]`.
-#[cfg(target_os = "linux")]
+/// Feeds every platform's recording pill: `ui::linux_integration` on Linux
+/// (into the GNOME shell pill), `ui::app_setup::setup_recording_pill` on
+/// Windows/macOS (into the Dioxus pill's own waveform).
 pub fn subscribe_levels() -> watch::Receiver<f32> {
     level_channel().1.clone()
 }

@@ -34,10 +34,11 @@ Windows system-tray dictation app. Captures mic audio, transcribes via cloud API
 ## Commands
 
 ```
-cargo build                    # Dev build
-cargo build --release          # Release (use for injection testing)
-cargo run                      # Run
-RUST_LOG=beamer=debug cargo run  # Run with debug logging
+dx build                       # Dev build
+dx build --release             # Release (use for injection testing)
+dx serve                       # Run with hot reload
+dx run                         # Run without hot reload
+RUST_LOG=beamer=debug dx serve   # Run with debug logging
 cargo run --bin task_eval -- --limit 20   # Measure extraction against your own decisions
 ```
 

@@ -13,6 +13,8 @@ use dioxus::desktop::{Config as DesktopConfig, DesktopContext, WindowBuilder};
 use dioxus::prelude::*;
 
 use crate::config::Config;
+#[cfg(not(target_os = "linux"))]
+use crate::hotkey::CaptureMode;
 use crate::notes::task_store::TaskStore;
 use crate::notes::NoteStore;
 #[cfg(not(target_os = "linux"))]
@@ -147,10 +149,17 @@ pub(super) fn setup_splash(window: DesktopContext, mut app_ready: Signal<bool>) 
 pub(super) fn setup_recording_pill(
     window: DesktopContext,
     rec_state: Signal<RecordingState>,
+    active_mode: Signal<CaptureMode>,
     config: Signal<Config>,
 ) {
     let mut pill_ctx: Signal<Option<DesktopContext>> = use_signal(|| None);
     let mut pill_click_through_set: Signal<bool> = use_signal(|| false);
+    // Edge-detects the hidden->visible transition, same as indicator.js's
+    // `wasVisible` check in `show()`: reposition and play the entrance
+    // animation only when the pill was not already up, not on every
+    // recording -> processing state change while it stays on screen.
+    let mut pill_was_shown: Signal<bool> = use_signal(|| false);
+    let mut pill_size: Signal<(u32, u32)> = use_signal(|| (0, 0));
 
     use_hook({
         let window = window.clone();
@@ -167,6 +176,7 @@ pub(super) fn setup_recording_pill(
 
                 let pill_w = (220.0 * scale) as u32;
                 let pill_h = (52.0 * scale) as u32;
+                pill_size.set((pill_w, pill_h));
                 let x = (monitor_size.width.saturating_sub(pill_w)) / 2;
                 let y = monitor_size.height.saturating_sub(pill_h + (60.0 * scale) as u32);
 
@@ -192,9 +202,13 @@ pub(super) fn setup_recording_pill(
                     // DM Mono is inlined from the bundled woff2 rather than
                     // fetched from fonts.googleapis.com: no outbound request
                     // from a local dictation app, and the pill renders in the
-                    // right typeface offline.
+                    // right typeface offline. No body-level opacity wrapper
+                    // here any more — `.pill` in PILL_CSS starts hidden
+                    // (opacity:0, scaled/translated down) on its own, and
+                    // `beamerSetState` animates it in/out, so nothing extra
+                    // is needed to hide it before the first state arrives.
                     .with_custom_head(format!(
-                        r#"<style>{}body{{opacity:0;transition:opacity 0.15s ease;}}{}</style><script>{}</script>"#,
+                        r#"<style>{}{}</style><script>{}</script>"#,
                         crate::assets::dm_mono_face_css(),
                         PILL_CSS,
                         PILL_JS
@@ -231,16 +245,11 @@ pub(super) fn setup_recording_pill(
     // Update pill appearance when recording state changes (Windows/macOS only).
     use_effect(move || {
         let state = *rec_state.read();
+        let mode = *active_mode.read();
         let pill_enabled = config.read().appearance.pill_enabled;
         if let Some(ctx) = pill_ctx.read().as_ref() {
-            let should_show = state != RecordingState::Idle && pill_enabled;
-            if should_show {
-                let js_state = match state {
-                    RecordingState::Recording => "recording",
-                    RecordingState::Processing => "processing",
-                    _ => unreachable!(),
-                };
-
+            let js_state = crate::ui::pill::pill_state(state, mode).filter(|_| pill_enabled);
+            if let Some(js_state) = js_state {
                 // Windows already realized the window and set click-through at
                 // creation (see the constructor above), so it only needs
                 // showing here. macOS does both lazily, on first show.
@@ -253,15 +262,27 @@ pub(super) fn setup_recording_pill(
                     }
                 }
 
+                // Same edge as indicator.js's `wasVisible`: follow the
+                // foreground window's monitor only on the hidden->visible
+                // transition, not on every recording -> processing update.
+                if !*pill_was_shown.read() {
+                    pill_was_shown.set(true);
+                    #[cfg(target_os = "windows")]
+                    reposition_to_foreground_monitor(ctx, *pill_size.read());
+                }
+
                 let _ = ctx
                     .webview
                     .evaluate_script(&format!("beamerSetState('{js_state}');"));
             } else {
+                pill_was_shown.set(false);
                 let _ = ctx.webview.evaluate_script("beamerSetState('idle');");
                 // Hide on every platform this function runs on (Windows and
                 // macOS): CSS opacity alone used to be Windows's only defence
                 // against a visible idle window, and that defence only works
-                // when WebView2 transparency actually takes.
+                // when WebView2 transparency actually takes. 200ms matches
+                // beamerSetState's own exit-animation duration, so the window
+                // disappears right as the fade-out finishes.
                 let ctx_clone = ctx.clone();
                 spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -270,6 +291,80 @@ pub(super) fn setup_recording_pill(
             }
         }
     });
+
+    // Pump live mic levels into the pill's waveform (~15Hz) — the Windows/
+    // macOS twin of linux_integration.rs's identically-commented loop, so
+    // both platforms' bars react to the same signal at the same rate.
+    use_hook(move || {
+        spawn(async move {
+            let mut level_rx = crate::audio::subscribe_levels();
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(66)).await;
+                if level_rx.has_changed().is_err() {
+                    break;
+                }
+                let level = *level_rx.borrow_and_update();
+                if *rec_state.peek() == RecordingState::Recording {
+                    if let Some(ctx) = pill_ctx.peek().as_ref() {
+                        let _ = ctx.webview.evaluate_script(&format!("beamerSetLevel({level});"));
+                    }
+                }
+            }
+        });
+    });
+}
+
+/// Move the pill window to the bottom-center of whatever monitor the
+/// foreground window is on, mirroring indicator.js's `_reposition()`
+/// (`BOTTOM_MARGIN = 32`, run once per show rather than continuously). tao
+/// has no cross-platform "which monitor is window X on" query, so this goes
+/// straight to Win32: `GetForegroundWindow` + `MonitorFromWindow`, then
+/// matched back to a tao `MonitorHandle` by comparing `HMONITOR` handles —
+/// the same match-by-handle approach `work_area.rs`'s `windows_work_rect`
+/// uses for the taskbar-aware rectangle.
+///
+/// A failed lookup (no foreground window, or its monitor not found among
+/// tao's enumerated ones) leaves the pill at its last position rather than
+/// erroring — a stale position is a much smaller mistake than a hidden pill.
+#[cfg(target_os = "windows")]
+fn reposition_to_foreground_monitor(ctx: &DesktopContext, (pill_w, pill_h): (u32, u32)) {
+    use dioxus::desktop::tao::platform::windows::MonitorHandleExtWindows;
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromWindow, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+
+    if pill_w == 0 || pill_h == 0 {
+        return;
+    }
+
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.is_invalid() {
+        return;
+    }
+    let target = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+
+    let Some(monitor) = ctx
+        .available_monitors()
+        .find(|m| HMONITOR(m.hmonitor() as *mut std::ffi::c_void) == target)
+    else {
+        return;
+    };
+
+    let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+    let hm = HMONITOR(monitor.hmonitor() as *mut std::ffi::c_void);
+    if !unsafe { GetMonitorInfoW(hm, &mut info) }.as_bool() {
+        return;
+    }
+    let rc = info.rcMonitor;
+    let scale = monitor.scale_factor();
+    let margin = (32.0 * scale) as i32;
+
+    let mon_w = (rc.right - rc.left).max(0);
+    let mon_h = (rc.bottom - rc.top).max(0);
+    let x = rc.left + (mon_w - pill_w as i32) / 2;
+    let y = rc.top + mon_h - pill_h as i32 - margin;
+    ctx.set_outer_position(PhysicalPosition::new(x, y));
 }
 
 /// How often the notes store is checked for pending edits.

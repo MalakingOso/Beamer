@@ -91,7 +91,7 @@ pub fn App() -> Element {
     // from standalone apps, and the floating-pill approach has
     // compositor/transparency quirks under Wayland.
     #[cfg(not(target_os = "linux"))]
-    app_setup::setup_recording_pill(window.clone(), rec_state, config);
+    app_setup::setup_recording_pill(window.clone(), rec_state, active_mode, config);
 
     // Linux: swap the tray icon to reflect recording state and pump levels
     // into the shell pill (mirrors Handy's behavior).
