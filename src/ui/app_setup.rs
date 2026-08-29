@@ -356,14 +356,23 @@ fn reposition_to_foreground_monitor(ctx: &DesktopContext, (pill_w, pill_h): (u32
     if !unsafe { GetMonitorInfoW(hm, &mut info) }.as_bool() {
         return;
     }
-    let rc = info.rcMonitor;
+    // `rcWork`, not `rcMonitor`: the taskbar is its own topmost shell
+    // surface, so an ordinary always-on-top window (this pill included)
+    // renders *behind* it rather than over it. `BOTTOM_MARGIN` in
+    // indicator.js is measured from the monitor edge because GNOME's panel
+    // is top-anchored and the Shell draws its pill above every other
+    // window regardless — neither assumption holds here. `rcWork` already
+    // excludes the taskbar (same field `work_area.rs`'s `windows_work_rect`
+    // reads for the identical reason), so the margin below is pure
+    // breathing room, not taskbar-clearance duty.
+    let rc = info.rcWork;
     let scale = monitor.scale_factor();
     let margin = (32.0 * scale) as i32;
 
-    let mon_w = (rc.right - rc.left).max(0);
-    let mon_h = (rc.bottom - rc.top).max(0);
-    let x = rc.left + (mon_w - pill_w as i32) / 2;
-    let y = rc.top + mon_h - pill_h as i32 - margin;
+    let work_w = (rc.right - rc.left).max(0);
+    let work_h = (rc.bottom - rc.top).max(0);
+    let x = rc.left + (work_w - pill_w as i32) / 2;
+    let y = rc.top + work_h - pill_h as i32 - margin;
     ctx.set_outer_position(PhysicalPosition::new(x, y));
 }
 
