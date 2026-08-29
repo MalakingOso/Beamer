@@ -6,33 +6,43 @@ Text injection is the most critical subsystem. The goal: transcribed text appear
 
 ## Fallback Chain (in order)
 
-### 1. UIA SetValue (preferred)
-- Get focused element via `IUIAutomation::GetFocusedElement()`
-- Query for `IValueProvider` pattern
-- Call `SetValue(text)` — atomically sets text
-- **Pros:** Clean, fast, respects undo history in some apps
-- **Cons:** Not all controls support `IValueProvider`
+⚠️ **This section used to describe a UIA-first design that was never built.**
+The real order, from `default_backend_names()` in `src/injection/mod.rs`, is
+**SendInput → Clipboard → UIA SetValue**. There is no "UIA SendKeys" backend —
+only `src/injection/uia.rs`'s `SetValue`, and it's last for a specific reason
+below, not because it's the weakest.
 
-### 2. UIA SendKeys
-- Get focused element, verify it supports text input
-- Use `ITextPattern` if available to get insertion point
-- Fall back to `SendKeys` via UI Automation
-- **Cons:** Slower, may trigger autocomplete/suggestions
-
-### 3. Win32 SendInput
+### 1. Win32 SendInput (tried first)
 - Convert each character to `INPUT` structs with `KEYEVENTF_UNICODE`
 - Handle Unicode surrogate pairs for emoji/CJK
 - Call `SendInput()` with array of inputs
-- **Pros:** Works in most apps, handles Unicode
-- **Cons:** May be blocked by some security software, triggers key event handlers
+- **Pros:** Works in most apps, handles Unicode, non-destructive (inserts at cursor)
+- **Cons:** May be blocked by some security software; Windows 11's redesigned
+  Notepad is documented (community/AutoHotkey reports; Microsoft-acknowledged
+  Notepad-redesign bug) to buffer or drop batched synthetic Unicode keystrokes
+  — invisibly, since every event is still accepted into the input queue. See
+  `SKIP_SENDINPUT_PROCESSES` in `src/injection/sendinput.rs` for the
+  known-affected-app skip list and why `notepad.exe` isn't on it yet.
 
-### 4. Clipboard Paste (last resort)
+### 2. Clipboard Paste
 - Save current clipboard contents
 - Set clipboard to transcribed text
 - Simulate `Ctrl+V` via SendInput
 - Wait 500ms, restore original clipboard
 - **Pros:** Universally works
-- **Cons:** Destructive to clipboard, timing-sensitive
+- **Cons:** Destructive to clipboard, timing-sensitive — the Windows restore
+  is a blind fixed 500ms timer with no confirmation the paste landed first
+
+### 3. UIA SetValue (last resort, deliberately)
+- Get focused element via `IUIAutomation::GetFocusedElement()`
+- Query for `IValueProvider` pattern
+- Call `SetValue(text)` — atomically sets text
+- **Pros:** Clean, fast, respects undo history in some apps
+- **Cons:** Not all controls support `IValueProvider`, **and `SetValue`
+  replaces the control's *entire* content rather than inserting at the
+  cursor** — dictating into a field that already has text silently wipes it.
+  That destructiveness, not capability, is why this is last rather than
+  first: it's a data-loss risk, not merely a compatibility fallback.
 
 ## UIPI: dictation is dead against elevated windows, permanently
 
@@ -78,7 +88,7 @@ tokio::task::spawn_blocking(|| {
 | Chrome textarea | IValueProvider not available | SendInput or clipboard |
 | Discord | Electron, custom input | SendInput |
 | Word | Rich text, UIA works well | UIA SetValue |
-| Notepad | Standard Win32 edit | UIA SetValue works |
+| Notepad | Win11 redesign buffers/drops batched SendInput | SendInput runs first regardless (no per-app routing exists); see §1 above |
 
 ## Debug Logging
 

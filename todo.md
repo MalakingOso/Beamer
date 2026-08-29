@@ -200,25 +200,19 @@ worth its complexity yet.
 - [x] Deduplicate load_api_key/save_api_key — moved to config/mod.rs, removed copies from orchestrator.rs and settings/mod.rs
 - [x] Clean up dead code — removed OverlayApp, GlowApp, AdvancedConfig, Vocabulary::import_from_file, unused CSS classes
 
-## Windows recording pill: Acrylic never applies
+## Windows recording pill: Acrylic removed entirely (closed)
 
-Confirmed on bearcave 2026-08-28: the pill renders correctly and looks fine, but
-the background is the CSS capsule, not the system Acrylic material.
+`apply_windows_pill_backdrop` (the `DwmSetWindowAttribute` Acrylic/rounding/
+dark-mode calls) is gone, not just deprioritized. Root cause of the opaque
+white box seen on bearcave over RDP: Microsoft's own docs confirm DWM system
+backdrop materials silently fall back to a solid color over Remote Desktop —
+the compositor can't blend with desktop content — but `DwmSetWindowAttribute`
+still returns success. `apply_windows_pill_backdrop` thinned the pill's own
+CSS (`PILL_BACKDROP_CSS_JS`) whenever that call succeeded, so over RDP it
+stripped the opaque capsule to make room for Acrylic that never actually
+rendered, leaving nothing but the RDP fallback solid painted behind it.
 
-Likely cause, unverified without a Windows machine to test on: a DWM system
-backdrop does not apply to a transparent (layered) window, and the pill is built
-`with_transparent(true)` so its rounded capsule can sit over nothing. The two
-approaches exclude each other. Either the window stays transparent and the
-capsule is drawn in CSS, which is what happens today and looks right, or the
-window becomes opaque and DWM paints Acrylic behind the content, which means
-giving up the CSS rounding and relying on `DWMWA_WINDOW_CORNER_PREFERENCE`.
-
-`DWMWA_SYSTEMBACKDROP_TYPE` also needs Windows 11 22621 or newer, so a build
-older than that would fail the same way. Check `winver` before assuming the
-transparency explanation.
-
-Not worth chasing unless the look actually bothers you. The current appearance
-is the intended fallback, the `DwmSetWindowAttribute` calls fail harmlessly, and
-nothing else depends on it. If it does get picked up, the experiment is one
-build with `with_transparent(false)` on the pill window and the CSS background
-removed, and it can only be judged on a real Windows desktop.
+The pill is back to the plain transparent CSS capsule — `with_transparent(true)`
++ `with_background_color((0,0,0,0))`, no DWM calls — the state already
+confirmed working on bearcave 2026-08-28. `Win32_Graphics_Dwm` dropped from
+Cargo.toml.

@@ -68,30 +68,6 @@ html, body, #main { background:transparent!important; overflow:hidden;
   font-family:"DM Mono",monospace; display:none; }
 "#;
 
-// Windows-only: thins the pill's own background so the system Acrylic
-// material set by `app_setup::apply_windows_pill_backdrop` shows through
-// instead of being hidden behind PILL_CSS's opaque gradient.
-//
-// This runs whenever the backdrop call has actually succeeded, which is only
-// known after the window exists (the DWM call needs its HWND), by which
-// point the head CSS has already been handed to the webview and Dioxus has
-// not necessarily mounted `.pill` into the DOM yet. So instead of reaching
-// for the element directly, it appends a stylesheet rule to `document.head`,
-// which exists the moment any script can run: the rule applies as soon as
-// `.pill` shows up, whenever that turns out to be, and it wins over
-// PILL_CSS's rule on equal specificity by coming later in document order. A
-// pre-Windows-11-22621 machine never runs this at all, so it keeps
-// PILL_CSS's opaque capsule and never ends up with a transparent window and
-// no material behind it.
-#[cfg(target_os = "windows")]
-pub(super) const PILL_BACKDROP_CSS_JS: &str = r#"
-(function() {
-  var s = document.createElement('style');
-  s.textContent = '.pill{background:rgba(23,23,26,0.32);}';
-  document.head.appendChild(s);
-})();
-"#;
-
 // State transitions for the pill window, injected as a head script so app.rs
 // only ever calls `beamerSetState('recording'|'processing'|'idle')`.
 #[cfg(not(target_os = "linux"))]

@@ -9,6 +9,19 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 
 /// Apps whose custom input pipelines silently drop synthetic Unicode events,
 /// making SendInput ineffective. These skip straight to the next backend.
+///
+/// Windows 11's redesigned Notepad has the same failure class, documented in
+/// community reports (AutoHotkey forums) as a Microsoft-acknowledged
+/// Notepad-redesign bug: batched synthetic Unicode keystrokes get buffered or
+/// dropped, sometimes not committing until real user input arrives — and
+/// SendInput's own return value can't see this, since every event is still
+/// accepted into the input queue (`sent == inputs.len()` above). `notepad.exe`
+/// is deliberately NOT added here yet: this app's own clipboard fallback
+/// (`clipboard.rs::inject_via_clipboard`, Windows path) restores the previous
+/// clipboard on a blind fixed 500ms timer with no confirmation the paste
+/// actually landed, so routing Notepad to clipboard under a slow/laggy RDP
+/// session risks trading a garbled-text bug for a stale-clipboard-content
+/// bug. Fix that restore-timing race first, then add `notepad.exe` here.
 const SKIP_SENDINPUT_PROCESSES: &[&str] = &["warp.exe"];
 
 pub struct SendInputBackend;
@@ -69,7 +82,13 @@ pub fn inject_via_sendinput(text: &str) -> Result<bool> {
         tracing::warn!("SendInput: sent {} of {} events", sent, inputs.len());
     }
 
-    Ok(sent > 0)
+    // A partial queue-insertion used to count as success (`sent > 0`), which
+    // stopped the fallback chain from ever reaching clipboard/uia on the rest
+    // of the text. Note this only catches SendInput's own queue-insertion
+    // failures — it can't see the Windows 11 Notepad failure mode below,
+    // where every event is accepted into the queue (sent == inputs.len()),
+    // and the target's own input pipeline is what drops or reorders them.
+    Ok(sent as usize == inputs.len())
 }
 
 fn make_unicode_input(char_code: u16, key_up: bool) -> INPUT {
