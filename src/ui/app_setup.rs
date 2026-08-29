@@ -23,7 +23,9 @@ use crate::tray::{self, TrayMenuItems};
 use crate::ui::status_log::{log_status, LogLevel, StatusLog};
 use crate::update::{self, UpdateStatus};
 #[cfg(not(target_os = "linux"))]
-use crate::ui::pill::{RecordingPill, PILL_CSS, PILL_JS};
+use crate::ui::pill::{
+    RecordingPill, PILL_CSS, PILL_INK_BOTTOM, PILL_JS, PILL_WINDOW_H, PILL_WINDOW_W,
+};
 use crate::ui::splash::{SplashWindow, SPLASH_CSS};
 use crate::warmup::{self, WarmupProgress};
 
@@ -174,11 +176,24 @@ pub(super) fn setup_recording_pill(
                     .map(|m| m.size())
                     .unwrap_or(PhysicalSize::new(1920, 1080));
 
-                let pill_w = (220.0 * scale) as u32;
-                let pill_h = (52.0 * scale) as u32;
+                // Sized from PILL_WINDOW_*, which are derived from PILL_CSS's
+                // own box — the arithmetic is on those constants. The window
+                // is deliberately larger than the pill at rest: a webview
+                // clips at its viewport edge, and the pill's bottom border,
+                // its hard-offset shadow and the 20px its entrance animation
+                // starts below its resting place all paint outside a window
+                // sized to the resting box alone.
+                let pill_w = (PILL_WINDOW_W * scale) as u32;
+                let pill_h = (PILL_WINDOW_H * scale) as u32;
                 pill_size.set((pill_w, pill_h));
                 let x = (monitor_size.width.saturating_sub(pill_w)) / 2;
-                let y = monitor_size.height.saturating_sub(pill_h + (60.0 * scale) as u32);
+                // Placed so the pill's *ink* sits 60px above the monitor's
+                // bottom edge, not the window's empty animation headroom.
+                // Windows overrides this on first show (see
+                // `reposition_to_foreground_monitor`); on macOS it stands.
+                let y = monitor_size
+                    .height
+                    .saturating_sub(((PILL_INK_BOTTOM + 60.0) * scale) as u32);
 
                 #[allow(unused_mut)]
                 let mut builder = WindowBuilder::new()
@@ -367,7 +382,12 @@ fn reposition_to_foreground_monitor(ctx: &DesktopContext, (pill_w, pill_h): (u32
     // breathing room, not taskbar-clearance duty.
     let rc = info.rcWork;
     let scale = monitor.scale_factor();
-    let margin = (32.0 * scale) as i32;
+    // 32px of breathing room below the pill's *ink*, matching indicator.js's
+    // BOTTOM_MARGIN. The window's bottom `PILL_WINDOW_H - PILL_INK_BOTTOM`
+    // rows are transparent headroom for the entrance animation, so they
+    // already count towards that gap and have to come back out of the
+    // margin — otherwise the pill floats that much higher than the GNOME one.
+    let margin = ((32.0 - (PILL_WINDOW_H - PILL_INK_BOTTOM)) * scale) as i32;
 
     let work_w = (rc.right - rc.left).max(0);
     let work_h = (rc.bottom - rc.top).max(0);

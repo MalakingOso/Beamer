@@ -56,6 +56,41 @@ pub fn RecordingPill() -> Element {
     }
 }
 
+/// Logical-pixel size of the pill's own window, and where the pill's ink
+/// stops inside it.
+///
+/// The window is a viewport, not a canvas: `html, body` are `overflow:hidden`,
+/// so every pixel `PILL_CSS` draws past the window's edge is silently cut.
+/// That is all a flat, borderless bottom edge on the pill ever was — the
+/// window used to be 52px tall, four short of the pill's own border box:
+///
+/// ```text
+///    4  .pill margin-top
+///   48  .pill height (content-box: the reset zeroes margin/padding, not box-sizing)
+///    4  two 2px borders
+///  ----
+///   56  resting border box, bottom border edge
+///    4  the box-shadow's 4px y-offset
+///  ----
+///   60  = PILL_INK_BOTTOM, every pixel the pill paints at rest
+///   20  beamerSetState's entrance translateY(20px), painted before it settles
+///  ----
+///   80  = PILL_WINDOW_H
+/// ```
+///
+/// Width is sized for the widest state rather than the idle one: `processing`
+/// un-hides the `Transcribing…` label, which puts the row at roughly 224px
+/// including the shadow, over the 220px the window used to be.
+///
+/// Change either of these and the two numbers below have to move with them,
+/// or the pill loses an edge again with no error and no log line.
+#[cfg(not(target_os = "linux"))]
+pub(super) const PILL_WINDOW_W: f64 = 264.0;
+#[cfg(not(target_os = "linux"))]
+pub(super) const PILL_WINDOW_H: f64 = 80.0;
+#[cfg(not(target_os = "linux"))]
+pub(super) const PILL_INK_BOTTOM: f64 = 60.0;
+
 // Deploy Purple light card: solid light surface, structural 2px border,
 // sharp 8px radius, hard-offset shadow — the same tokens, the same shape,
 // and (bar-for-bar) the same waveform gradient as the GNOME-Shell-drawn pill
