@@ -461,6 +461,67 @@ action (dictating, pressing the footer) produced one first.
 
 Errors surface through `StatusLog` as well as `RUST_LOG`.
 
+## Models on disk
+
+Both are official **QAT / publisher** builds, downloaded to `~/models/beamer/`.
+Neither `mmproj` (vision) file is needed — Beamer's use is text-only.
+
+| File | Size | Role |
+|---|---|---|
+| `s1-mini-q4_k_m.gguf` | 462 MiB | Stage 1 cleanup. 94.8% token accuracy on 7,519 held-out cases, measured on **this** quant — do not substitute f16. |
+| `gemma-4-E4B_q4_0-it.gguf` | 4.80 GiB | Stage 2 extraction. Ladder rung 1. |
+
+Licences are in `licenses/`; required attribution is in `README.md` (see
+"Licence obligation" below).
+
+**Model ladder** — the extraction model is chosen by *measurement against a
+corpus of real notes*, not assertion. Promote only if precision is inadequate;
+all are Google QAT + Apache-2.0, so promotion is a config change and a download:
+
+| Rung | Model | Disk | Note |
+|---|---|---|---|
+| 0 | `google/gemma-4-E2B-it-qat-q4_0-gguf` | 3.12 GiB | Smaller/faster than the default; downgrade option if latency binds |
+| 1 (default) | `google/gemma-4-E4B-it-qat-q4_0-gguf` | 4.80 GiB | |
+| 2 | `unsloth/gemma-4-12B-it-qat-GGUF` (UD-Q4_K_XL) | 6.72 GB | |
+| 3 | `google/gemma-4-26B-A4B-it-qat-q4_0-gguf` | 13.45 GiB | **The slowest measured**, 43.6 t/s — see below |
+
+⚠️ **Corrected on measurement.** An earlier assumption held that rung 3 might
+be the fastest per token, reasoning from bytes read per token. Measured on the
+B60 it is the **slowest**: 43.6 t/s against E4B's 77.3 and E2B's 116.0. The
+read-per-token argument assumes bandwidth-bound decoding, and expert routing
+and gather overhead dominate here. On this hardware the ladder is monotonic in
+size — **smaller is faster** — so rung 3 is a *quality* option only, never a
+speed play.
+
+## The standalone server's own build
+
+The server is `deploy/llama-beamer.service` on callisto, not spawned by
+Beamer. Backend is **SYCL, not Vulkan** — measured **2.35x** Vulkan at prompt
+processing, **~1.2x** at generation, same commit and device. Build dirs:
+
+- `build-sycl-2026/` — **what the service runs.** oneAPI 2026.1,
+  `GGML_SYCL=ON`, `GGML_SYCL_F16=ON`, icx/icpx.
+- `build-sycl/` — same flags on oneAPI 2025.3, kept as fallback. Measured
+  identical to the 2026 build on gemma-4-E4B (pp512 2781.64 vs 2782.35 t/s,
+  tg128 79.80 vs 79.83) across eight paired runs, so the newer toolchain is
+  housekeeping, not speed.
+- `build/` — Vulkan fallback, no oneAPI runtime needed.
+
+Two more traps beyond the four already covered above, both about the server
+process rather than the model:
+
+- ⚠️ **`-dev SYCL1`, not an env mask.** `ZE_AFFINITY_MASK` /
+  `GGML_VK_VISIBLE_DEVICES` *filter* the device list, so the B60 re-indexes to
+  0 and the mask value stops matching the in-process id. `-dev` selects from
+  the full list. The B60 is index **1** on both backends — verified, not
+  assumed.
+- ⚠️ **`LD_LIBRARY_PATH` must extend oneAPI's, not replace it.** Setting it
+  outright drops `libsvml.so` and the server dies naming a library nothing
+  else mentions.
+
+Both are already applied in `deploy/llama-beamer.service`; this is the "why",
+not a config that still needs doing.
+
 ## Measuring it
 
 ```bash

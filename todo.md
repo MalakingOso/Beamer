@@ -10,46 +10,11 @@
 
 ## Sticky Notes — omissions
 
-- [x] **The Windows target does not compile, in more places than were written
-      down.** Done: the platform-neutral matching layer (`MAX_BINDINGS`,
-      `BindingConfig`, `BindingState`, `Modifiers`, `build_bindings`,
-      `matching_binding`) was hoisted from `linux_hotkey.rs` into
-      `hotkey/mod.rs`, and `ll_hook.rs` was rewritten around it:
-      `start_ll_hook`/`update_configs` now match `app.rs`'s calls, both
-      `RecordStart` sites carry a `CaptureMode`, and the Windows hook can
-      represent a second (note) binding. `cargo xwin check --target
-      x86_64-pc-windows-msvc` is clean; runtime behaviour is still unverified
-      on real Windows hardware.
-      ⚠️ A plain `cargo check --target x86_64-pc-windows-msvc` does not work on
-      this Linux host and never will without `xwin`: `ring` enters the
-      dependency tree through `self_update` 0.42 (which force-enables
-      reqwest's `rustls-tls` feature), and `ring`'s build script wants MSVC's
-      `lib.exe`, which a Linux toolchain does not have. `cargo xwin check`
-      supplies the MSVC libs itself, which is why that is the working gate:
-      `XWIN_ACCEPT_LICENSE=1 cargo xwin check --target x86_64-pc-windows-msvc`.
-      A **native** build from a Windows machine has `lib.exe` on its own and
-      was never affected by this; cross-compiling from Linux is the only thing
-      that was ever blocked.
-- [x] **`HotkeyConfig` cannot express Super as a modifier.** Done: `parse()`
-      now returns `None` when a Super/Win/Cmd/Meta token appears together
-      with another key, instead of silently dropping Super and keying off the
-      bare trigger. `Super` alone as the trigger still works (`Ctrl+Super`,
-      `Ctrl+Alt+Super`), pinned by `super_alone_still_parses_as_the_trigger`.
-- [x] `src/notes/task_store.rs` is **474 lines against the 500 limit**. Done:
-      tests moved to `src/notes/task_store/tests.rs`, reached by `#[path]`.
-      `prompts.rs`, `extract.rs` and `tasks_page.rs` were split the same way
-      for the same reason.
 - [ ] **Suggestion count badge on the notes board.** The spec (§9) calls for a
       note with pending suggestions to show a count on its card in the board.
       The Phase 2/3 plan did not ask for it and it was not built. Small: the
       board would need the `TaskStore` signal as a prop and
       `suggested_for(&id).len()`.
-- [x] Note windows are placed but their **size** is never captured. Done: a
-      `WindowEvent::Resized` arm in `StickyNote` writes `Note::size`, and
-      `.sticky-grip` gives an undecorated note something to resize by. No
-      extension change and therefore no log out — `xdg_toplevel.resize` is
-      client-initiated, unlike positioning. (Position is still forgotten *by
-      design* — see `agent_docs/sticky_notes.md`.)
 - [ ] `GetWorkArea` extension method. Placement insets a fixed 40px for the
       GNOME panel; a real work area would account for docks and other struts.
       Speculative, so deferred — and it costs only the log out that any other
@@ -69,50 +34,24 @@
 
 ## Live Sync, open questions
 
-- [x] **Attachment bytes now have a transport, decided and documented, not yet
-      run.** The owner's decision: Syncthing carries `<config_dir>/sync/attachments`,
-      independently of `automerge::sync`, which keeps carrying `notes.automerge`
-      and nothing else. `agent_docs/sync.md`'s "Attachments: Syncthing carries
-      the bytes" section has the full design (what Syncthing must and must not
-      point at, why content-addressed immutable blobs need none of the
-      conflict-copy machinery a live document would, setup steps for both
-      machines) and says plainly that it is installed on neither machine yet.
-      Nothing here has been run end to end. What is left: install it on both
-      machines per those steps, verify a dropped attachment actually appears
-      on the other side, and confirm Ignore Delete behaves as documented.
-- [x] **The local half of cross-machine attachment deletion is decided and
-      implemented; the cross-machine half still is not.** `release_attachment_bytes`
-      (`src/notes/edit.rs`) now checks `NoteStore.sync_enabled`
-      (`config.sync.url` non-empty, set from `sync_client::use_sync_client`)
-      after its refcount check: with sync configured, a hash nothing local
-      references any more is left on disk rather than deleted, because the
-      local refcount has no visibility into whether a note open on another
-      machine still needs those bytes. This trades disk for safety on
-      purpose: an orphaned file costs space and can be cleaned up later, while
-      a referenced image deleted on every machine at once cannot be recovered
-      by anything. Tests: `with_sync_configured_deleting_the_last_reference_keeps_the_file`,
-      `with_sync_configured_removing_the_last_reference_to_an_attachment_keeps_the_file`,
-      and `without_sync_configured_the_refcounted_delete_still_removes_the_file`
-      pin sync-on and sync-off behaviour side by side, in `src/notes/edit/tests.rs`.
-      What remains, genuinely open:
-      1. **Orphan collection has no story yet, and that is fine for now.**
-         Bytes kept alive by the policy above accumulate with no local
-         reference and nothing sweeps them. Needs an actual cross-machine
-         notion of "referenced nowhere" (a tombstone/grace-period, a
-         "still wanted elsewhere" check against sync state, or something
-         else) before it is worth building; there is nothing to design
-         against yet without real usage data on how much this actually
-         accumulates.
-      2. **The remove button gives no different warning on a machine that
-         never held the original.** On the machine where an attachment was
-         dropped, deleting it removes only Beamer's copy, the user's
-         original file is never touched, by design. On a machine where the
-         note and its attachment arrived entirely through sync, there never
-         was a "user's original" to fall back on; today's UI gives no
-         confirmation dialog that treats that case differently from the
-         harmless one. The deletion-policy item above stops that keystroke
-         from destroying the bytes immediately, but a clearer warning in the
-         UI is still worth doing.
+- [ ] **Install Syncthing for attachment bytes on both machines and verify end
+      to end.** Design and setup steps are done — `agent_docs/sync.md`,
+      "Attachments: Syncthing carries the bytes" — but it is installed on
+      neither machine yet. Verify a dropped attachment appears on the other
+      side and that Ignore Delete behaves as documented.
+- [ ] **Cross-machine orphaned attachment bytes have no collection story.**
+      The local half of deletion is implemented (`release_attachment_bytes` in
+      `src/notes/edit.rs` keeps a hash on disk when sync is enabled and the
+      local refcount can't see whether another machine still needs it), but
+      nothing sweeps those kept-alive bytes later. Needs a real cross-machine
+      "referenced nowhere" notion (tombstone/grace-period or a check against
+      sync state) — not worth designing until there's usage data on how much
+      this actually accumulates.
+- [ ] **No distinct delete warning for a machine that never held the
+      original.** Deleting an attachment always removes only Beamer's own
+      copy, never the user's source file — but on a machine where a note
+      arrived entirely through sync, there never was a source file, and the
+      confirm dialog doesn't say so.
 - [ ] **The missing-file card does not notice a file arriving.** Checked
       while wiring the Syncthing attachment transport above: `AttachmentBlock`
       in `src/ui/sticky_blocks.rs` computes `missing` once, from a plain
@@ -178,6 +117,16 @@ worth its complexity yet.
       validation gates are unmeasured, exactly like the extraction prompt they
       extend. `task_eval` already passes each note its own capture date, so the
       harness is ready; it needs the accept/dismiss corpus to grow first.
+- [ ] **Meeting capture / system audio / diarization.** Explicitly out of
+      scope — surveyed, not scoped, not planned.
+
+## Pending manual actions
+
+- [ ] **Log out to deploy GNOME extension v6.** Bumped 2026-08-24 to deploy the
+      pill-waveform change from 7f83eeb, which had sat undeployed since it was
+      committed. Settings → the injection card offers the update; click it,
+      then log out. Confirm with the `GetVersion` check in
+      `agent_docs/sticky_notes.md` — expect `(uint32 6,)`.
 
 ## Low Priority
 - [ ] `overlay_enabled` config field is never read — wire it to conditionally show/hide the glow overlay
@@ -186,33 +135,5 @@ worth its complexity yet.
 - [ ] `set_auto_start(false)` code path is unreachable — no UI to disable auto-start once enabled
 
 ## Done
-- [x] Quick fix: skip SendInput for Warp (process-name detection, route to clipboard)
-- [x] Fix vocabulary persistence — terms now save immediately on add/remove instead of only on "Save Changes"
-- [x] Fix hotkey picker — redesigned with modifier checkboxes (Ctrl/Alt/Shift/Win) + key capture button. No more freezing.
-- [x] Fix screen edge glow — Glow component now renders inside main window when recording, with pulsing animation
-- [x] Rename "Hold-to-talk" to "Push to Talk" everywhere in the UI
-- [x] Add 400ms release delay after hold-to-talk — continues capturing audio briefly so last word isn't clipped
-- [x] Remove acrylic backdrop — switched to solid backgrounds, removed DWM backdrop code and Win32_Graphics_Dwm feature
-- [x] History copy button — now uses Phosphor Copy/Check icons with green feedback flash on copy
-- [x] Fix settings window visual glitches — added overflow-x:hidden, min-width:0 on flex containers
-- [x] API usage research — ElevenLabs has usage endpoints, Mistral does not
-- [x] Remove dead HotkeyHandler code — stripped hotkey/mod.rs to just the HotkeyEvent enum, removed #![allow(dead_code)]
-- [x] Deduplicate load_api_key/save_api_key — moved to config/mod.rs, removed copies from orchestrator.rs and settings/mod.rs
-- [x] Clean up dead code — removed OverlayApp, GlowApp, AdvancedConfig, Vocabulary::import_from_file, unused CSS classes
 
-## Windows recording pill: Acrylic removed entirely (closed)
-
-`apply_windows_pill_backdrop` (the `DwmSetWindowAttribute` Acrylic/rounding/
-dark-mode calls) is gone, not just deprioritized. Root cause of the opaque
-white box seen on bearcave over RDP: Microsoft's own docs confirm DWM system
-backdrop materials silently fall back to a solid color over Remote Desktop —
-the compositor can't blend with desktop content — but `DwmSetWindowAttribute`
-still returns success. `apply_windows_pill_backdrop` thinned the pill's own
-CSS (`PILL_BACKDROP_CSS_JS`) whenever that call succeeded, so over RDP it
-stripped the opaque capsule to make room for Acrylic that never actually
-rendered, leaving nothing but the RDP fallback solid painted behind it.
-
-The pill is back to the plain transparent CSS capsule — `with_transparent(true)`
-+ `with_background_color((0,0,0,0))`, no DWM calls — the state already
-confirmed working on bearcave 2026-08-28. `Win32_Graphics_Dwm` dropped from
-Cargo.toml.
+Resolved and reflected in `git log` / commit messages — kept out of here.

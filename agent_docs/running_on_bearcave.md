@@ -1,13 +1,14 @@
 # Running Beamer on bearcave
 
 The Windows laptop. Beamer is Windows-first by design, but everything since the
-sticky-notes work was built on the Linux desktop, so this is the first time most
-of it runs on the machine it was written for.
+sticky-notes work was built on the Linux desktop, so this was the first time
+most of it ran on the machine it was written for.
 
-⚠️ **Nothing below has been run on Windows.** CI proves the code compiles, the
-tests pass and the installer builds. It has never launched the app, pressed a
-hotkey, injected text or opened a note window. Treat the checklist at the end as
-the actual test, and expect to find things.
+✅ **Verified on real Windows hardware** (x86_64 and Windows ARM). The
+first-run checklist below has been run end to end and passed — dictation
+injects, note capture works, notes survive a relaunch, notifications and the
+taskbar icon are correct. Treat it as a regression checklist for future
+Windows changes, not an open question.
 
 ## What runs where
 
@@ -130,9 +131,10 @@ everything. Only notes made during the rollback session are lost.
 
 ## First-run checklist
 
-In order. The first is the regression that matters most, and the second is the
-one that would silently not exist if the Windows hotkey work had been done as a
-four-line patch.
+**Run end to end on real Windows hardware and passed.** Kept in order as a
+regression checklist for future Windows changes. The first item is the
+regression that matters most, and the second is the one that would silently
+not exist if the Windows hotkey work had been done as a four-line patch.
 
 1. **Dictation hotkey injects into a focused field.** Notepad first, then
    something with a real UI Automation surface.

@@ -11,8 +11,7 @@ their own document.
 
 - Model passes: **`agent_docs/local_inference.md`** — read it before touching
   `src/llm/` or `src/notes/pipeline.rs`.
-- Spec: `docs/superpowers/specs/2026-08-20-sticky-notes-design.md`
-- Plan: `docs/superpowers/plans/2026-08-20-sticky-notes-phase1.md`
+- Design history: `docs/decisions.md` ("Sticky notes, all three phases")
 
 ## Note state is two fields, not one
 
@@ -516,6 +515,29 @@ the settings page opens, nowhere else.
 Apache 2.0 plus a binding term requiring the exact string
 `"S1-mini" by "Superwhisper"`. Pinned by an exact-equality test.
 
+## Manual QA checklist
+
+Run this after any change that touches capture, placement or the reconciler.
+⚠️ Turn on "Note capture" in Settings → Recording first — an empty
+`note_hotkey` means it is off by design, so the dictation hotkey can never be
+silently diverted.
+
+1. Dictation hotkey → text still injects as before. *(The regression that
+   matters most — note capture must never steal the dictation binding.)*
+2. Note hotkey → sticky appears, pill shows the purple note ring, waveform
+   still tracks the mic.
+3. Dictate four or five notes → spread irregularly, none stacked, none
+   off-screen.
+4. Close one with Alt+F4 → `machine.json` shows `"open": false` for that
+   note's id.
+5. Notes board: search finds a note by a word actually *said*; clicking a
+   card reopens it; archive hides it; "Show archived" restores.
+6. Restart with several notes open → they reappear, freshly scattered.
+   Positions deliberately do **not** match the previous session.
+7. Local AI card with the server up → lists both models and their states.
+   Then `pkill -x llama-server` (**never** `pkill -f`, which matches the shell
+   running it) → card reports not running, notes still captured.
+
 ## Gotchas
 
 - **The block model needed no extension change, and no log out.** Attachments,
@@ -590,9 +612,9 @@ Apache 2.0 plus a binding term requiring the exact string
   hidden would exit Beamer entirely.
 - The registry holds **weak** handles. A strong `Rc` would keep the OS window
   alive after its `VirtualDom` is gone — a visible window that is never polled.
-- **Windows placement now clears the taskbar, but the fix is unverified at
-  runtime.** `ui::work_area::work_area` used to union each monitor's full
-  physical resolution, which on Windows meant notes could be placed under the
+- **Windows placement now clears the taskbar, confirmed on real hardware.**
+  `ui::work_area::work_area` used to union each monitor's full physical
+  resolution, which on Windows meant notes could be placed under the
   taskbar. It now reads each monitor's usable rectangle via
   `GetMonitorInfoW`/`MONITORINFO::rcWork` on `#[cfg(target_os = "windows")]`,
   falling back to the full monitor rectangle if that call fails, and cancels
@@ -601,9 +623,8 @@ Apache 2.0 plus a binding term requiring the exact string
   even with this fix: each monitor's rectangle is divided by *its own* scale
   factor before the union, and that only produces one consistent logical
   coordinate space when every monitor shares a scale. A single display, or
-  several matched ones, is fine; a genuinely mixed-DPI pair is not, and
-  nobody has run this on a real Windows multi-monitor setup yet to confirm
-  either the taskbar fix or the mixed-DPI caveat.
+  several matched ones, is fine; a genuinely mixed-DPI pair is not — that
+  specific case is still unconfirmed on a real Windows multi-monitor setup.
 - **Note windows stay in the taskbar, on purpose.** They omit
   `with_skip_taskbar(true)` even though the splash and the pill both set it,
   so six open notes means six taskbar buttons. This is a ruling, not an

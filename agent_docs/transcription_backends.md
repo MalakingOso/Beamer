@@ -19,8 +19,7 @@ voxtral_realtime.rs    start_realtime_session(api_key) -> Result<RealtimeSession
 plain string match in `orchestrator.rs` on `cfg.transcription.backend`
 (`"elevenlabs"` default — ElevenLabs realtime, per `default_backend()` in
 `src/config/mod.rs` — plus `"elevenlabs_batch"`, `"voxtral_batch"`, and
-`"voxtral"` for Voxtral realtime; anything else falls through to ElevenLabs
-realtime).
+`"voxtral"` for Voxtral realtime; unknown backends are rejected with an error).
 
 `RealtimeSession` (defined in `mod.rs`) is the only shared abstraction:
 

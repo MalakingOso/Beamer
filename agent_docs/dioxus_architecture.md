@@ -50,9 +50,11 @@ Rules:
   `LaunchBuilder::new().with_cfg(...).launch(app::App)`.
 - `app.rs` — the `App` component itself: owns all top-level `Signal`s
   (`current_page`, `rec_state`, `history`, `config`, `status_log`,
-  `update_status`), wires the low-level keyboard hook to the orchestrator
-  coroutine, and renders the sidebar/titlebar/page shell. `Page` is a plain
-  enum (`Home`/`History`/`Vocab`/`Settings`) switched on in the render body.
+  `update_status`, `notes`, `tasks`, `active_mode`), wires the low-level
+  keyboard hook to the orchestrator coroutine, and renders the
+  sidebar/titlebar/page shell. `Page` is a plain enum
+  (`Home`/`History`/`Notes`/`Tasks`/`Vocab`/`Settings`) switched on in the
+  render body.
 - `app_setup.rs` — every startup/window-management concern extracted out of
   `App()` into standalone functions (`setup_tray_menu`,
   `setup_window_centering`, `setup_splash`, `setup_recording_pill`,
@@ -165,9 +167,8 @@ does none of this (WebKitGTK has no comparable nested-pump step), so resist
 breaks Windows in a way that is hard to reproduce outside a multi-note
 restore.
 
-Whether the serialized restore actually clears the `0x8007139F` failure at
-runtime is unverified; it removes the mechanism the dioxus issue describes,
-but nobody has restored several notes on a Windows machine yet to confirm it.
+Confirmed on real Windows hardware: restoring five or more notes at once no
+longer produces `0x8007139F` or a panic. The serialized restore does clear it.
 
 ### Per-note WebView2 process cost
 
@@ -230,16 +231,18 @@ path by which a synthesized `dragenter` could fire on Windows. None of this
 touches the paperclip button, which opens a native file dialog and is
 unaffected on every platform.
 
-### Toast branding
+### Toast branding and AUMID registration
 
-`src/orchestrator/notify.rs:39` constructs notifications with
-`winrt_notification::Toast::POWERSHELL_APP_ID`, so every Beamer notification
-on Windows is branded "PowerShell" in the notification center until an
-installer exists that creates a Start Menu shortcut carrying a real
-AppUserModelID. `winrt-notification` has had no release since 2022-01-11;
-`tauri-winrt-notification` is the maintained fork, but swapping it is not
-scoped to any task currently in flight. This is a known, accepted rough
-edge, not a bug to fix opportunistically.
+Notifications are constructed with `tauri_winrt_notification::Toast::new(crate::WINDOWS_APP_USER_MODEL_ID)`
+(`src/orchestrator/notify.rs:47`). The AUMID must be registered via
+`ui::windows_shortcut::ensure_shortcut`, which writes it to a Start Menu shortcut —
+an unpackaged app has no other way to tell Windows about its AppUserModelID.
+Three additional places must agree on the string, with nothing checking that they do:
+the constant in `main.rs`, `identifier` in `Dioxus.toml`, the shortcut's property,
+and the Toast construction. An AUMID Windows has never seen still returns `Ok`, so a
+mismatched or unregistered ID fails silently: `show()` succeeds but the notification
+never appears. Confirmed working on real Windows hardware — notifications carry
+Beamer's name and icon in the action centre, not PowerShell's.
 
 ### The `build.rs` host-vs-target trap
 
@@ -263,9 +266,9 @@ else `build.rs` grows a platform branch.
 Task 3b closed a command-injection surface in `ui::open_external` on
 Windows (a `cmd /C start` argument split reachable from note content, a
 link chip or an `.ics` export). `src/ui/mod.rs:72-90` documents the fix
-in full; nothing here restates it. What the comment doesn't say: whether
-`ShellExecuteW` actually opens links and files correctly at runtime is
-unverified, same as everything else in this section that needs the laptop.
+in full; nothing here restates it. Confirmed on real Windows hardware:
+`ShellExecuteW` opens a link chip whose URL contains `&` correctly, with
+no console window flash.
 
 ### Auto-repeat: why `ll_hook.rs` and `linux_hotkey.rs` guard differently
 
@@ -318,18 +321,14 @@ be broken.
   genuinely mixed-DPI pair does not, and modelling Windows' real per-monitor
   virtual-desktop layout was judged a bigger change than the taskbar-aware
   fix it rides alongside.
-- **WebView2's user data folder lives in Roaming, not Local.**
-  `webview_data_dir()` (`src/ui/mod.rs:170`) uses `dirs::data_dir()`, which
-  resolves to `%APPDATA%` (Roaming) on Windows. Microsoft's own guidance is
-  to put a WebView2 user data folder under `%LOCALAPPDATA%`: it is a cache,
-  and a roaming profile will copy it across machines for no benefit.
-- **Undecorated transparent windows have no drop shadow.** Sticky notes are
-  built `with_decorations(false)` for the square-cornered/rounded-corner
-  trick documented in `agent_docs/sticky_notes.md`. tao exposes
-  `with_undecorated_shadow` for exactly this case on Windows and it is never
-  called, so notes likely render with a harder edge there than the
-  `box-shadow` CSS alone can fake, unlike the compositor-drawn shadow this
-  trick doesn't need on Linux.
+- **Undecorated windows shadow is disabled where needed.** Sticky notes and
+  the recording pill are built `with_decorations(false)` for the
+  square-cornered/rounded-corner trick documented in `agent_docs/sticky_notes.md`.
+  tao's default for undecorated windows is a native drop-shadow that insets the
+  client rect by a few DPI-scaled pixels. On styled windows that paint their own
+  rounded shape, that reserved margin reads as a stray rectangular border. Both
+  notes and pill call `.with_undecorated_shadow(false)` to turn it off and render
+  as pure CSS-drawn windows.
 - **Tray icon re-registration after Explorer restarts.** Windows sends
   `TaskbarCreated` when `explorer.exe` restarts, and tray icons that don't
   re-register in response vanish until the app itself restarts. Whether
@@ -349,6 +348,11 @@ be broken.
 
 ## Cleared, so nobody re-investigates
 
+- **WebView2 user data folder is correctly placed on Local AppData.** 
+  `webview_data_dir()` (`src/ui/mod.rs:170`) uses `dirs::data_local_dir()`,
+  which resolves to `%LOCALAPPDATA%` on Windows, per Microsoft's guidance for
+  browser caches. The function comment documents why this was changed from
+  the Roaming location.
 - **Note images work on Windows unchanged.** `src/ui/sticky_blocks.rs`
   serves attachment images through a root-relative `/note-media/<id>` URL
   via `use_asset_handler`, and wry's URI handling makes that path resolve
@@ -356,12 +360,11 @@ be broken.
 - **`ui::fonts::embedded_font_css()` is fine as-is.** It emits `data:` URIs
   with the font bytes inlined, which is exactly the kind of reference that
   cannot fail to resolve regardless of platform or windowing quirks.
-- **The Windows recording pill path is structurally intact**, but not at
-  full fidelity: `PILL_JS`'s waveform bars animate from a CSS `@keyframes`
-  loop keyed only to `beamerSetState('recording'|'processing'|'idle')`, with
-  no level parameter at all, unlike the GNOME extension's pill, which is fed
-  real levels through `UpdateLevel(d)`. That is a fidelity gap the Windows
-  pill has always had, not something this round of work broke.
+- **The Windows recording pill receives live level data.** `PILL_JS` waveform
+  bars animate from both CSS `@keyframes` and per-frame `beamerSetLevel(level)`
+  calls driven from `app_setup.rs` (~15 Hz while recording), matching the GNOME
+  extension's pill which is fed real levels through `UpdateLevel(d)`. Both
+  receive the same level source from `audio_pipeline.rs`'s watch channel.
 - **No `localStorage` or `IndexedDB` use anywhere in the codebase.** The
   whole class of Chromium/WebKit origin-partitioning problems that trips up
   apps relying on per-webview storage does not apply here; there is nothing

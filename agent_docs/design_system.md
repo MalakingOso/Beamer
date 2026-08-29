@@ -2,17 +2,17 @@
 
 ## Philosophy
 
-Deploy Blue system adapted with acrylic blur and purple accent. Hard edges, structural borders, monospace display type, hard-offset shadows. Single accent (#4B0082). Micro-motion only.
+Solid, hard-edged UI with structural borders and purple accent. Monospace display type, hard-offset shadows, no blur effects. Single accent (#4B0082). Micro-motion only.
 
 ## Color Tokens
 
 ```css
 :root {
-  --bg: transparent;                      /* Acrylic blur shows through */
-  --bg-surface: rgba(255, 255, 255, 0.72); /* Cards, panels, inputs */
-  --bg-hover: rgba(241, 243, 249, 0.80);   /* Interactive hover */
-  --bg-active: rgba(232, 235, 244, 0.85);  /* Pressed/active */
-  --bg-recessed: rgba(241, 243, 249, 0.50);/* Sunken areas */
+  --bg: #f5f5f7;          /* Page background */
+  --bg-surface: #ffffff;  /* Cards, panels, inputs */
+  --bg-hover: #f1f3f9;    /* Interactive hover */
+  --bg-active: #e8ebf4;   /* Pressed/active */
+  --bg-recessed: #f1f3f9; /* Sunken areas */
 
   --border: rgba(75, 0, 130, 0.12);        /* 2px solid everywhere */
   --border-strong: rgba(75, 0, 130, 0.25); /* Focus rings, emphasis */
@@ -25,15 +25,17 @@ Deploy Blue system adapted with acrylic blur and purple accent. Hard edges, stru
   --accent: #4B0082;
   --accent-hover: #5C1A9E;
   --accent-subtle: rgba(75, 0, 130, 0.08);
+  --accent-wash: rgba(75, 0, 130, 0.04);
 
   --danger: #DC2626;
+  --danger-subtle: rgba(220, 38, 38, 0.06);
   --success: #16A34A;
 }
 ```
 
 ## Typography
 
-Three layers:
+Three layers (fonts loaded via `ui::fonts::embedded_font_css` and injected at window creation):
 1. **Display/Headers:** `DM Mono` — monospace character, 17px weight 500 for section headings
 2. **UI Chrome:** `Recursive` — variable sans, 13-14px for body/buttons/labels
 3. **Data/Debug:** `Cascadia Code` / `JetBrains Mono` — monospace, tabular-nums
@@ -68,18 +70,10 @@ Sharp system: 4px base (--radius), 6px cards (--radius-md), 8px max (--radius-lg
 - 200ms for layout transitions (--duration)
 - Easing: cubic-bezier(0.25, 1, 0.5, 1)
 
-## Acrylic Backdrop
-
-Window-level acrylic blur via DWM API. Requires:
-- `WindowBuilder::with_transparent(true)`
-- `Config::with_background_color((0,0,0,0))`
-- `DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, 3)` (Acrylic)
-- CSS body background: transparent
-
 ## Components
 
 ### Card
-- Semi-transparent background over acrylic: `var(--bg-surface)`
+- Solid white background: `var(--bg-surface)`
 - 2px border, 6px radius
 - 16px padding
 - Title in DM Mono 17px weight 500

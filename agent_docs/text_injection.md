@@ -21,8 +21,10 @@ below, not because it's the weakest.
   Notepad is documented (community/AutoHotkey reports; Microsoft-acknowledged
   Notepad-redesign bug) to buffer or drop batched synthetic Unicode keystrokes
   — invisibly, since every event is still accepted into the input queue. See
-  `SKIP_SENDINPUT_PROCESSES` in `src/injection/sendinput.rs` for the
-  known-affected-app skip list and why `notepad.exe` isn't on it yet.
+  `SKIP_SENDINPUT_PROCESSES` in `src/injection/sendinput.rs`: currently `warp.exe`
+  is skipped; `notepad.exe` remains unskipped because the clipboard fallback's
+  500ms restore timer lacks confirmation the paste landed, so RDP latency could
+  trade garbled text for stale clipboard content — fix that race first.
 
 ### 2. Clipboard Paste
 - Save current clipboard contents
@@ -55,10 +57,10 @@ silently dropped. Practically, dictating into Task Manager, an elevated
 Command Prompt, or any "Run as administrator" window does nothing, and there
 is no error to catch. The only fix is a signed binary carrying
 `uiAccess="true"` and installed under Program Files, which is a code-signing
-and installer commitment well beyond what this app does today. Unverified at
-runtime (no Windows machine has run this build yet), but the mechanism is
-Windows platform behaviour, not something Beamer's code could get right or
-wrong.
+and installer commitment well beyond what this app does today. Confirmed on
+real Windows hardware — dictating into an elevated window silently does
+nothing, as expected. This is Windows platform behaviour, not something
+Beamer's code could get right or wrong.
 
 `injection.paste_shortcut` (Ctrl+V vs Ctrl+Shift+V, see below) is a
 Linux-only setting. On Windows the clipboard fallback in
@@ -121,7 +123,7 @@ submit a chat box or form mid-injection. The clipboard path keeps newlines
 (an atomic paste doesn't press keys).
 
 ### 1. gnome (direct typing via the bundled Shell extension — preferred)
-- The extension (v4; capability floor is v2) owns a
+- The extension (v6; capability floor is v2) owns a
   `Clutter.VirtualInputDevice` inside GNOME Shell —
   the same mechanism as GNOME's on-screen keyboard — and exposes
   `TypeText(s) -> b` on `app.beamer.FocusProvider`.
@@ -193,14 +195,14 @@ Ctrl+Shift+V.
 To add a terminal, PR-append the app id (lowercase, exact match — no
 substring heuristic).
 
-### GNOME Shell extension v4 (`extension/beamer-focus@beamer.app/`)
+### GNOME Shell extension v6 (`extension/beamer-focus@beamer.app/`)
 
 D-Bus interface on `org.gnome.Shell` / `/app/beamer/FocusProvider`:
 
 | Method | Purpose |
 |---|---|
 | `GetFocusedAppId() -> s` | focused app id (v1) |
-| `GetVersion() -> u` | capability probe (returns 4) |
+| `GetVersion() -> u` | capability probe (returns 6) |
 | `TypeText(s) -> b` | type Unicode text via virtual keyboard |
 | `SendPasteChord(b) -> b` | Ctrl(+Shift)+V for the clipboard backend |
 | `ShowIndicator(s)` / `UpdateLevel(d)` / `HideIndicator()` | shell-native recording pill (Deploy Purple waveform, bottom-center of the focused window's monitor, click-through) |
@@ -241,7 +243,7 @@ Deliberately not (yet) added: the XDG RemoteDesktop portal / libei backend
 (the sanctioned path for KDE and extension-less GNOME). It needs an async
 portal session, an authorization dialog, and restore-token persistence that
 is still flaky in the wild; the copy+notify degradation covers those setups
-meanwhile. See docs/superpowers/specs/2026-07-18-linux-injection-v2-design.md.
+meanwhile. See `docs/decisions.md` ("Linux injection v2 + shell-native pill").
 
 ### System setup
 

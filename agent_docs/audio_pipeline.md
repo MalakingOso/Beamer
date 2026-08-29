@@ -69,11 +69,11 @@ batch it:
 1. Skips empty batches without publishing a level update, then breaks out
    when the channel closes (stream torn down) — an empty batch there is a
    `Some(vec![])` sentinel from `capture.rs`'s error path, not end-of-stream.
-2. Computes RMS, maps it to a display level (`normalize_rms`, 8x gain —
-   typical speech RMS is ~0.12 so this puts speech near full scale), and
-   publishes it on a `watch::channel` (`subscribe_levels()`). This is what
-   drives the GNOME Shell pill's waveform via `linux_integration.rs`'s 66ms
-   poll loop.
+2. Computes RMS, maps it to a display level (`normalize_rms` — a dB-domain
+   mapping that keeps ordinary speech in a visible range without saturation),
+   and publishes it on a `watch::channel` (`subscribe_levels()`). This is
+   what drives the GNOME Shell pill's waveform via `linux_integration.rs`'s
+   66ms poll loop.
 3. Converts f32 `[-1.0, 1.0]` samples to **16-bit LE PCM** (`f32_to_i16_bytes`,
    clamping out-of-range values) and forwards the bytes to the output
    channel.

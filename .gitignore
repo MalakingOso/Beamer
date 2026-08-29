@@ -1,3 +1,15 @@
 /target
 .worktrees/
 /dist
+.superpowers/
+
+# OS
+.DS_Store
+
+# Editors
+*.swp
+*.swo
+.idea/
+
+# Logs
+*.log
