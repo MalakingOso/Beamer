@@ -248,6 +248,21 @@ pub fn reopen_action(slot: SlotState, open: bool) -> ReopenAction {
     }
 }
 
+/// Whether the reconciler may open note windows on this pass.
+///
+/// `ready` is `app_ready` — false until the splash has closed. Notes must not
+/// appear over the loading screen, so **every** open waits on it, including
+/// notes restored from disk (the common case at launch) and a note dictated
+/// while the splash is still up. Nothing is lost by waiting: the reconciler
+/// re-runs when `app_ready` flips, and opens whatever had accumulated.
+///
+/// Split out from the effect for the same reason as `reopen_action` above:
+/// the effect needs a live Dioxus runtime and a real window to exercise,
+/// while this — the part that can actually be wrong — needs neither.
+pub fn may_open(ready: bool, pending: usize) -> bool {
+    ready && pending > 0
+}
+
 fn slot_state(registry: &StickyRegistry, id: &str) -> SlotState {
     match registry.peek().get(id) {
         None => SlotState::Absent,
@@ -339,10 +354,11 @@ pub fn setup_sticky_windows(
             close_note_window(registry, &id);
         }
 
-        // Notes restored from disk wait for the loading screen to finish
-        // before their windows appear; a note dictated just now can only
-        // happen after that point anyway, since the hotkey isn't live yet.
-        if to_open.is_empty() || !ready {
+        // Nothing opens over the splash — see `may_open`. This covers notes
+        // restored from disk (the common case at launch) and equally a note
+        // dictated while the loading screen is still up: both wait here, and
+        // this effect re-runs the moment `app_ready` flips.
+        if !may_open(ready, to_open.len()) {
             return;
         }
 
@@ -456,6 +472,32 @@ mod tests {
     #[test]
     fn an_unregistered_note_just_gets_marked_open() {
         assert_eq!(reopen_action(SlotState::Absent, false), ReopenAction::Reopen);
+    }
+
+    #[test]
+    fn nothing_opens_while_the_splash_is_still_up() {
+        // The regression this guards: notes popping up over the loading
+        // screen. `ready` is false for the whole splash, however many notes
+        // are waiting — restored from disk, or dictated while it was up.
+        assert!(!may_open(false, 1));
+        assert!(!may_open(false, 7));
+    }
+
+    #[test]
+    fn everything_waiting_opens_once_the_splash_closes() {
+        // The other half of the same invariant: waiting must not mean losing.
+        // The effect re-runs when `app_ready` flips and opens the backlog.
+        assert!(may_open(true, 1));
+        assert!(may_open(true, 7));
+    }
+
+    #[test]
+    fn a_pass_with_nothing_to_open_does_no_work() {
+        // Guards the placement machinery below the gate — work_area(),
+        // main_window_points() and a fresh launch seed are not free, and an
+        // empty pass is the common case (every close, every edit).
+        assert!(!may_open(true, 0));
+        assert!(!may_open(false, 0));
     }
 
     #[test]
