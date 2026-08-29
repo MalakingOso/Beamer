@@ -15,7 +15,7 @@
 //! it on its own next tick. That is why there is no per-store document write.
 
 use super::task_store::TaskStore;
-use super::{doc_notes, doc_tasks, NoteStore};
+use super::{doc_notes, doc_tasks, doc_vocab, NoteStore};
 
 /// What one pass over the document did.
 struct DocPass {
@@ -120,6 +120,15 @@ fn run_document_pass(notes: &mut NoteStore, tasks: &mut TaskStore) -> DocPass {
                 doc.quarantine_incoming();
             }
         }
+    }
+
+    // After the merge, deliberately: the merge is what brings the other
+    // machine's copy in, so comparing against `ROOT["vocabulary"]` any earlier
+    // would read a stale value and mistake an incoming edit for no edit. A
+    // push from here moves the heads, so the `changed` check below picks it up
+    // the same way it picks up a note edit.
+    if let Err(e) = doc_vocab::reconcile(&mut doc) {
+        tracing::error!("Could not keep the vocabulary in step with the sync document: {e}");
     }
 
     if merged {

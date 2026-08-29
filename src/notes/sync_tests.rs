@@ -86,6 +86,49 @@ fn note_bodies(store: &NoteStore) -> Vec<String> {
     store.notes.iter().map(|n| n.body.clone()).collect()
 }
 
+/// The vocabulary rides the same document the notes do. `vocabulary.txt` sits
+/// beside `notes.json`, so a machine's own config directory is what decides
+/// which file this is — nothing here can reach the real one.
+#[test]
+fn a_vocabulary_edited_on_one_machine_reaches_the_other() {
+    let a_dir = temp_dir("vocab_a");
+    let b_dir = temp_dir("vocab_b");
+    let mut a = Machine::open(&a_dir);
+    let mut b = Machine::open(&b_dir);
+
+    std::fs::write(a_dir.join("vocabulary.txt"), "Kubernetes\ntokio::spawn").unwrap();
+    a.flush();
+
+    carry_document(&a, &b);
+    b.flush();
+
+    assert_eq!(
+        std::fs::read_to_string(b_dir.join("vocabulary.txt")).unwrap(),
+        "Kubernetes\ntokio::spawn"
+    );
+}
+
+/// The vocabulary must not drag the note corpus around with it: a machine
+/// whose only change is a new term still has to leave the notes alone.
+#[test]
+fn carrying_a_vocabulary_does_not_disturb_the_notes() {
+    let a_dir = temp_dir("vocab_notes_a");
+    let b_dir = temp_dir("vocab_notes_b");
+    let mut a = Machine::open(&a_dir);
+    a.notes.create("a note that must survive".into(), NoteColor::Purple, NoteOrigin::Dictated);
+    a.flush();
+
+    std::fs::write(a_dir.join("vocabulary.txt"), "PostgreSQL").unwrap();
+    a.flush();
+
+    let mut b = Machine::open(&b_dir);
+    carry_document(&a, &b);
+    b.flush();
+
+    assert_eq!(note_bodies(&b.notes), ["a note that must survive"]);
+    assert_eq!(std::fs::read_to_string(b_dir.join("vocabulary.txt")).unwrap(), "PostgreSQL");
+}
+
 #[test]
 fn two_documents_edited_offline_merge_into_one_that_holds_both_edits() {
     let a_dir = temp_dir("divergent_a");

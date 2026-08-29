@@ -142,6 +142,21 @@ pub struct SyncDoc {
     /// the very next tick regardless. Set and cleared inside `save` itself,
     /// so no return path can forget it.
     save_failed: bool,
+    /// Where this machine's `vocabulary.txt` is, or `None` for a document that
+    /// has no vocabulary to keep in step.
+    ///
+    /// `None` is the default, and it is what keeps `sync_server` — which opens
+    /// a document exactly the way a client does — from inventing a vocabulary
+    /// it has no business holding. Only `NoteStore::load_from` opts in.
+    vocab_path: Option<PathBuf>,
+    /// What the file and the document last agreed on, held for the three-way
+    /// comparison in [`super::doc_vocab::decide`].
+    ///
+    /// In memory only, and deliberately: persisting it would make a stale
+    /// baseline outlive the process that earned it. `None` at the start of
+    /// every run means "no baseline yet", which the first pass resolves by
+    /// letting a populated document win over this machine's file.
+    last_vocab: Option<String>,
 }
 
 impl Default for SyncDoc {
@@ -154,6 +169,8 @@ impl Default for SyncDoc {
             read_only: false,
             pending_save: false,
             save_failed: false,
+            vocab_path: None,
+            last_vocab: None,
         }
     }
 }
@@ -276,9 +293,39 @@ impl SyncDoc {
 
         let last_write = existed.then(|| mtime(&path)).flatten();
         (
-            Self { doc, path, last_write, existed, read_only, pending_save: false, save_failed: false },
+            Self {
+                doc,
+                path,
+                last_write,
+                existed,
+                read_only,
+                pending_save: false,
+                save_failed: false,
+                vocab_path: None,
+                last_vocab: None,
+            },
             error,
         )
+    }
+
+    /// Opt this document into keeping `vocabulary.txt` in step. See the field.
+    pub fn set_vocab_path(&mut self, path: PathBuf) {
+        self.vocab_path = Some(path);
+    }
+
+    /// Where the vocabulary file is, or `None` when this document has none.
+    pub fn vocab_path(&self) -> Option<&Path> {
+        self.vocab_path.as_deref()
+    }
+
+    /// The baseline both sides last agreed on. See the field.
+    pub fn last_vocab(&self) -> Option<&str> {
+        self.last_vocab.as_deref()
+    }
+
+    /// Record the content the file and the document now agree on.
+    pub fn set_last_vocab(&mut self, content: String) {
+        self.last_vocab = Some(content);
     }
 
     /// Whether writing is off for this session. See the field.

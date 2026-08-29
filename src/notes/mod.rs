@@ -24,6 +24,7 @@ use sync_doc::{SyncDoc, SyncHandle};
 
 pub mod blocks;
 mod doc_notes;
+mod doc_vocab;
 mod doc_tasks;
 pub mod edit;
 pub mod flush;
@@ -267,7 +268,15 @@ impl NoteStore {
         doc_path: PathBuf,
     ) -> Self {
         let machine = MachineStore::load_from(machine_path);
-        let (doc, load_error) = SyncDoc::open(doc_path);
+        let (mut doc, load_error) = SyncDoc::open(doc_path);
+        // `vocabulary.txt` sits beside `notes.json` in the config directory,
+        // so deriving it from `path` rather than calling `Config::config_dir()`
+        // keeps every test rooted in its own temp directory instead of the
+        // real vocabulary. This is the only caller that opts a document in;
+        // `sync_server` has no vocabulary and leaves it `None`.
+        if let Some(dir) = path.parent() {
+            doc.set_vocab_path(dir.join("vocabulary.txt"));
+        }
         // A document already on disk is the corpus. `notes.json` is a derived
         // export from that point on, never read again, so a stale or
         // hand-edited mirror cannot resurrect anything.

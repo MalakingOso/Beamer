@@ -181,6 +181,13 @@ tokio::spawn
 Max 100 terms for batch endpoints, 50 for realtime. ElevenLabs batch applies a
 20-second minimum billable duration above 100 terms; realtime's tight realtime budget is 50.
 
+**Synced across machines**, with the notes, as a scalar at `ROOT["vocabulary"]`
+in `notes.automerge` — not by copying this file. Gated on `config.sync.url`
+like everything else, and last-write-wins rather than merged: two machines that
+both edit while disconnected keep the document's copy and discard the other.
+`src/notes/doc_vocab.rs`, and `agent_docs/sync.md`'s "The vocabulary" for why
+a scalar rather than a map.
+
 Renames go through `Vocabulary::rename`, which edits the term **in place**.
 Don't reimplement a rename as `remove` + `add` — `add` appends, so the on-disk
 order diverges from what the Vocab page shows until the next restart.

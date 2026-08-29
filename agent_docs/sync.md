@@ -17,7 +17,13 @@ document itself.
     config.toml              machine-specific
     machine.json             pos / size / open, per machine
     history.json             dictation history
+    vocabulary.txt           a mirror; its *contents* ride notes.automerge
 ```
+
+`vocabulary.txt` is the one file under the config root whose contents do
+cross. The file itself is still machine-local and is never copied anywhere —
+what syncs is the string inside it, carried in `notes.automerge` like
+everything else. See "The vocabulary" below.
 
 `notes.automerge` under `sync/` is the same on every machine, given time and
 a server; that is the whole point of this task. `sync/attachments` is carried
@@ -171,6 +177,42 @@ of "synced wrong, this actively hurts you":
 server *this* machine dials is exactly as per-machine as `llm.base_url`. See
 `src/config/mod.rs`'s `SyncConfig` doc comment.
 
+## The vocabulary
+
+The custom vocabulary crosses with the notes, in the same document, but as a
+**scalar at `ROOT["vocabulary"]`** holding the whole list newline-joined —
+not a map keyed by term the way `doc_notes` and `doc_tasks` are keyed by id.
+`src/notes/doc_vocab.rs`, called from `flush::run_document_pass` after the
+merge.
+
+Two reasons it is a scalar, both specific to this list rather than general:
+
+- **Order decides which terms are sent at all.** `keyterms` takes the first
+  100 terms (50 for realtime) and drops the rest, so the list's order is
+  load-bearing. An automerge map has no order, so a map would need a position
+  field per term and a tie-break for two machines appending while offline.
+- **`Vocabulary::rename` edits in place, deliberately.** Under a term-keyed
+  map the key *is* the term, so a rename becomes remove-then-add — the exact
+  pattern that function's doc comment says not to reimplement, because it
+  appends and the on-disk order stops matching what the Vocab page shows.
+
+A scalar keeps both properties for nothing, and `ROOT` is the one object id
+every document already shares, so this needed no change to
+`genesis.automerge` and cannot hit the two-objects-at-one-key conflict
+genesis exists to prevent.
+
+⚠️ **Concurrent vocabulary edits do not merge.** Notes get a CRDT because two
+machines really do edit one note offline; this list is small, rarely edited,
+and effectively never edited on both machines at once. When it does happen,
+**the document wins** and the local file's divergent edit is discarded. Both
+machines apply that same rule, which is what makes them converge on the next
+pass rather than ping-pong; preferring the local file would have each machine
+prefer its own copy forever. The cost is a few re-typed terms, not a note.
+
+There is no separate switch: `config.sync.url` being empty turns this off
+along with everything else. A document with no vocabulary path — which is
+every document `sync_server` opens — leaves the key alone entirely.
+
 ## What this protocol does *not* carry
 
 **Attachments never move through `automerge::sync`.** `notes.automerge`
@@ -208,6 +250,7 @@ Syncthing's one job is the `attachments` folder and nothing else:
 <config_dir>/sync/notes.automerge            <- automerge::sync's job, not Syncthing's
 <config_dir>/machine.json                    <- machine-local, never synced by anything
 <config_dir>/config.toml                     <- machine-local, never synced by anything
+<config_dir>/vocabulary.txt                  <- contents ride notes.automerge; not Syncthing's job
 <config_dir>/notes.json                      <- a derived export, never read back, not worth syncing
 <config_dir>/tasks.json                      <- same, derived from the document
 WebView2 profile (Windows, outside config_dir) <- browser engine state, never synced
