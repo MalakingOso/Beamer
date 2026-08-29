@@ -22,8 +22,12 @@ pub fn RecordingPill() -> Element {
     }
 }
 
-// VibeTyper-style dark glass capsule: purple-gradient waveform, white
-// tabular timer, fully rounded, hairline ring, soft shadow.
+// Deploy Purple capsule: purple-gradient waveform on a purple-tinted
+// capsule, white tabular timer, fully rounded, purple hairline ring,
+// hard-offset accent shadow. Same design tokens as the GNOME-Shell-drawn
+// pill in extension/beamer-focus@beamer.app/stylesheet.css, but not the same
+// shape — that one is a light sharp-cornered card, this stays a dark rounded
+// capsule to match the rest of this platform's chrome.
 #[cfg(not(target_os = "linux"))]
 pub(super) const PILL_CSS: &str = r#"
 *, *::before, *::after { margin:0; padding:0; }
@@ -32,9 +36,9 @@ html, body, #main { background:transparent!important; overflow:hidden;
 
 .pill { display:flex; align-items:center; gap:12px; padding:0 18px;
   height:44px; margin:4px auto; width:fit-content;
-  background:linear-gradient(180deg,#17171a,#101012); border-radius:9999px;
-  border:1px solid rgba(255,255,255,0.14);
-  box-shadow:0 6px 18px rgba(0,0,0,0.45); }
+  background:linear-gradient(180deg,#2E004F,#170027); border-radius:9999px;
+  border:1px solid rgba(196,132,252,0.25);
+  box-shadow:2px 4px 0 0 rgba(75,0,130,0.35), 0 6px 18px rgba(23,0,39,0.5); }
 
 .pill-bars { display:flex; align-items:center; gap:3px; height:26px; }
 .bar { width:3px; border-radius:2px;
