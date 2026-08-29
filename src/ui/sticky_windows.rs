@@ -135,6 +135,12 @@ async fn open_note_window(
     #[cfg(target_os = "windows")]
     {
         builder = builder.with_skip_taskbar(true);
+        // tao defaults undecorated windows to a shadowed native drop-shadow
+        // (`decoration_shadow`), which insets the client rect by a few
+        // DPI-scaled pixels around the whole border. On a note that paints
+        // its own rounded shape in CSS, that reserved margin reads as a
+        // stray rectangular border. Off, this is a pure CSS-drawn window.
+        builder = builder.with_undecorated_shadow(false);
     }
 
     let cfg = DesktopConfig::new()

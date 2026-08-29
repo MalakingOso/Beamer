@@ -26,7 +26,7 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -93,7 +93,7 @@ jobs:
       # always-on desktop beside llama-server, and every Beamer instance
       # connects to it. Shipping a Windows copy in the app artifact invites
       # running two servers against two documents. The Linux job builds it.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: beamer-windows-portable
           path: ${{ steps.appexe.outputs.path }}
@@ -117,7 +117,7 @@ jobs:
           Write-Host "Installer: $($nsis.FullName) ($([math]::Round($nsis.Length/1MB,1)) MB)"
           "path=$($nsis.FullName)" >> $env:GITHUB_OUTPUT
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: beamer-windows-installer
           path: ${{ steps.installer.outputs.path }}
@@ -128,7 +128,7 @@ jobs:
     name: Test and bundle on Linux
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -156,7 +156,7 @@ jobs:
       - name: Build sync_server
         run: cargo build --release --locked --bin sync_server
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: beamer-sync-server-linux
           path: target/release/sync_server
@@ -183,7 +183,7 @@ jobs:
           echo "Package: $pkg ($(du -h "$pkg" | cut -f1))"
           echo "path=$pkg" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: beamer-linux-deb
           path: ${{ steps.deb.outputs.path }}

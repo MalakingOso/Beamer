@@ -94,7 +94,9 @@ pub(super) fn setup_splash(window: DesktopContext, mut app_ready: Signal<bool>) 
                     .with_inner_size(PhysicalSize::new(splash_w, splash_h))
                     .with_position(PhysicalPosition::new(x as i32, y as i32));
                 #[cfg(target_os = "windows")]
-                let builder = builder.with_skip_taskbar(true);
+                let builder = builder
+                    .with_skip_taskbar(true)
+                    .with_undecorated_shadow(false);
 
                 let cfg = DesktopConfig::new()
                     .with_data_directory(super::webview_data_dir())
@@ -255,7 +257,9 @@ pub(super) fn setup_recording_pill(
                     .with_inner_size(PhysicalSize::new(pill_w, pill_h))
                     .with_position(PhysicalPosition::new(x as i32, y as i32));
                 #[cfg(target_os = "windows")]
-                let builder = builder.with_skip_taskbar(true);
+                let builder = builder
+                    .with_skip_taskbar(true)
+                    .with_undecorated_shadow(false);
 
                 let cfg = DesktopConfig::new()
                     .with_data_directory(super::webview_data_dir())
