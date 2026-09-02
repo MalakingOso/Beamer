@@ -53,7 +53,7 @@ pub(super) async fn do_note_capture(
     text: &str,
     notes: &mut Signal<NoteStore>,
     tasks: &mut Signal<TaskStore>,
-    config: &Signal<Config>,
+    _config: &Signal<Config>,
     status_log: &mut Signal<StatusLog>,
     note_passes: Coroutine<PipelineRequest>,
 ) -> Option<String> {
@@ -62,8 +62,9 @@ pub(super) async fn do_note_capture(
         return None;
     }
 
-    let color = NoteColor::from_config_name(&config.peek().notes.default_color);
-    let id = notes.write().create(text.to_string(), color, NoteOrigin::Dictated);
+    let id = notes
+        .write()
+        .create(text.to_string(), NoteColor::random(), NoteOrigin::Dictated);
     crate::notes::flush_stores(&mut notes.write(), &mut tasks.write());
 
     log_status(

@@ -6,6 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// How far one model pass has got on a note.
 ///
@@ -55,6 +56,32 @@ pub enum NoteColor {
 }
 
 impl NoteColor {
+    pub const ALL: [Self; 6] = [
+        Self::Purple,
+        Self::Violet,
+        Self::Amber,
+        Self::Teal,
+        Self::Rose,
+        Self::Slate,
+    ];
+
+    pub fn random() -> Self {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos() as u64);
+        let mut entropy = now
+            ^ COUNTER
+                .fetch_add(0x9e37_79b9_7f4a_7c15, Ordering::Relaxed)
+                .rotate_left(17);
+        entropy = (entropy ^ (entropy >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        entropy = (entropy ^ (entropy >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        entropy ^= entropy >> 31;
+
+        Self::ALL[entropy as usize % Self::ALL.len()]
+    }
+
     pub fn from_config_name(name: &str) -> Self {
         match name.trim().to_ascii_lowercase().as_str() {
             "violet" => Self::Violet,

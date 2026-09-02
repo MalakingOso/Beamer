@@ -164,12 +164,14 @@ body { font-family:"Recursive","Segoe UI Variable","Segoe UI",system-ui,sans-ser
   pointer-events:none; }
 
 .sticky-bar-actions { display:flex; align-items:center; gap:2px; }
-.sticky-attach { display:flex; align-items:center; justify-content:center;
+.sticky-new, .sticky-attach { display:flex; align-items:center; justify-content:center;
   cursor:pointer; font-size:13px; line-height:1; padding:3px 5px;
   border-radius:var(--radius-lg); opacity:0.6;
   transition:opacity var(--duration-fast) var(--ease),
-             background var(--duration-fast) var(--ease); }
-.sticky-attach:hover { opacity:1; background:rgba(75,0,130,0.08); }
+              background var(--duration-fast) var(--ease); }
+.sticky-new { border:none; background:none; color:var(--ink-soft); }
+.sticky-new:hover, .sticky-attach:hover {
+  opacity:1; background:rgba(75,0,130,0.08); }
 
 /* Drag feedback. An inset dashed accent rather than an outline, so it cannot
    push the layout around mid-drag. */

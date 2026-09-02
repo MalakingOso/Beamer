@@ -12,7 +12,6 @@
 
 use dioxus::prelude::*;
 
-use crate::config::Config;
 use crate::notes::blocks;
 use crate::notes::task_store::TaskStore;
 use crate::notes::{Note, NoteColor, NoteOrigin, NoteStore};
@@ -23,9 +22,6 @@ use crate::ui::sticky_windows::{self, StickyRegistry};
 #[derive(Props, Clone, PartialEq)]
 pub struct NotesPageProps {
     pub notes: Signal<NoteStore>,
-    /// Read only for `notes.default_color`, so a typed note is born the same
-    /// colour a dictated one would be.
-    pub config: Signal<Config>,
     /// Needed only by Delete: a note removed outright takes its rows with it.
     pub tasks: Signal<TaskStore>,
     pub registry: StickyRegistry,
@@ -62,7 +58,6 @@ fn when(note: &Note) -> String {
 #[component]
 pub fn NotesPage(props: NotesPageProps) -> Element {
     let mut notes = props.notes;
-    let config = props.config;
     let mut tasks = props.tasks;
     let registry = props.registry;
 
@@ -130,9 +125,11 @@ pub fn NotesPage(props: NotesPageProps) -> Element {
                             // No `new_window` call either: `create` sets
                             // `open: true`, and the reconciler opens a window
                             // for any note that is open and not archived.
-                            let color =
-                                NoteColor::from_config_name(&config.peek().notes.default_color);
-                            notes.write().create(String::new(), color, NoteOrigin::Typed);
+                            notes.write().create(
+                                String::new(),
+                                NoteColor::random(),
+                                NoteOrigin::Typed,
+                            );
                             // Flushed inline, like `do_note_capture`, and
                             // through `flush_stores` because that is the only
                             // thing that writes the document. `flush_if_dirty`

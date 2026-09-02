@@ -33,8 +33,8 @@ use dioxus::prelude::*;
 
 use crate::notes::pipeline::PipelineRequest;
 use crate::notes::task_store::TaskStore;
-use crate::notes::{next_id, Attachment, NoteColor, NoteStore};
-use crate::ui::icons::{IconAsterisk, IconCheck};
+use crate::notes::{next_id, Attachment, NoteColor, NoteOrigin, NoteStore};
+use crate::ui::icons::{IconAsterisk, IconCheck, IconPlus};
 use crate::ui::sticky_blocks::{self, StickyBody};
 use crate::ui::sticky_chips::StickyChips;
 use crate::ui::sticky_footer::{self, FooterIcon};
@@ -46,14 +46,7 @@ pub fn window_title(id: &str) -> String {
 }
 
 /// Every colour a note can be, in swatch order.
-pub const PALETTE: [NoteColor; 6] = [
-    NoteColor::Purple,
-    NoteColor::Violet,
-    NoteColor::Amber,
-    NoteColor::Teal,
-    NoteColor::Rose,
-    NoteColor::Slate,
-];
+pub const PALETTE: [NoteColor; 6] = NoteColor::ALL;
 
 /// Convert a `Resized` event's physical size to the logical one the store keeps.
 ///
@@ -298,6 +291,23 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
                     }
                 }
                 div { class: "sticky-bar-actions",
+                    button {
+                        class: "sticky-new",
+                        title: "New note",
+                        onmousedown: move |e| e.stop_propagation(),
+                        onclick: move |_| {
+                            notes.write().create(
+                                String::new(),
+                                NoteColor::random(),
+                                NoteOrigin::Typed,
+                            );
+                            crate::notes::flush_stores(
+                                &mut notes.write(),
+                                &mut tasks.write(),
+                            );
+                        },
+                        IconPlus { size: 13 }
+                    }
                     // The fallback for every drop, and the only path on
                     // Windows. dioxus-desktop turns this into a native dialog
                     // returning real paths — no new dependency.
@@ -462,39 +472,5 @@ fn clipboard_paste() -> Pasted {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn window_title_embeds_the_note_id() {
-        let title = window_title("18f2a1b3c4d-0001");
-        assert_eq!(title, "Beamer Note 18f2a1b3c4d-0001");
-        assert!(
-            title.starts_with(TITLE_PREFIX),
-            "the GNOME extension matches on this prefix; changing it breaks placement"
-        );
-    }
-
-    #[test]
-    fn titles_are_unique_per_note() {
-        assert_ne!(window_title("a"), window_title("b"));
-    }
-
-    #[test]
-    fn a_resize_at_scale_two_stores_half_the_physical_numbers() {
-        // Invisible on this machine, where everything is scale 1.0 — and wrong
-        // on every HiDPI display, reopening each note at double size.
-        assert_eq!(logical_size((800, 640), 2.0), Some((400, 320)));
-        assert_eq!(logical_size((400, 320), 1.0), Some((400, 320)));
-        assert_eq!(logical_size((600, 480), 1.5), Some((400, 320)));
-    }
-
-    #[test]
-    fn a_zero_sized_resize_is_ignored() {
-        // A minimize on some compositors. Storing it would reopen the note as
-        // a sliver with no way back to a usable size.
-        assert_eq!(logical_size((0, 640), 2.0), None);
-        assert_eq!(logical_size((800, 0), 2.0), None);
-        assert_eq!(logical_size((800, 640), 0.0), None, "a bad scale must not divide by zero");
-    }
-}
+#[path = "sticky_tests.rs"]
+mod tests;
