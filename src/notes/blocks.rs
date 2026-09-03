@@ -25,7 +25,10 @@
 /// One piece of a note body, in reading order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Block<'a> {
-    /// A run of body lines, newlines between them preserved, no trailing one.
+    /// A run of body lines, newlines between them preserved. A middle run
+    /// carries no trailing newline (it is the separator before the token);
+    /// the final run keeps whatever the body ends with, including trailing
+    /// newlines, so a textarea bound to it round-trips an Enter at the end.
     /// May be empty: `parse` synthesizes empty runs so Text and Attachment
     /// strictly alternate, which is what gives the UI a textarea above and
     /// below every attachment.
@@ -87,8 +90,9 @@ fn segments(body: &str) -> Vec<Segment<'_>> {
     out
 }
 
-/// A text segment's editable content: its raw slice without the one trailing
-/// newline that separates it from what follows.
+/// A middle text segment's editable content: its raw slice without the one
+/// trailing newline that separates it from the token that follows. The final
+/// segment has no such separator, so its raw slice is content as-is.
 fn content(raw: &str) -> &str {
     raw.strip_suffix('\n').unwrap_or(raw)
 }
@@ -99,10 +103,18 @@ fn content(raw: &str) -> &str {
 /// body — today's single-textarea behaviour, reproduced by construction rather
 /// than by a fast-path branch that could get out of step.
 pub fn parse(body: &str) -> Vec<Block<'_>> {
-    segments(body)
-        .into_iter()
-        .map(|s| match s.id {
+    let segs = segments(body);
+    let last = segs.len().saturating_sub(1);
+    segs.into_iter()
+        .enumerate()
+        .map(|(i, s)| match s.id {
             Some(id) => Block::Attachment(id),
+            // Only a middle run has a separator newline to remove. Stripping
+            // the final run ate an Enter at the end of the note on every
+            // re-render: the store held "hello\n" but the textarea was given
+            // "hello", so the controlled value snapped back and the cursor
+            // jumped to the previous line.
+            None if i == last => Block::Text(s.raw),
             None => Block::Text(content(s.raw)),
         })
         .collect()
@@ -110,10 +122,12 @@ pub fn parse(body: &str) -> Vec<Block<'_>> {
 
 /// Just the text runs, in order. What the cleanup pass is given, one call each.
 pub fn text_runs(body: &str) -> Vec<&str> {
-    segments(body)
-        .into_iter()
-        .filter(|s| s.id.is_none())
-        .map(|s| content(s.raw))
+    let segs = segments(body);
+    let last = segs.len().saturating_sub(1);
+    segs.into_iter()
+        .enumerate()
+        .filter(|(_, s)| s.id.is_none())
+        .map(|(i, s)| if i == last { s.raw } else { content(s.raw) })
         .collect()
 }
 
@@ -413,6 +427,43 @@ mod tests {
     fn set_run_accepts_multi_line_text() {
         let body = format!("a\n{IMG}");
         assert_eq!(set_run(&body, 0, "a\nb\nc"), format!("a\nb\nc\n{IMG}"));
+    }
+
+    #[test]
+    fn a_trailing_newline_survives_parse_so_an_enter_at_the_end_sticks() {
+        // The textarea is controlled: the store holds what `oninput` wrote,
+        // then `parse` decides what the textarea is given back. Stripping the
+        // final run's trailing newline here snapped the value back and moved
+        // the cursor up a line on every Enter at the end of the note.
+        assert_eq!(parse("hello\n"), vec![Block::Text("hello\n")]);
+        assert_eq!(parse("hello\n\n"), vec![Block::Text("hello\n\n")]);
+        assert_eq!(text_runs("hello\n"), vec!["hello\n"]);
+        // An Enter in the middle always round-tripped, which is why only a
+        // trailing Enter vanished.
+        assert_eq!(parse("hello\nworld"), vec![Block::Text("hello\nworld")]);
+    }
+
+    #[test]
+    fn a_middle_run_still_drops_its_separator_newline() {
+        let body = format!("above\n{IMG}\nbelow");
+        assert_eq!(
+            parse(&body),
+            vec![
+                Block::Text("above"),
+                Block::Attachment("img1"),
+                Block::Text("below"),
+            ]
+        );
+        assert_eq!(text_runs(&body), vec!["above", "below"]);
+    }
+
+    #[test]
+    fn set_run_then_parse_round_trips_a_trailing_enter() {
+        let body = set_run("hello", 0, "hello\n");
+        assert_eq!(body, "hello\n");
+        assert_eq!(parse(&body), vec![Block::Text("hello\n")]);
+        let body = set_run(&format!("above\n{IMG}\nbelow"), 1, "below\n");
+        assert_eq!(text_runs(&body), vec!["above", "below\n"]);
     }
 
     #[test]

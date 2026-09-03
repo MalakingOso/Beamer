@@ -181,7 +181,9 @@ fn not_found(why: &str) -> Response<Vec<u8>> {
 /// right. Long lines wrap and are undercounted, which is why there is a floor
 /// and the CSS lets the stack scroll.
 pub fn rows_for(text: &str, is_only_run: bool) -> usize {
-    let counted = text.lines().count().max(1);
+    // `str::lines` drops the trailing empty line, so "hello\n" counts as one.
+    // Splitting on '\n' counts it as the two rows the textarea shows.
+    let counted = text.split('\n').count().max(1);
     // A lone run owns the whole note, so it should fill it rather than hug two
     // lines of dictation.
     let floor = if is_only_run { 3 } else { 1 };
@@ -484,6 +486,15 @@ mod tests {
             40,
             "a runaway note must not make a window of unbounded height"
         );
+    }
+
+    #[test]
+    fn a_trailing_enter_grows_the_textarea() {
+        // `str::lines` drops the trailing empty line, so the textarea never
+        // grew on an Enter at the end of the note.
+        assert_eq!(rows_for("hello\n", false), 2);
+        assert_eq!(rows_for("hello\n\n", false), 3);
+        assert_eq!(rows_for("a\nb\n", false), 3);
     }
 
     #[test]
