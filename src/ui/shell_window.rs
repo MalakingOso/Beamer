@@ -1,42 +1,12 @@
 #![cfg(target_os = "linux")]
 
-//! Client for the GNOME Shell extension's window placement (extension v5).
-//!
-//! **Why this exists at all.** Core Wayland and `xdg-shell` give a client no
-//! way to learn or set its own absolute position — the compositor owns
-//! placement by design. `tao::Window::outer_position()` does not error under
-//! Wayland, it returns `Ok((0, 0))`: it reads a cached atomic fed by GDK's
-//! `frame_extents()` on `configure_event`, and GDK has no global coordinates
-//! there. Believing it silently persists garbage, so it is never called.
-//!
-//! Code running *inside* GNOME Shell is not a Wayland client and is bound by
-//! none of that. Beamer already ships an extension for text injection and the
-//! recording pill, so placing a window costs one more D-Bus method rather than
-//! a new dependency.
-//!
-//! Calls degrade to a silent no-op against an older helper: a missing method
-//! comes back as a D-Bus error, and a note simply lands wherever Mutter chose.
-//!
-//! ⚠️ **`PlaceWindow` returning `true` does not mean the window stayed put.**
-//! It means a window with that title was found and `move_frame` was called on
-//! it. Mutter applies its *own* initial placement when a window is first
-//! shown, and that happens after the window is already findable by title — so
-//! an early call is accepted, logged as a success, and then silently
-//! overwritten by Mutter's cascade. Measured 2026-08-25: three notes asked for
-//! (2311, 508), (3389, 1036) and (1648, 584) all reported placed, and all three
-//! were actually at (1120, 590) + 50px per note — the cascade, which is exactly
-//! the clustering the scatter exists to prevent. Re-issuing the same call
-//! against the settled window moved it correctly, so `move_frame` was never the
-//! problem; believing the first `true` was.
-//!
-//! Hence the loop below does not stop at `true`. It re-reads the frame through
-//! `GetWindowFrame` after a delay and only believes a placement that is still
-//! there — the delay is the load-bearing part, since a read taken immediately
-//! would confirm a position Mutter has not clobbered *yet*.
-//!
-//! Follows `shell_indicator`'s `zbus::blocking` pattern, with one difference —
-//! placement is rare and bursty rather than a steady ~15 Hz stream, so each
-//! call gets its own short-lived thread instead of a long-running worker.
+//! Client for the GNOME Shell extension's window placement. Wayland gives a
+//! client no position control (`outer_position()` returns a cached `(0, 0)`),
+//! so the in-shell extension moves windows over D-Bus; missing methods degrade
+//! to a no-op landing wherever Mutter chose. ⚠️ `PlaceWindow` returning `true`
+//! doesn't mean the window stayed put — Mutter's own initial placement lands
+//! later and clobbers early calls — so the loop re-reads the frame after a
+//! settle delay and only believes a placement that survives it.
 
 use std::time::Duration;
 
@@ -44,20 +14,10 @@ pub const DBUS_DEST: &str = "org.gnome.Shell";
 pub const DBUS_PATH: &str = "/app/beamer/FocusProvider";
 pub const DBUS_IFACE: &str = "app.beamer.FocusProvider";
 
-/// How long to wait before each retry after the first attempt.
-///
-/// Beamer cannot observe the Wayland map event: `new_window().await` resolves
-/// when the webview has been constructed, not when Mutter has mapped the window
-/// and given it a title. So the first `PlaceWindow` usually finds nothing and
-/// has to be retried while the window appears. The schedule is front-loaded so
-/// a window that maps quickly — the common case — is placed quickly, and backs
-/// off rather than hammering the shell for the full window.
-///
-/// The tail exists for the startup burst specifically. Restoring a session
-/// opens every note in one reconcile pass, so several heavy webviews map at
-/// once and the last of them can take far longer than a note dictated into an
-/// already-running app. A budget tuned to the quiet case expires silently and
-/// leaves exactly the clustering this schedule is meant to prevent.
+/// Retry schedule. `new_window` resolves at webview construction, not at map, so
+/// the first `PlaceWindow` usually finds nothing. Front-loaded for the fast
+/// common case; the long tail covers the startup burst, where every restored
+/// note maps at once and the last one is slow.
 const RETRY_DELAYS: [Duration; 9] = [
     Duration::from_millis(100),
     Duration::from_millis(150),
@@ -74,42 +34,20 @@ fn retry_delays() -> &'static [Duration] {
     &RETRY_DELAYS
 }
 
-/// How long a placement must survive before it is believed.
-///
-/// Verification is worthless without it. Mutter's initial placement lands some
-/// unspecified time after the window becomes findable by title, so a frame read
-/// taken straight after a successful `move_frame` can match, be believed, and
-/// then be overwritten a moment later. Waiting past the point where the window
-/// is settled is the only thing that makes a matching read mean anything.
-///
-/// Half a second is chosen against the observed timeline — the clobber followed
-/// a call issued 10ms after the window appeared — and is comfortably inside the
-/// retry budget, so several attempts still remain after it elapses. It costs
-/// nothing visible: the window is already in the right place by then, this only
-/// delays the worker thread agreeing that it is.
+/// How long a placement must survive to be believed. Mutter clobbers settled
+/// positions, so a frame read taken too early can match and then be overwritten.
 const SETTLE: Duration = Duration::from_millis(500);
 
-/// How far a window may sit from where it was asked to go and still count.
-///
-/// `move_frame` and `get_frame_rect` both work on the frame rect, and observed
-/// round-trips have been exact. A couple of pixels of slack costs nothing and
-/// avoids a rounding difference turning into an infinite re-place.
+/// Slack between asked and observed position (guards rounding loops).
 const TOLERANCE: i32 = 2;
 
-/// How a placement attempt ended.
-///
-/// The two failures are deliberately distinct. Collapsing them into one `false`
-/// is what made placement failure unreadable: "the extension is missing" and
-/// "this particular window never appeared in time" call for opposite responses,
-/// and a log line that cannot tell them apart sends you to the wrong one.
+/// How a placement attempt ended. The failures stay distinct: "no helper" vs
+/// "window never appeared" vs "something keeps moving it back" need opposite fixes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Placement {
-    /// The window was moved, and was still there when re-read after `SETTLE`.
+    /// Moved, and still there when re-read after `SETTLE`.
     Moved,
-    /// The budget ran out. Carries the last frame position actually observed,
-    /// which is the difference between "the window never appeared" (`None`) and
-    /// "something keeps moving it back" — two failures that need opposite
-    /// investigations and used to produce the same silence.
+    /// Budget ran out; carries the last observed frame (`None` = never appeared).
     TimedOut(Option<(i32, i32)>),
     /// No helper on the bus, or one too old to know the method.
     NoHelper,
@@ -124,11 +62,7 @@ pub fn place(title: String, x: i32, y: i32, all_workspaces: bool) {
         .name("beamer-place-window".into())
         .spawn(move || match place_blocking(&title, x, y, all_workspaces) {
             Placement::Moved => tracing::debug!("Placed {} at ({}, {})", title, x, y),
-            // Warn, not debug. This is the failure that produces a pile of
-            // notes on top of each other, and at default log level the old
-            // `debug!` made it indistinguishable from the layout simply being
-            // wrong — so it was diagnosed as a scatter bug for as long as it
-            // went unseen.
+            // Warn: a pile of notes here reads as a scatter bug otherwise.
             Placement::TimedOut(None) => tracing::warn!(
                 "Could not place {} at ({}, {}) — no window by that title within {:?}; \
                  it is wherever Mutter put it",
@@ -166,10 +100,7 @@ fn place_blocking(title: &str, x: i32, y: i32, all_workspaces: bool) -> Placemen
         None => return Placement::NoHelper,
     };
 
-    // `(-1, -1)` means "only change the sticky state" — the extension skips
-    // `move_frame` entirely, so there is no position to read back and nothing
-    // for the verification below to say. Waiting five seconds to confirm a
-    // move that was never requested would be pure delay.
+    // `(-1, -1)` = sticky-state only; the extension skips `move_frame`, so no verify.
     let positioned = x >= 0 || y >= 0;
 
     let started = std::time::Instant::now();
@@ -177,18 +108,12 @@ fn place_blocking(title: &str, x: i32, y: i32, all_workspaces: bool) -> Placemen
     let mut delays = retry_delays().iter();
     loop {
         match proxy.call::<_, _, bool>("PlaceWindow", &(title, x, y, all_workspaces)) {
-            // A window by this title exists and `move_frame` has been called on
-            // it. Deliberately NOT treated as success when a position was
-            // asked for — see the module docs: Mutter's own initial placement
-            // arrives later and overwrites it.
+            // NOT success when positioned: Mutter's placement arrives later and clobbers it.
             Ok(true) if !positioned => return Placement::Moved,
             Ok(true) => {}
-            // The helper is running but no window carries this title yet —
-            // it has not been mapped. Worth waiting for.
+            // No window by this title yet (unmapped). Worth waiting for.
             Ok(false) => {}
-            // No helper, or a helper too old to know the method. Retrying
-            // cannot change either, so give up immediately rather than
-            // blocking a thread for five seconds on a foregone conclusion.
+            // No helper or too old — retrying can't help, give up at once.
             Err(e) => {
                 tracing::debug!("PlaceWindow unavailable: {}", e);
                 return Placement::NoHelper;
@@ -200,8 +125,7 @@ fn place_blocking(title: &str, x: i32, y: i32, all_workspaces: bool) -> Placemen
             None => return Placement::TimedOut(last_seen),
         }
 
-        // Verify only once the window has had time to settle. Before that a
-        // match proves nothing — the clobber may simply not have happened yet.
+        // Verify only after SETTLE — an earlier match may predate the clobber.
         if started.elapsed() < SETTLE {
             continue;
         }
@@ -220,7 +144,6 @@ fn place_blocking(title: &str, x: i32, y: i32, all_workspaces: bool) -> Placemen
                     y
                 );
             }
-            // Still unmapped. The next `PlaceWindow` will find it or not.
             Ok(_) => {}
             Err(e) => {
                 tracing::debug!("GetWindowFrame unavailable: {}", e);
@@ -264,10 +187,6 @@ mod tests {
 
     #[test]
     fn the_settle_delay_leaves_room_to_actually_retry() {
-        // `SETTLE` suppresses verification, so a value too close to the total
-        // budget would leave one confirmation attempt or none — and a single
-        // attempt cannot re-place a window that Mutter clobbers, which is the
-        // whole reason the loop verifies.
         let delays = retry_delays();
         let total: Duration = delays.iter().sum();
         assert!(SETTLE < total / 2, "SETTLE {SETTLE:?} eats the {total:?} budget");
@@ -289,10 +208,7 @@ mod tests {
 
     #[test]
     fn dbus_address_matches_the_extension() {
-        // Pinned because the extension is the other half of this contract and
-        // cannot be re-tested without another full GNOME log out. A typo here
-        // fails silently: every call errors, every note lands wherever Mutter
-        // chose, and nothing in the app says why.
+        // A typo fails silently (every call errors, notes land wherever Mutter chose).
         assert_eq!(DBUS_DEST, "org.gnome.Shell");
         assert_eq!(DBUS_PATH, "/app/beamer/FocusProvider");
         assert_eq!(DBUS_IFACE, "app.beamer.FocusProvider");

@@ -1,37 +1,21 @@
 #![cfg(not(target_os = "windows"))]
 
-//! Focused-window identification via the Beamer GNOME Shell extension.
+//! Focused-window lookup via the Beamer GNOME Shell extension.
 //!
-//! On GNOME Wayland the compositor does not expose focused-window metadata
-//! to unprivileged clients, so we ship a minimal Shell extension that
-//! exports `app.beamer.FocusProvider.GetFocusedAppId() -> s` over D-Bus.
-//! This module is the client side of that interface, and it also owns the
-//! cached session-bus connection shared by every Beamer helper call
-//! (`gnome.rs`'s `TypeText`/`GetVersion`/`SendPasteChord` included).
+//! GNOME Wayland hides focused-window metadata from clients, so the extension
+//! exports `app.beamer.FocusProvider.GetFocusedAppId()` over D-Bus. This
+//! module is the client side, plus the cached session-bus connection shared
+//! by all helper calls (`TypeText`/`GetVersion`/`SendPasteChord`).
 
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
-/// Cached session-bus connection, shared by every D-Bus call this process
-/// makes to the Beamer Shell-extension helper. Building a
-/// `zbus::blocking::Connection` performs a full handshake with the session
-/// bus (socket connect + SASL auth + `Hello()`) — too expensive to redo on
-/// every injection — so it's built once and cloned from then on (zbus
-/// connections are cheap `Arc`-backed handles; cloning is not a new
-/// handshake). `Mutex<Option<_>>` rather than `OnceLock` because a dead
-/// connection (closed socket) must be replaceable, not permanent.
-///
-/// `src/ui/shell_indicator.rs` keeps a second, separate connection/proxy
-/// cache for its own D-Bus calls (`ShowIndicator`/`UpdateLevel`/
-/// `HideIndicator`). The two are deliberately not unified: that one lives on
-/// a dedicated worker thread, coalesces queued level updates, and bakes in
-/// a fixed 200ms method timeout tuned for a 15Hz level-update cadence —
-/// requirements that don't apply to this module's on-demand, multi-caller,
-/// per-call-timeout usage (see `with_timeout` below).
+/// Cached session-bus connection for all helper D-Bus calls. Built once and
+/// cloned after (zbus handles are cheap `Arc`s; cloning skips the handshake).
+/// `Mutex<Option<_>>` (not `OnceLock`) so a dead connection can be replaced.
+/// Separate from the shell indicator's cache (different thread/timeout needs).
 static CONN: Mutex<Option<zbus::blocking::Connection>> = Mutex::new(None);
 
-/// Get the cached connection, building one if this is the first call (or
-/// the previous one was dropped after a connection-level failure).
 fn cached_conn() -> Result<zbus::blocking::Connection, zbus::Error> {
     let mut slot = CONN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(conn) = slot.as_ref() {
@@ -42,26 +26,16 @@ fn cached_conn() -> Result<zbus::blocking::Connection, zbus::Error> {
     Ok(conn)
 }
 
-/// Drop the cached connection so the next call rebuilds it from scratch.
-/// Only call this after a connection-level failure (dead socket) — never
-/// after a method-level failure (extension absent, wrong version, or just
-/// slow to reply), which says nothing about the health of the bus
-/// connection itself.
+/// Drop the cached connection. Only after a dead socket — never after a
+/// method-level failure (absent/slow extension), which says nothing about bus health.
 fn drop_cached_conn() {
     let mut slot = CONN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     *slot = None;
 }
 
-/// True when `err` means the cached connection's underlying socket is dead
-/// and a reconnect is warranted, as opposed to a method-level failure
-/// (extension not installed, wrong version, `ServiceUnknown`/`NoReply`/
-/// `UnknownMethod`, or a plain call timeout) where the bus connection
-/// itself is still perfectly healthy. Conservative by design: anything not
-/// unambiguously a dead socket is left alone, so a merely-absent or slow
-/// extension never discards a good connection. Notably this excludes
-/// `ErrorKind::TimedOut` — our own per-call timeout (`with_timeout` below)
-/// surfaces as `InputOutput` too, but a slow reply says nothing about
-/// socket health and must not trigger a reconnect+retry loop.
+/// True only for a dead socket (reconnect warranted). Method-level failures
+/// (absent extension, wrong version) and our own `TimedOut` never count —
+/// a slow reply says nothing about socket health.
 fn is_connection_dead(err: &zbus::Error) -> bool {
     matches!(
         err,
@@ -76,17 +50,10 @@ fn is_connection_dead(err: &zbus::Error) -> bool {
     )
 }
 
-/// Run a D-Bus call on a detached thread, enforcing `timeout_ms` from the
-/// caller's side. zbus bakes `method_timeout` into a `Connection` at build
-/// time, so it can't vary call-to-call on a *shared/cached* connection the
-/// way the old "build a fresh connection every call" code effectively could
-/// (each call got its own connection built with exactly the timeout it
-/// wanted). Call sites here need different timeouts against the SAME cached
-/// connection — a 100 ms focus poll vs. a multi-second `TypeText` — so the
-/// timeout is enforced here instead. If `call` hasn't finished when the
-/// deadline passes, this returns a timeout error and abandons the thread;
-/// `call` finishes on its own later and its result is silently discarded
-/// (the `tx.send` on a dropped receiver just fails).
+/// Run a D-Bus call with a per-call timeout. zbus bakes its timeout into the
+/// connection at build time, so it can't vary across calls sharing this cached
+/// connection (100 ms focus poll vs. multi-second `TypeText`). A timed-out call
+/// is abandoned; its late result is discarded.
 fn with_timeout<T, F>(timeout_ms: u64, call: F) -> Result<T, zbus::Error>
 where
     T: Send + 'static,
@@ -111,13 +78,8 @@ where
     })
 }
 
-/// Call a method on the Beamer Shell-extension helper interface
-/// (`app.beamer.FocusProvider` on `org.gnome.Shell`), reusing the cached
-/// session-bus connection. `timeout_ms` bounds this one call. On a
-/// connection-level failure the cached connection is dropped and the call
-/// is retried exactly once against a freshly-built one — a genuinely dead
-/// connection can't recover on its own, and retrying more than once would
-/// risk looping against a session bus that's simply gone.
+/// Call a helper method over the cached connection. Retried exactly once
+/// on a dead socket against a fresh connection; never retried otherwise.
 pub(crate) fn call_helper<A, R>(timeout_ms: u64, method: &'static str, args: A) -> Result<R, zbus::Error>
 where
     A: serde::Serialize + zbus::zvariant::DynamicType + Clone + Send + 'static,
@@ -181,10 +143,8 @@ fn call_extension() -> Result<String, zbus::Error> {
     call_helper(100, "GetFocusedAppId", ())
 }
 
-/// Returns the focused window's app id, lowercased. Returns `None` if the
-/// extension isn't installed/enabled, the D-Bus call fails, or no window
-/// is focused. Every failure path is silent (debug-logged) so callers can
-/// treat `None` as "unknown, fall back to defaults".
+/// Focused app id, lowercased. `None` means unknown (no extension, call
+/// failed, nothing focused) — callers fall back to defaults.
 pub fn focused_app_id() -> Option<String> {
     map_call_result(call_extension())
 }
@@ -255,17 +215,12 @@ mod tests {
 
     #[test]
     fn timeout_is_not_connection_dead() {
-        // A slow/absent extension surfaces as our own per-call TimedOut —
-        // that says nothing about the health of the session-bus socket and
-        // must never trigger a reconnect.
+        // A slow reply must never trigger a reconnect.
         assert!(!is_connection_dead(&io_err(std::io::ErrorKind::TimedOut)));
     }
 
     #[test]
     fn method_level_errors_are_not_connection_dead() {
-        // Non-InputOutput variants (what a ServiceUnknown/NoReply/
-        // UnknownMethod reply from an absent or older extension surfaces
-        // as) must never be treated as a dead socket.
         assert!(!is_connection_dead(&zbus::Error::Failure("simulated".into())));
         assert!(!is_connection_dead(&zbus::Error::InterfaceNotFound));
     }

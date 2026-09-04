@@ -44,16 +44,11 @@ pub struct UiaResult {
     pub target_info: String,
 }
 
-/// Attempt text injection via the UI Automation `IValueProvider::SetValue` pattern.
-/// COM is initialized and torn down per call because this runs on a
-/// `spawn_blocking` thread that may be recycled by the tokio thread pool.
+/// Inject via UIA `IValueProvider::SetValue`. COM is set up per call
+/// because `spawn_blocking` threads may be recycled by the tokio pool.
 pub fn try_inject_set_value(text: &str) -> Result<UiaResult> {
-    // `CoUninitialize` must balance exactly the references this call took.
-    // `S_OK` and `S_FALSE` (already initialized in the same apartment) both
-    // increment and so must be released; `RPC_E_CHANGED_MODE` means the thread
-    // is already initialized in a *different* apartment and no reference was
-    // taken — releasing anyway would decrement someone else's, potentially
-    // tearing down COM out from under whoever set up this thread.
+    // Only balance `CoUninitialize` against references this call took:
+    // `S_OK`/`S_FALSE` increment, `RPC_E_CHANGED_MODE` does not.
     let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
     let we_initialized = hr.is_ok();
     if !we_initialized {

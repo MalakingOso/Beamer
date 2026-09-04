@@ -4,8 +4,8 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// Top-level application configuration. Serialized as TOML to `%APPDATA%/Beamer/config.toml`.
-/// Missing fields fall back to serde defaults — the file is created on first launch.
+/// Top-level config, serialized as TOML. Missing fields use serde defaults;
+/// the file is created on first launch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
@@ -32,21 +32,18 @@ pub struct RecordingConfig {
     pub mode: String,
     #[serde(default)]
     pub pause_media: bool,
-    /// Chord that dictates into a sticky note instead of injecting.
-    /// Empty means unconfigured: no note binding is registered at all.
+    /// Chord dictating into a sticky note instead of injecting.
+    /// Empty means unconfigured: no note binding is registered.
     #[serde(default)]
     pub note_hotkey: String,
-    /// "toggle" or "hold". Toggle by default — a note is usually longer than
-    /// a dictated phrase, and holding a chord through it is awkward.
+    /// "toggle" (default) or "hold". Notes run long; holding a chord throughout is awkward.
     #[serde(default = "default_note_mode")]
     pub note_mode: String,
 }
 
 impl RecordingConfig {
     /// Parsed note-capture binding, or `None` when unconfigured or unparseable.
-    ///
-    /// Returning `None` on a bad value is deliberate: silently falling back to
-    /// some other chord would bind dictation to a key the user never chose.
+    /// A bad value yields `None` rather than a fallback chord the user never chose.
     pub fn note_hotkey_config(&self) -> Option<crate::hotkey::HotkeyConfig> {
         if self.note_hotkey.trim().is_empty() {
             return None;
@@ -71,19 +68,11 @@ impl Default for NotesConfig {
     }
 }
 
-/// Live sync against `sync_server` over `automerge::sync`. See
-/// `agent_docs/sync.md`.
-///
-/// Empty `url` means sync is off, the same precedent `note_hotkey` sets: a
-/// feature that reaches out to a URL over the network must never turn itself
-/// on by default, and an empty string is a value nobody could mistake for a
-/// real endpoint. `notes::sync_client::should_start` is the one place that
-/// reads this field to decide whether to connect.
+/// Live sync against `sync_server` (see `agent_docs/sync.md`).
+/// Empty `url` means off — a network-reaching feature must never default on.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncConfig {
-    /// `wss://<tailnet-host>/sync`, or empty. Per machine, never synced,
-    /// because a synced `config.toml` would hand every machine the same
-    /// endpoint whether or not it should reach it. See `agent_docs/sync.md`.
+    /// `wss://<tailnet-host>/sync`, or empty. Per machine, never synced.
     #[serde(default)]
     pub url: String,
 }
@@ -100,13 +89,9 @@ pub struct TranscriptionConfig {
     pub backend: String,
     #[serde(default = "default_language")]
     pub language: String,
-    /// Ask the model to drop filler words ("um", "uh"), false starts and
-    /// stutters rather than transcribing them literally. ElevenLabs only
-    /// (`no_verbatim`, supported on both Scribe v2 paths); the Voxtral
-    /// backends have no equivalent and ignore it.
-    ///
-    /// Off by default because it is a change to what you said, not just how
-    /// it is spelled — some dictation is meant to be verbatim.
+    /// Drop fillers/false starts rather than transcribing literally.
+    /// ElevenLabs only; other backends ignore it. Off by default — it changes
+    /// what was said, not just spelling.
     #[serde(default)]
     pub no_verbatim: bool,
 }
@@ -118,11 +103,9 @@ pub struct InjectionConfig {
     pub backends: Vec<String>,
     #[serde(default)]
     pub debug_logging: bool,
-    /// Linux only: which keystroke the clipboard backend sends to paste.
-    /// Valid values: "auto" (default — queries the GNOME focus helper
-    /// extension to pick per-app; falls back to Ctrl+Shift+V when the
-    /// extension is unavailable), "ctrl_v", "ctrl_shift_v".
-    /// Overridden at runtime by the `BEAMER_PASTE_SHORTCUT` env var.
+    /// Linux only: paste chord for the clipboard backend.
+    /// "auto" (default, per-app via focus helper, else Ctrl+Shift+V),
+    /// "ctrl_v", or "ctrl_shift_v". Env `BEAMER_PASTE_SHORTCUT` overrides.
     #[serde(default = "default_paste_shortcut")]
     pub paste_shortcut: String,
     /// Migration: old field from previous config format. Read but never written back.
@@ -218,22 +201,11 @@ impl Config {
         Self::config_dir().join("config.toml")
     }
 
-    /// `Path::exists()` answers `false` both for a path that genuinely is
-    /// not there and for one whose stat call itself errored (a permission
-    /// problem, a transient I/O error). std's own docs say to use
-    /// `try_exists` when that distinction matters. Conflating the two used
-    /// to mean a stat failure on a real `config.toml` fell into the same
-    /// branch as a fresh install: build `Config::default()` and save it,
-    /// overwriting the user's actual settings with defaults because the
-    /// stat, not the file, had a bad moment.
-    ///
-    /// A parse failure is different again: the file is readable, but is not
-    /// valid TOML. That is quarantined the same way the note stores
-    /// quarantine a corrupt `notes.json`, rather than silently discarded.
-    /// Every caller of `load()` on this codebase falls back to
-    /// `Config::default()` on `Err`, and a plain `?` here used to hand that
-    /// default straight back to a caller that would, on the next settings
-    /// change, save it over the still-recoverable original.
+    /// `try_exists`, not `exists`: a stat failure must not look like a fresh
+    /// install, or defaults would be saved over the user's real settings.
+    /// Unparseable TOML is quarantined to `*.corrupt` (reloadable default),
+    /// never silently discarded — callers fall back to default on `Err` and
+    /// would otherwise save that default over the recoverable original.
     pub fn load() -> Result<Self> {
         let path = Self::config_path();
         match path.try_exists() {
@@ -291,12 +263,8 @@ impl Config {
         Ok(config)
     }
 
-    /// Persist the config, replacing the file atomically.
-    ///
-    /// Temp file plus rename, matching `NoteStore::save` and the other
-    /// stores: a crash or a full disk mid-write leaves the previous
-    /// `config.toml` intact rather than a truncated file `load()` would then
-    /// have to quarantine.
+    /// Persist atomically (temp file + rename) so a mid-write crash can't
+    /// leave a truncated `config.toml`.
     pub fn save(&self) -> Result<()> {
         let dir = Self::config_dir();
         std::fs::create_dir_all(&dir)?;
@@ -317,13 +285,8 @@ impl Config {
 fn migrate_injection_backends(backends: &mut Vec<String>) -> bool {
         let mut dirty = false;
 
-        // Drop backends that no longer exist in this build. dotool/enigo were
-        // removed because XTEST under Ubuntu 26.04+ Xwayland forwards to the
-        // Remote Desktop portal and neither worked around it on GNOME Mutter;
-        // atspi because its registry deserialization broke against current
-        // at-spi2-core. wtype is NOT in this list anymore: it returned in
-        // 2026-07 as a first-class backend for wlroots compositors, behind an
-        // availability probe that fails fast on GNOME/KDE.
+        // Drop backends removed from this build (wtype is current again —
+        // first-class on wlroots behind a fast-failing GNOME/KDE probe).
         const REMOVED: &[&str] = &["dotool", "enigo", "atspi"];
         let before = backends.len();
         backends.retain(|b| !REMOVED.contains(&b.as_str()));
@@ -331,9 +294,8 @@ fn migrate_injection_backends(backends: &mut Vec<String>) -> bool {
             dirty = true;
         }
 
-        // Chains saved by builds whose default was ["ydotool", "clipboard"]
-        // upgrade to the current default so existing users pick up the gnome
-        // and wtype backends. Custom orderings are left alone.
+        // Legacy ["ydotool", "clipboard"] default upgrades so existing users
+        // pick up gnome/wtype. Custom orderings are left alone.
         if backends.as_slice() == ["ydotool".to_string(), "clipboard".to_string()] {
             *backends = default_backends();
             dirty = true;
@@ -392,25 +354,14 @@ mod migration_tests {
     }
 }
 
-/// In-memory cache of API keys read from (or written to) the OS keyring
-/// (Credential Manager on Windows / Secret Service on Linux), keyed by
-/// credential name.
-///
-/// Only *confirmed* state is ever cached: successful reads, and writes/deletes
-/// that the keyring itself confirmed. A miss or error never populates the
-/// cache — see `load_api_key` and `save_api_key` below. This keeps a
-/// transiently locked/unavailable keyring at startup from permanently
-/// masking a key that's actually present.
+/// In-memory cache of API keys confirmed by the OS keyring, by credential name.
+/// Misses/errors are never cached, so a transiently locked keyring at startup
+/// can't permanently mask a key that's actually present.
 static KEY_CACHE: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
-/// Read an API key from the OS keyring (keyring crate, service "beamer"),
-/// serving from an in-memory cache after the first successful read.
-///
-/// Negative results (no entry, or a keyring error such as a locked
-/// Secret Service collection) are intentionally NOT cached, so a transient
-/// keyring failure can't permanently hide a key that's really there —
-/// the next call will simply retry the keyring.
+/// Read an API key from the OS keyring (service "beamer"), cached after the
+/// first successful read. Misses/errors retry the keyring on the next call.
 pub fn load_api_key(name: &str) -> String {
     if let Some(cached) = KEY_CACHE.lock().unwrap().get(name) {
         return cached.clone();
@@ -428,19 +379,14 @@ pub fn load_api_key(name: &str) -> String {
     }
 }
 
-/// Write or delete an API key in the OS keyring. An empty `value` deletes
-/// the credential.
-///
-/// The keyring is always written first; the in-memory cache is only updated
-/// once the keyring operation is confirmed, so the cache can never claim a
-/// key that isn't (or is no longer) durably stored. If a write/delete fails
-/// (e.g. keyring locked), the cache is left untouched rather than guessed at.
+/// Write (or delete, when `value` is empty) an API key in the OS keyring.
+/// The cache updates only after the keyring confirms, so it never claims
+/// state that isn't durably stored.
 pub fn save_api_key(name: &str, value: &str) {
     if value.is_empty() {
         let result = keyring::Entry::new("beamer", name).and_then(|e| e.delete_credential());
         match result {
-            // Deleted, or already absent: either way the keyring holds no
-            // value for this name, so the cache shouldn't either.
+            // Deleted or already absent — either way, drop the cached value.
             Ok(()) | Err(keyring::Error::NoEntry) => {
                 KEY_CACHE.lock().unwrap().remove(name);
             }
@@ -461,11 +407,8 @@ pub fn save_api_key(name: &str, value: &str) {
 mod key_cache_tests {
     use super::*;
 
-    /// Exercises the cache layer in isolation, without touching the real OS
-    /// keyring: pre-populate the static cache directly and confirm
-    /// `load_api_key` serves the cached value rather than hitting the
-    /// keyring backend at all (which would fail/hang in a headless test
-    /// environment).
+    /// Cache-only check: must serve the cached value without touching the
+    /// real keyring backend (fails/hangs headless).
     #[test]
     fn load_api_key_serves_from_cache_without_touching_keyring() {
         let name = "tb12_test_cache_only_key_never_written_to_real_keyring";

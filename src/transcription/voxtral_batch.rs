@@ -4,12 +4,10 @@ use reqwest::multipart;
 use super::{http_client, wav::pcm_to_wav};
 use bytes::Bytes;
 
-/// Minimum similarity ratio (0.0–1.0) between raw and corrected text.
-/// Below this threshold the LLM likely hallucinated a conversational reply
-/// instead of returning a lightly edited transcript, so we discard it.
+/// Minimum similarity between raw and corrected text. Below it the correction
+/// is discarded as a likely hallucinated conversational reply.
 const MIN_SIMILARITY: f64 = 0.5;
 
-/// Levenshtein distance between two strings.
 fn levenshtein(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
@@ -27,13 +25,9 @@ fn levenshtein(a: &str, b: &str) -> usize {
     prev[n]
 }
 
-/// Similarity ratio (0.0–1.0) based on Levenshtein distance.
-///
-/// The denominator counts **characters**, matching `levenshtein`'s unit. Using
-/// `str::len()` (bytes) inflated it for any non-ASCII transcript — a 3-byte em
-/// dash or CJK character counted as 3 — which shrank the ratio's denominator
-/// mismatch and pushed similarity toward 1.0, weakening the hallucination
-/// guard exactly where transcription is least reliable.
+/// Similarity ratio (0.0–1.0) over Levenshtein distance. Counts characters, not
+/// bytes: byte counting inflates similarity for non-ASCII text and weakens
+/// the hallucination guard.
 fn similarity(a: &str, b: &str) -> f64 {
     let max_len = a.chars().count().max(b.chars().count());
     if max_len == 0 {
@@ -54,23 +48,19 @@ mod similarity_tests {
 
     #[test]
     fn one_substitution_in_ten_chars() {
-        // 1 edit over a 10-char max length.
         assert!((similarity("abcdefghij", "abcdefghiX") - 0.9).abs() < 1e-9);
     }
 
-    /// Regression: with a byte-length denominator, an all-CJK string scored
-    /// 3x more similar than it is, because each char costs 1 edit but 3 bytes.
+    /// 1 substitution in 4 chars = 0.75; per byte it would score ~0.92.
     #[test]
     fn non_ascii_is_scored_per_character_not_per_byte() {
-        let a = "你好世界"; // 4 chars, 12 bytes
-        let b = "你好世X"; // 1 substitution
+        let a = "你好世界";
+        let b = "你好世X";
         assert_eq!(levenshtein(a, b), 1);
-        // Per character: 1 - 1/4 = 0.75. Per byte it would have been ~0.92.
         assert!((similarity(a, b) - 0.75).abs() < 1e-9, "got {}", similarity(a, b));
     }
 
-    /// The guard must still reject a conversational reply — the failure mode
-    /// `MIN_SIMILARITY` exists to catch — when the transcript is non-ASCII.
+    /// The guard must still reject a conversational reply for non-ASCII input.
     #[test]
     fn hallucinated_reply_is_below_the_threshold_for_non_ascii_input() {
         let transcript = "请把季度报表发给会计部门";
@@ -90,8 +80,8 @@ mod similarity_tests {
     }
 }
 
-/// Use the Mistral chat API to correct vocabulary terms in the transcript.
-/// Returns the original text unchanged if vocab is empty or the correction call fails.
+/// Fix vocabulary terms via the Mistral chat API. Returns the original text if
+/// vocab is empty or the correction call fails.
 async fn correct_with_vocab(api_key: &str, text: &str, vocab: &[String]) -> String {
     if vocab.is_empty() || text.trim().is_empty() {
         return text.to_string();
@@ -170,11 +160,8 @@ async fn correct_with_vocab(api_key: &str, text: &str, vocab: &[String]) -> Stri
     }
 }
 
-/// Transcribe audio using the Mistral Voxtral batch (REST) API.
-///
-/// `audio_pcm` must be raw 16-bit LE, 16 kHz, mono PCM. Language is auto-detected.
-/// If `vocab` is non-empty, the transcript is post-processed via Mistral chat to
-/// correct domain-specific terms.
+/// Transcribe raw 16-bit LE, 16 kHz, mono PCM via the Mistral Voxtral batch API.
+/// Language is auto-detected; non-empty `vocab` triggers chat post-correction.
 pub async fn transcribe_batch(api_key: &str, audio_pcm: Vec<u8>, vocab: &[String]) -> Result<String> {
     let wav = pcm_to_wav(&audio_pcm);
     let wav_bytes = Bytes::from(wav);

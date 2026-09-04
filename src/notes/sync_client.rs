@@ -1,35 +1,9 @@
-//! Live sync client: keeps the local automerge document converged with
-//! `sync_server` over a WebSocket, using `automerge::sync`.
-//!
-//! **Offline-first.** A note is a working document with or without a server.
-//! `run_client` reconnects forever with backoff and never surfaces a dropped
-//! connection as anything worse than a debug log line: losing the server
-//! loses live propagation and nothing else, because the document on disk
-//! stays the source of truth on each machine either way.
-//!
-//! **Threading.** The raw socket lives on a plain `tokio::spawn` task
-//! (`socket_task`) that only ever moves bytes between the WebSocket and two
-//! channels; it holds no `Signal`. Applying an incoming change writes
-//! `notes`/`tasks`, which *are* `Signal`s backed by a thread-local
-//! generational-box arena, so that step (`apply_incoming`) runs inside the
-//! Dioxus coroutine started by `use_sync_client`, never inside the socket
-//! task. See `agent_docs/dioxus_architecture.md`.
-//!
-//! **Who writes the file.** Nobody here. `apply_incoming` mutates the
-//! in-memory document and calls `SyncDoc::mark_pending_save`; the existing
-//! 500ms tick in `flush.rs` is still the only place that calls `SyncDoc::save`.
-//!
-//! **Reconcile before merge, same as `flush.rs`.** An edit sitting in
-//! `notes.notes`/`tasks.tasks` but not yet reconciled into the document (the
-//! 500ms tick has not run since the keystroke) is not yet visible to
-//! `receive_sync_message`. Hydrating straight from the document after
-//! applying an incoming message, without reconciling our own pending edits
-//! in first, would silently throw that edit away: the hydrate replaces
-//! `notes.notes` wholesale, so the next tick's reconcile sees no diff and
-//! there is nothing left to recover. `flush.rs`'s own module doc names this
-//! exact hazard as the reason it reconciles before merging; the document-only
-//! core here (`reconcile_receive_and_hydrate`) follows the same order for the
-//! same reason.
+//! Live sync client: converges the local automerge document with `sync_server`
+//! over a WebSocket. Offline-first: a dropped connection only loses live
+//! propagation, never data. The socket task holds no `Signal`; incoming changes
+//! are applied on the Dioxus coroutine. Nobody here writes the file — the 500 ms
+//! tick still owns `SyncDoc::save`. Like `flush.rs`, reconcile precedes merge,
+//! or a pending local edit would be thrown away by the wholesale hydrate.
 
 use std::time::Duration;
 
@@ -45,73 +19,45 @@ use super::sync_doc::SyncHandle;
 use super::task_store::TaskStore;
 use super::{doc_notes, doc_tasks, NoteStore};
 
-/// First retry delay, and the ceiling it backs off to. A note-taking app
-/// reconnecting to a desktop on a tailnet has no reason to hammer faster than
-/// once a second, and no reason to ever wait longer than thirty.
+/// Reconnect backoff: 1s start, 30s ceiling.
 const BACKOFF_START: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
 
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
-/// Whether a sync URL is configured at all. Pulled out as its own function so
-/// "an empty URL means the client never starts" is a plain assertion against
-/// a pure function, not something that needs a Dioxus render tree to observe.
+/// Whether a sync URL is configured at all. Empty means the client never starts.
 pub fn should_start(url: &str) -> bool {
     !url.trim().is_empty()
 }
 
-/// Live state of the sync connection, as `SyncCard` on the Settings page
-/// needs to describe it to someone who has never heard of a WebSocket.
-///
-/// Written from exactly one place, `run_client`'s own coroutine, at the
-/// moments the connection actually changes state. Nothing polls for this: a
-/// status only moves because a socket event moved it, which is the
-/// "smallest signal, no second writer, no polling timer" the card was asked
-/// to observe rather than invent.
+/// Live state of the sync connection for the Settings page. Written only from
+/// `run_client`'s coroutine, on socket events — never polled.
 #[derive(Clone, PartialEq, Default)]
 pub enum SyncStatus {
-    /// No URL is configured, or the URL changed but Beamer has not been
-    /// restarted since. See `SyncClientHandle::started_url`.
+    /// No URL configured, or the URL changed since the last restart.
     #[default]
     Off,
-    /// A `connect_async` attempt is in flight, or about to be, between
-    /// backoff sleeps.
     Connecting,
     Connected,
-    /// A connection attempt failed, or an established connection dropped.
-    /// `detail` is the raw error the socket handed back, useful next to
-    /// `sync_server`'s own logs. The card leads with a plain-language line
-    /// and shows this detail second, not first.
+    /// Failed attempt or dropped connection; `detail` is the raw socket error.
     Disconnected { detail: String },
 }
 
-/// What the Settings page needs in order to describe the running sync
-/// client: its live state, plus the URL it actually started with.
-///
-/// The URL is fixed at mount (see `use_sync_client`'s doc below), so keeping
-/// it is what lets `SyncCard` tell a saved edit apart from a connection that
-/// has not picked it up yet, rather than the status line describing the old
-/// address as though it were the new one.
+/// What the Settings page needs: live state, plus the URL actually started
+/// with (fixed at mount, so an unsaved edit reads as unsaved, not connected).
 #[derive(Clone, PartialEq)]
 pub struct SyncClientHandle {
     pub status: Signal<SyncStatus>,
     pub started_url: String,
 }
 
-/// Start the live-sync client. Call once, from `App()`.
-///
-/// A no-op when `config.sync.url` is empty: sync is off until a machine is
-/// told a server exists, matching `note_hotkey`'s empty-means-off precedent.
-/// The URL is read once, at first render, the same way the dictation
-/// hotkey's initial binding is read in `app.rs`; a config edit made through
-/// `SyncCard` takes effect on the next restart, not live.
+/// Start the live-sync client. Call once, from `App()`. A no-op on an empty
+/// URL. The URL is read once at first render; edits take effect on restart.
 pub fn use_sync_client(config: Signal<Config>, doc: SyncHandle, notes: Signal<NoteStore>, tasks: Signal<TaskStore>) -> SyncClientHandle {
     let status = use_signal(SyncStatus::default);
     let started_url = use_hook(move || {
         let url = config.peek().sync.url.trim().to_string();
-        // `NoteStore::sync_enabled` is set by `App()`'s own startup hook,
-        // from the same `should_start` check, before this one runs. See
-        // `edit::release_attachment_bytes` for why that flag exists. Not
+        // `NoteStore::sync_enabled` is already set by `App()`'s startup hook; not
         // repeated here to avoid writing the same `Signal` from two places.
         if should_start(&url) {
             spawn(run_client(url.clone(), doc, notes, tasks, status));
@@ -121,13 +67,8 @@ pub fn use_sync_client(config: Signal<Config>, doc: SyncHandle, notes: Signal<No
     SyncClientHandle { status, started_url }
 }
 
-/// Reconnect forever. Returns only if the coroutine's owning scope drops.
-///
-/// Backoff resets the moment a connection is *established*, regardless of how
-/// it later ends: a connection that ran for hours and then dropped with a
-/// read or write error deserves the same fast retry as one that closed
-/// politely. Waiting up to 30s to retry after an hours-long, error-terminated
-/// connection would be the wrong lesson to draw from that history.
+/// Reconnect forever. Backoff resets once a connection is established,
+/// however it later ends: an hours-long connection that drops earns a fast retry.
 async fn run_client(
     url: String,
     doc: SyncHandle,
@@ -163,9 +104,8 @@ async fn run_client(
     }
 }
 
-/// One connection's worth of the sync protocol, given an already-established
-/// socket. Returns when the socket closes or errors; the caller decides what
-/// happens next.
+/// One connection's worth of the sync protocol. Returns when the socket
+/// closes or errors; the caller decides what happens next.
 async fn run_connection(
     ws: WsStream,
     doc: &SyncHandle,
@@ -174,9 +114,8 @@ async fn run_connection(
 ) -> anyhow::Result<()> {
     let (ws_write, ws_read) = ws.split();
 
-    // Decoded messages in, raw bytes out. The socket task below is the only
-    // thing that touches the WebSocket; everything past the channels runs on
-    // the Dioxus coroutine that owns `notes`/`tasks`.
+    // Decoded messages in, raw bytes out. Only the socket task touches the
+    // WebSocket; past the channels everything runs on the Dioxus coroutine.
     let (in_tx, mut in_rx) = tokio::sync::mpsc::unbounded_channel::<SyncMessage>();
     let (out_tx, out_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
 
@@ -185,20 +124,9 @@ async fn run_connection(
     let mut state = SyncState::new();
     send_pending(doc, &mut state, &out_tx);
 
-    // A local edit that lands while this connection is already open and
-    // idle still has to reach the peer. `in_rx.recv()` alone only reacts to
-    // messages arriving *from* the peer, so on its own an idle-but-connected
-    // client would only ever push what it had at connect time, and every
-    // dictation made after that would wait for a reconnect that (by design,
-    // see the module doc) may not come for a long time. This interval is
-    // what notices our own document moving instead.
-    //
-    // This is not the "never poll the server" rule from
-    // `agent_docs/local_inference.md`: that rule is about polling
-    // `llama-server`'s HTTP status and pinning a model in VRAM forever. This
-    // is a read-only `generate_sync_message` against our own in-memory
-    // document: cheap, and a no-op send whenever there is nothing new, since
-    // the protocol itself returns `None`.
+    // An idle-but-connected client must still push local edits made after
+    // connect. A read-only `generate_sync_message` against our own in-memory
+    // document; a no-op send when nothing is new.
     let mut local_check = tokio::time::interval(Duration::from_millis(500));
     local_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -215,28 +143,17 @@ async fn run_connection(
         }
     }
 
-    // `in_rx` only closes once `in_tx` is dropped, which happens when
-    // `socket_task` returns, so by the time we get here the task is already
-    // finishing or finished. Awaiting it (rather than the `abort` this used
-    // to be) is what lets a write or read error on the socket propagate up
-    // as `Err` instead of being reported as a clean close.
+    // Await (don't abort) so a socket read/write error propagates as `Err`,
+    // not a clean close.
     match socket.await {
         Ok(result) => result,
         Err(join_err) => anyhow::bail!("sync socket task panicked: {join_err}"),
     }
 }
 
-/// The dumb pipe. Holds no `Signal`, so a plain `tokio::spawn` (not Dioxus's
-/// `spawn`) is safe even though desktop's tokio runtime is multi-threaded.
-///
-/// Returns `Ok(())` only for a clean end: the peer closed, the stream ended,
-/// or our own side stopped listening first (the channels closed on us, which
-/// is `run_connection` having already decided to stop for its own reason). A
-/// decode failure is logged and skipped, not fatal: a malformed message from
-/// an otherwise-healthy peer is not the same failure as a dead socket. A read
-/// or write error on the socket itself is `Err`, so `run_connection` (and
-/// then `run_client`'s log line) can tell "the peer went away cleanly" apart
-/// from "the connection broke".
+/// The dumb pipe. Holds no `Signal`, so plain `tokio::spawn` is safe.
+/// `Ok(())` only for a clean end; a decode failure is skipped, not fatal;
+/// a socket read/write error is `Err`.
 async fn socket_task(
     mut ws_write: futures_util::stream::SplitSink<WsStream, WsMessage>,
     mut ws_read: futures_util::stream::SplitStream<WsStream>,
@@ -258,7 +175,7 @@ async fn socket_task(
                         }
                     }
                     Some(Ok(WsMessage::Close(_))) | None => return Ok(()),
-                    Some(Ok(_)) => {} // ping/pong/text: nothing on this protocol sends them
+                    Some(Ok(_)) => {} // ping/pong/text never occur on this protocol
                     Some(Err(e)) => return Err(e.into()),
                 }
             }
@@ -276,10 +193,8 @@ async fn socket_task(
     }
 }
 
-/// Generate the next outgoing message, if the protocol has one to send, and
-/// hand it to the socket task. A pure read against the shared document: never
-/// mutates it, so this is safe to call from anywhere, including right after
-/// `apply_incoming` has just written to it.
+/// Generate the next outgoing message, if any, and hand it to the socket task.
+/// A pure read against the shared document; never mutates it.
 fn send_pending(doc: &SyncHandle, state: &mut SyncState, out_tx: &tokio::sync::mpsc::UnboundedSender<Vec<u8>>) {
     let mut guard = doc.lock();
     let msg = guard.doc_mut().sync().generate_sync_message(state);
@@ -289,19 +204,9 @@ fn send_pending(doc: &SyncHandle, state: &mut SyncState, out_tx: &tokio::sync::m
     }
 }
 
-/// The document-only half of applying one incoming sync message: reconcile
-/// our own pending edits in first, then merge, then say what (if anything)
-/// needs hydrating back into the stores.
-///
-/// No `Signal` anywhere in this function, which is deliberate: it is what
-/// lets `sync_tests.rs` drive it directly, against the same `Machine` harness
-/// the file-based merge tests already use, with no Dioxus runtime in sight.
-///
-/// Mirrors `flush::run_document_pass`'s own order (reconcile, then merge,
-/// then hydrate only if heads moved) for the reason given in the module doc:
-/// skipping the reconcile step here is exactly the bug that doc comment on
-/// `flush.rs` warns against, just reached by a second path instead of the
-/// first.
+/// The document-only half of applying one incoming message: reconcile ours
+/// first, then merge, then hydrate if heads moved. `Signal`-free so tests can
+/// drive it without a Dioxus runtime.
 pub(crate) fn reconcile_receive_and_hydrate(
     handle: &SyncHandle,
     notes: &NoteStore,
@@ -329,13 +234,8 @@ pub(crate) fn reconcile_receive_and_hydrate(
         return None;
     }
 
-    // Most messages in this protocol carry no changes at all: an initial
-    // handshake, an ack, a peer telling us it has nothing new. Hydrating and
-    // dirtying both stores on every one of those would rewrite `notes.json`
-    // and wake every signal subscriber for no reason, on every message a
-    // live connection exchanges. This also covers the case where only our
-    // own reconcile above moved anything: nothing arrived worth hydrating
-    // for, since `notes`/`tasks` already hold that content.
+    // Most messages carry no changes; hydrating on each would rewrite the
+    // mirrors and wake every subscriber for nothing.
     if guard.heads() == before {
         return None;
     }
@@ -343,8 +243,7 @@ pub(crate) fn reconcile_receive_and_hydrate(
     Some((doc_notes::hydrate(&guard), doc_tasks::hydrate(&guard)))
 }
 
-/// The `Signal`-writing half: peek the stores for `reconcile_receive_and_hydrate`,
-/// then, if it found something worth hydrating, write the result back.
+/// The `Signal`-writing half: hydrate via `reconcile_receive_and_hydrate`, then write back.
 fn apply_incoming(
     doc: &SyncHandle,
     notes: &mut Signal<NoteStore>,

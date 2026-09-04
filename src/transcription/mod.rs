@@ -14,79 +14,46 @@ use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-/// How long to wait for TCP + TLS to a backend's API host.
-///
-/// None of the four backends had any timeout at all before this: a stalled
-/// connect left the orchestrator's recording loop awaiting forever, and
-/// because that loop owns the hotkey receiver, *no further hotkey was ever
-/// processed*. The app stayed painted but stopped responding to dictation.
+/// How long to wait for TCP + TLS to a backend's API host. A stalled connect
+/// would strand the recording loop, which owns the hotkey receiver.
 pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Ceiling on one batch transcription request, end to end.
-///
-/// Deliberately generous rather than snappy: this covers uploading a whole
-/// recording *and* transcribing it, so it is sized for a long dictation on a
-/// slow link. It exists to bound a stall, not to enforce a latency target —
-/// erring long costs a slow transcript, erring short costs the transcript.
+/// Ceiling on one batch request, end to end. Generous: it covers uploading a
+/// whole recording and transcribing it, so it bounds a stall, not latency.
 pub(crate) const BATCH_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// How long to wait for a realtime WebSocket handshake.
-///
-/// Applied inside each `start_*_session`, so the startup warmup preconnect is
-/// covered too — that one runs behind the splash while the main window is
-/// still hidden, where a stall means an app that never appears at all.
+/// How long to wait for a realtime WebSocket handshake. Also covers the startup
+/// warmup preconnect, which runs while the main window is still hidden.
 pub(crate) const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Bounded capacity for a realtime backend's outbound PCM channel
-/// (`RealtimeSession::audio_tx`). `orchestrator.rs` forwards
-/// `AudioPipeline`'s PCM chunks here 1:1, so this shares the mic-capture
-/// path's worst-case cadence — see `audio::capture::SAMPLE_CHANNEL_CAPACITY`
-/// for the full derivation: 60s * 200 msgs/sec (5ms cpal callback floor) =
-/// 12_000.
+/// Outbound PCM channel capacity (`RealtimeSession::audio_tx`): same worst-case
+/// cadence as the mic-capture path, 60s * 200 msgs/sec = 12_000.
 pub(crate) const AUDIO_CHANNEL_CAPACITY: usize = 12_000;
 
-/// Slots withheld from ordinary PCM data on `audio_tx` so the end-of-audio
-/// sentinel (an empty `Vec<u8>` that tells the backend to finalize/commit)
-/// always has room to `try_send`, even when a stalled backend/WebSocket has
-/// let the data path saturate the rest of the channel. Sent at most once or
-/// twice per recording session, so a small reserve is ample.
+/// Slots withheld from PCM data on `audio_tx` so the end-of-audio sentinel
+/// always has room to `try_send`, even on a saturated channel.
 pub(crate) const AUDIO_SENTINEL_RESERVE: usize = 4;
 
-/// Bounded capacity for a realtime backend's inbound transcript-event
-/// channel (`RealtimeSession::transcript_rx`). Unlike the audio channels
-/// above, this is driven by the ASR provider's own push cadence, not the
-/// mic's callback cadence: ElevenLabs Scribe v2 realtime and Voxtral mini
-/// realtime typically emit partial-transcript updates every 100-300ms
-/// (<=10Hz). We size for a conservative 20Hz upper bound to leave margin:
-///
-///   60s * 20/sec = 1_200
+/// Inbound transcript-event channel capacity (`RealtimeSession::transcript_rx`).
+/// Driven by the provider's push cadence (~10Hz); sized for 20Hz: 60s * 20 = 1_200.
 pub(crate) const TRANSCRIPT_CHANNEL_CAPACITY: usize = 1_200;
 
-/// Lazy-initialized shared HTTP client for all transcription backends.
-/// Avoids rebuilding connection pools and TLS contexts on every request.
+/// Shared HTTP client for all transcription backends.
 pub(crate) fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .build()
-            // A builder failure here means TLS init failed; the plain
-            // constructor is no more likely to work, but falling back keeps a
-            // transcription attempt possible instead of panicking at startup.
             .unwrap_or_else(|_| reqwest::Client::new())
     })
 }
 
-/// Warm DNS, TLS and the shared client's connection pool for a batch
-/// backend's API host, without starting a transcription.
+/// Warm DNS, TLS and the connection pool for a batch backend's API host.
 ///
-/// Batch backends have no session to open, so warmup used to fall through to
-/// opening a *realtime* WebSocket instead — a different, metered product from
-/// the one the user selected, opened and discarded on every single launch.
-/// An unauthenticated GET to the API root pays the same one-time connection
-/// costs with no billable side effect; the response is discarded and any
-/// status (including 401/404) counts as success, since only the transport
-/// matters here.
+/// An unauthenticated GET to the API root pays the one-time connection costs
+/// with no billable side effect; any status counts as success — only the
+/// transport matters here.
 pub async fn preconnect_batch_host(backend: &str) -> anyhow::Result<()> {
     let url = match backend {
         "voxtral_batch" => "https://api.mistral.ai/",
@@ -100,13 +67,12 @@ pub async fn preconnect_batch_host(backend: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Discriminant for transcript events. Both backends normalize their
-/// wire-format messages into this shared enum.
+/// Transcript events; both backends normalize their wire messages into this.
 #[derive(Debug, Clone)]
 pub enum TranscriptKind {
-    /// Intermediate hypothesis (displayed in overlay, not injected)
+    /// Intermediate hypothesis (overlay only, never injected).
     Partial,
-    /// Committed transcript (injected into the focused window)
+    /// Committed transcript (injected or noted).
     Final,
     SessionStarted(String),
     Error(String),

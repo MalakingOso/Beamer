@@ -1,29 +1,17 @@
-//! Keyterm ("custom vocabulary") preparation for the two ElevenLabs backends.
+//! Keyterm ("custom vocabulary") preparation for the ElevenLabs backends.
 //!
-//! ElevenLabs biases Scribe v2 towards a list of `keyterms`. The two endpoints
-//! accept the same concept under different budgets and different transports,
-//! so everything endpoint-independent lives here as a pure function.
-//!
-//! The rules below are the API's, not ours, and every one of them rejects the
-//! **whole request** rather than the offending term. A dropped term degrades
-//! one dictation; a 400 loses it entirely — so `sanitize` drops silently.
+//! Every rule below rejects the whole request rather than the offending term,
+//! so `sanitize` drops bad terms silently: a dropped term degrades one
+//! dictation, a 400 loses it entirely.
 
-/// Longest term each endpoint accepts, inclusive.
-///
-/// Batch is 49 rather than 50 on purpose: the API documents the limit as
-/// "must be *less than* 50 characters", and a 50-character term is what a
-/// naive reading of "max 50" would send.
+/// Longest term each endpoint accepts, inclusive. Batch is 49, not 50: the API
+/// documents "less than 50 characters".
 pub const BATCH_MAX_CHARS: usize = 49;
 /// Realtime documents "a maximum length of 20 characters" — inclusive.
 pub const REALTIME_MAX_CHARS: usize = 20;
 
-/// How many terms each endpoint takes.
-///
-/// Batch's documented ceiling is 1000, but ElevenLabs applies a **20-second
-/// minimum billable duration** to any request carrying more than 100 keyterms.
-/// Beamer's utterances are seconds long, so going above 100 would multiply the
-/// bill for a benefit no dictation-length clip can use. Deliberate cap — don't
-/// "fix" it upward without pricing it first.
+/// How many terms each endpoint takes. Batch is capped at 100, not the
+/// documented 1000: above 100 ElevenLabs bills a 20-second minimum per request.
 pub const BATCH_MAX_TERMS: usize = 100;
 /// Realtime's hard ceiling.
 pub const REALTIME_MAX_TERMS: usize = 50;
@@ -35,9 +23,7 @@ const MAX_WORDS: usize = 5;
 const FORBIDDEN: [char; 7] = ['<', '>', '{', '}', '[', ']', '\\'];
 
 /// Trim, drop the terms the API would reject, de-duplicate, and cap the count.
-///
-/// Order is preserved so the vocabulary list's own ordering decides which terms
-/// survive the cap — the user put the important ones where they put them.
+/// Order is preserved, so the list's own ordering decides what survives the cap.
 pub fn sanitize(terms: &[String], max_terms: usize, max_chars: usize) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for term in terms {
@@ -45,8 +31,7 @@ pub fn sanitize(terms: &[String], max_terms: usize, max_chars: usize) -> Vec<Str
         if term.is_empty() {
             continue;
         }
-        // Character count, not byte length: a 20-character term of accented
-        // or CJK text is well within the limit the API is counting.
+        // Characters, not bytes: the API counts characters.
         if term.chars().count() > max_chars {
             continue;
         }
@@ -67,13 +52,8 @@ pub fn sanitize(terms: &[String], max_terms: usize, max_chars: usize) -> Vec<Str
     out
 }
 
-/// Percent-encode one keyterm for use as a query-string value.
-///
-/// Keyterms legitimately contain spaces ("Deploy Purple"), and the realtime
-/// endpoint takes them as repeated query parameters, so they cannot be
-/// interpolated raw. Everything outside the RFC 3986 unreserved set is escaped
-/// — deliberately conservative, since over-escaping is decoded back to the
-/// same string while under-escaping corrupts the term or the URL.
+/// Percent-encode one keyterm for use as a query-string value. Conservative:
+/// everything outside the RFC 3986 unreserved set is escaped.
 pub fn encode_query_value(term: &str) -> String {
     let mut out = String::with_capacity(term.len());
     for byte in term.as_bytes() {
@@ -113,9 +93,7 @@ mod tests {
         );
     }
 
-    /// The probe that found the batch bug used a 60-character term: the API
-    /// answers "All keywords must be less than 50 characters" and fails the
-    /// whole request, so an over-long term must never reach it.
+    /// An over-long term fails the whole request, so it must never reach the API.
     #[test]
     fn over_long_terms_are_dropped_not_truncated() {
         let input = terms(&["ok", &"x".repeat(60)]);
@@ -141,9 +119,7 @@ mod tests {
         );
     }
 
-    /// The limit the API counts is characters, so a term of multi-byte
-    /// characters must not be judged by its byte length — `"é".repeat(20)` is
-    /// 40 bytes but 20 characters, and is perfectly legal at realtime's limit.
+    /// `"é".repeat(20)` is 40 bytes but 20 characters, and legal at realtime's limit.
     #[test]
     fn length_is_counted_in_characters_not_bytes() {
         let accented = "é".repeat(REALTIME_MAX_CHARS);
@@ -176,8 +152,7 @@ mod tests {
         assert_eq!(sanitize(&input, BATCH_MAX_TERMS, BATCH_MAX_CHARS), ["fine"]);
     }
 
-    /// Two vocabulary entries differing only in surrounding whitespace collapse
-    /// to one term after trimming; sending it twice wastes part of the budget.
+    /// Entries differing only in surrounding whitespace collapse to one term.
     #[test]
     fn duplicates_that_appear_after_trimming_are_collapsed() {
         let input = terms(&["Beamer", " Beamer ", "beamer"]);
@@ -197,8 +172,7 @@ mod tests {
         assert_eq!(out[BATCH_MAX_TERMS - 1], format!("term{}", BATCH_MAX_TERMS - 1));
     }
 
-    /// The cap counts terms that survived, not terms that were offered — a
-    /// long run of rejects at the front must not eat into the budget.
+    /// The cap counts surviving terms, not offered ones.
     #[test]
     fn rejected_terms_do_not_count_against_the_cap() {
         let mut input = terms(&["a<b", "c>d"]);
@@ -226,8 +200,7 @@ mod tests {
         assert_eq!(encode_query_value("Beamer-v1.0_x~y"), "Beamer-v1.0_x~y");
     }
 
-    /// A space in a keyterm is legal and common; left raw it would break the
-    /// WebSocket upgrade URL outright.
+    /// A raw space would break the WebSocket upgrade URL.
     #[test]
     fn spaces_and_separators_are_escaped() {
         assert_eq!(encode_query_value("Deploy Purple"), "Deploy%20Purple");

@@ -20,7 +20,6 @@ impl InjectionBackend for YdotoolBackend {
             return Err("ydotool not found in PATH".into());
         }
 
-        // Check if ydotoold daemon socket exists
         if find_ydotool_socket().is_none() {
             return Err("ydotoold socket not found — is ydotoold running?".into());
         }
@@ -29,21 +28,15 @@ impl InjectionBackend for YdotoolBackend {
     }
 
     fn inject(&self, text: &str) -> Result<InjectionResult> {
-        // ydotool type only handles ASCII keycodes — the shared sanitizer
-        // transliterates smart punctuation and strips newlines/tabs.
+        // ydotool only handles ASCII keycodes.
         let ascii_text = super::sanitize_for_typing(text);
 
         if !ascii_text.is_ascii() {
             anyhow::bail!("Text contains characters outside ydotool's ASCII range");
         }
 
-        // ydotool's own defaults are --key-delay=20 and --key-hold=20. We'd been
-        // running below that at 12 ms, which drops characters at word boundaries
-        // — a short word like "to" followed by " cat" comes out "tocat" because
-        // the space arrives while the target app is still processing the prior
-        // run. 25 ms is 5 ms above ydotool's default as insurance against slower
-        // event loops; --key-hold=20 is the default stated explicitly so it's
-        // obvious in the code that we depend on it.
+        // 25 ms delay: faster values drop characters at word boundaries on
+        // slower event loops (ydotool default is 20). Hold is the default, stated explicitly.
         let output = std::process::Command::new("ydotool")
             .arg("type")
             .arg("--key-delay")
@@ -66,24 +59,16 @@ impl InjectionBackend for YdotoolBackend {
     }
 }
 
-/// Walks `path_str` (a `PATH`-style, `:`-separated list of directories) looking
-/// for an executable file named `name`. Parameterized over the path string so
-/// tests can exercise this exact function with a synthetic PATH instead of a
-/// duplicated copy of the logic.
+/// Look for executable `name` in `path_str`. Takes the path as a parameter
+/// so tests can pass a synthetic PATH.
 fn find_executable_in(name: &str, path_str: &std::ffi::OsStr) -> bool {
     use std::os::unix::fs::PermissionsExt;
 
     for dir in std::env::split_paths(path_str) {
         let candidate = dir.join(name);
-        // A single metadata() call folds the existence check and the
-        // executable-bit check together; Err (e.g. NotFound) means absent.
         if let Ok(metadata) = std::fs::metadata(&candidate) {
-            // `mode & 0o111` is a deliberate simplification of `which`'s
-            // access(X_OK): it treats owner/group/other-executable bits as
-            // sufficient, even for a bit the current user technically can't
-            // exercise. That's fine for real package installs — a false
-            // positive here just means `available()` reports true and the
-            // subsequent `ydotool` invocation fails with a clearer error.
+            // `mode & 0o111` approximates `which`'s X_OK check; a false positive
+            // just surfaces later as a clearer `ydotool` invocation error.
             if metadata.permissions().mode() & 0o111 != 0 {
                 return true;
             }
@@ -131,14 +116,11 @@ mod tests {
     fn test_path_walk_finds_executable() {
         use std::os::unix::fs::PermissionsExt;
 
-        // Scoped by PID (rather than a fixed name) so concurrent test runs
-        // (e.g. two `cargo test` invocations, parallel CI jobs) don't race
-        // on the same directory in /tmp.
+        // PID-scoped so concurrent test runs don't race on the same /tmp dir.
         let temp_dir = std::env::temp_dir().join(format!("beamer_test_ydotool_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
 
-        // Create an executable file
         let executable_path = temp_dir.join("ydotool");
         std::fs::write(&executable_path, "#!/bin/sh\necho test").unwrap();
         std::fs::set_permissions(&executable_path, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -152,12 +134,10 @@ mod tests {
     fn test_path_walk_skips_non_executable() {
         use std::os::unix::fs::PermissionsExt;
 
-        // Scoped by PID — see comment in test_path_walk_finds_executable.
         let temp_dir = std::env::temp_dir().join(format!("beamer_test_ydotool_nonexec_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
 
-        // Create a non-executable file
         let non_exec_path = temp_dir.join("ydotool");
         std::fs::write(&non_exec_path, "#!/bin/sh\necho test").unwrap();
         std::fs::set_permissions(&non_exec_path, std::fs::Permissions::from_mode(0o644)).unwrap();

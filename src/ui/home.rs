@@ -6,7 +6,6 @@ use crate::ui::components::{language_options, truncate_chars, Card, Select};
 use crate::ui::history::TranscriptionHistory;
 use crate::ui::icons::{IconCheck, IconCopy};
 
-/// Fixed content — built once as a static slice rather than reconstructed on every render.
 static MODE_OPTIONS: &[(&str, &str)] = &[
     ("hold", "Push to Talk"),
     ("toggle", "Toggle"),

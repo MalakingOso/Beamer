@@ -1,10 +1,5 @@
-//! One-shot warmup of cold-start subsystems so the first recording feels instant.
-//!
-//! On a fresh launch, several things in `orchestrator::handle_recording` pay
-//! one-time costs that block the single-threaded executor (DNS, TLS, libsecret
-//! D-Bus, cpal host init, MPRIS bus, WebSocket handshake). We pay them up-front
-//! behind a splash window so the user doesn't experience a delayed first
-//! transcript.
+//! One-shot warmup of cold-start subsystems (keyring, audio, network) so the
+//! first recording starts without a stall. Best-effort: failures are logged.
 
 use dioxus::prelude::*;
 
@@ -34,11 +29,9 @@ impl Default for WarmupProgress {
     }
 }
 
-/// Run each warmup step sequentially, updating `progress` between steps.
-/// Best-effort: any failure is logged and ignored — warmup must never block startup.
+/// Run each warmup step sequentially, updating `progress`. Best-effort: any
+/// failure is logged and ignored — warmup must never block startup.
 pub async fn warm_all(mut progress: Signal<WarmupProgress>) {
-    // Step pcts are chosen so each step's *start* is logged at a value < its end,
-    // and Done is exactly 100. Linux has 4 steps (25/50/75/100), Windows 3 (33/66/100).
 
     progress.set(WarmupProgress {
         step: WarmupStep::Keyring,
@@ -70,10 +63,7 @@ pub async fn warm_all(mut progress: Signal<WarmupProgress>) {
     {
         tracing::warn!("warmup: audio step panicked: {}", e);
     }
-    // Starts the shared sound-effect output thread. On Windows this is where
-    // the one-time WASAPI activation now happens, instead of on the user's
-    // first hotkey press. See `sounds::spawn_audio_thread`. Not
-    // `spawn_blocking`: it only starts a thread and returns.
+    // Pre-starts the sound-effect thread (WASAPI activation on Windows).
     crate::sounds::warm();
     tracing::debug!("warmup: audio took {:?}", t1.elapsed());
 
@@ -118,20 +108,15 @@ pub async fn warm_all(mut progress: Signal<WarmupProgress>) {
         tracing::debug!("warmup: skipping network preconnect — no key for backend '{}'", backend);
     } else {
         let t3 = std::time::Instant::now();
-        // Matched exhaustively on purpose. A `_ =>` fallback used to route the
-        // two *batch* backends into the ElevenLabs *realtime* constructor,
-        // so every launch opened and immediately discarded a metered realtime
-        // STT session for users who had never selected one. Batch backends get
-        // a transport-only preconnect instead; only the realtime backends —
-        // which really do open a session when you record — open one here.
+        // Exhaustive on purpose: a `_ =>` fallback once routed batch backends
+        // into the realtime constructor, opening a metered session per launch.
         let result: anyhow::Result<()> = match backend.as_str() {
             "voxtral" => crate::transcription::start_voxtral_session(&api_key)
                 .await
                 .map(drop),
             "elevenlabs" => {
-                // No keyterms and no no_verbatim: this session's transcript is
-                // thrown away, and keyterm prompting carries a surcharge. The
-                // preconnect exists to warm DNS/TLS, not to transcribe.
+                // Transcript is discarded; skip keyterms (surcharged) — this
+                // only warms DNS/TLS.
                 crate::transcription::start_elevenlabs_session(&api_key, &language, &[], false)
                     .await
                     .map(drop)

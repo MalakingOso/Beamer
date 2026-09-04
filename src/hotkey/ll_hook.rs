@@ -25,8 +25,8 @@ const VK_LSHIFT: u32 = 0xA0;
 const VK_RSHIFT: u32 = 0xA1;
 const VK_RWIN: u32 = 0x5C;
 
-/// Query the OS for whether a key is physically held right now.
-/// This avoids stale state when key-up events are dropped by Windows.
+/// Live OS query for whether a key is held (tracked state goes stale
+/// when Windows drops key-up events).
 fn is_key_physically_held(vk: i32) -> bool {
     unsafe { GetAsyncKeyState(vk) < 0 }
 }
@@ -35,11 +35,8 @@ fn modifier_physically_held(left_vk: i32, right_vk: i32) -> bool {
     is_key_physically_held(left_vk) || is_key_physically_held(right_vk)
 }
 
-// No tracked ctrl/alt/shift fields here (unlike linux_hotkey.rs's HookState):
-// matching always uses a fresh `GetAsyncKeyState` read (see `hook_proc`
-// below), so a tracked copy would be write-only dead state. Windows can drop
-// key-up events for modifiers, which is exactly the staleness a tracked copy
-// would reintroduce.
+// No tracked modifier fields (unlike linux_hotkey.rs): matching always reads
+// `GetAsyncKeyState` fresh, since Windows can drop modifier key-ups.
 struct HookState {
     bindings: Arc<Mutex<Vec<BindingConfig>>>,
     reset_flag: Arc<AtomicBool>,
@@ -74,59 +71,36 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
             None => return false,
         };
 
-        // Reset state if config was updated. A config edit resets both
-        // bindings, so this clears the state for all of them.
+        // A config edit resets both bindings.
         if state.reset_flag.swap(false, Ordering::Relaxed) {
             state.binding_state = [BindingState::default(); MAX_BINDINGS];
             state.win_consumed = false;
         }
 
-        // Either side of Win triggers a VK_LWIN-configured binding, same as
-        // linux_hotkey.rs normalises KEY_RIGHTMETA to VK_LWIN.
+        // Either Win key triggers a VK_LWIN binding (mirrors linux_hotkey.rs).
         let is_win_key_event = vk == VK_LWIN || vk == VK_RWIN;
         let norm_vk = if is_win_key_event { VK_LWIN } else { vk };
 
         let bindings = state.bindings.lock().unwrap_or_else(|p| p.into_inner());
 
-        // Not a trigger key for any configured binding: nothing to do. This
-        // also means modifier keys (Ctrl/Alt/Shift) never reach the work
-        // below on their own, and are only queried live, on a trigger-key event,
-        // via GetAsyncKeyState.
+        // Non-trigger keys (incl. bare modifiers) are only queried live via GetAsyncKeyState.
         if !bindings.iter().any(|b| b.config.trigger_vk == norm_vk) {
             return false;
         }
 
         if is_press {
-            // A Windows LL hook gets no repeat bit in KBDLLHOOKSTRUCT (evdev
-            // has one; linux_hotkey.rs drops repeats before this point), so
-            // tracked held-state is the only way to tell an OS auto-repeat
-            // WM_KEYDOWN apart from a fresh press. That test has to run
-            // *before* matching, keyed by the physical trigger key rather
-            // than by a specific binding: at most one binding can be
-            // genuinely held on a given physical key at a time, so if any
-            // binding sharing this trigger key is already marked held, this
-            // event is a repeat of it, full stop. Matching (and therefore
-            // resyncing modifiers) only runs on a real first press.
-            //
-            // Per-binding matching after that point would let a modifier
-            // brushed mid-hold reroute a Win-key auto-repeat to a *different*
-            // binding sharing the same trigger (e.g. tapping Alt while
-            // holding Ctrl+Super mid-dictation would resync to Ctrl+Alt+Super
-            // on the next repeat and fire the note binding without a fresh
-            // press). Gating on the physical key first rules that out.
-            //
-            // Trade-off: if this trigger key's own key-up is ever dropped,
-            // the stuck flag swallows exactly one subsequent press. It
-            // self-heals on the next release, which always clears whichever
-            // binding is still marked held (see below).
+            // No repeat bit in KBDLLHOOKSTRUCT, so held-state is the only
+            // repeat detector. Gate on the physical key *before* matching so a
+            // modifier brushed mid-hold can't reroute an auto-repeat to a
+            // different binding sharing this trigger. Trade-off: a dropped
+            // key-up swallows one press; the next release self-heals it.
             let already_held = bindings
                 .iter()
                 .enumerate()
                 .any(|(i, b)| b.config.trigger_vk == norm_vk && state.binding_state[i].trigger_held);
 
             if !already_held {
-                // First press: check physical modifier state to avoid stale
-                // tracked state (key-up events can be dropped by Windows).
+                // First press: read live modifier state (tracked state goes stale).
                 let ctrl_down = modifier_physically_held(VK_LCONTROL as i32, VK_RCONTROL as i32);
                 let alt_down = modifier_physically_held(VK_LMENU as i32, VK_RMENU as i32);
                 let shift_down = modifier_physically_held(VK_LSHIFT as i32, VK_RSHIFT as i32);
@@ -161,10 +135,8 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
                 return true;
             }
         } else {
-            // Release: the modifiers may already be up by the time the
-            // trigger key is released, so re-matching the chord would find
-            // nothing and strand the binding in `armed`. Find the binding
-            // that is actually held instead.
+            // On release match the held binding: modifiers may already be up,
+            // so re-matching the chord would find nothing and strand `armed`.
             let idx = (0..bindings.len())
                 .find(|&i| bindings[i].config.trigger_vk == norm_vk && state.binding_state[i].trigger_held);
             if let Some(idx) = idx {

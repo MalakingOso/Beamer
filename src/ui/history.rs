@@ -12,8 +12,7 @@ pub struct HistoryEntry {
     pub text: String,
 }
 
-/// Append-only transcription log persisted as JSON in `%APPDATA%/Beamer/history.json`.
-/// Loaded on startup, appended after each successful injection.
+/// Append-only transcription log, loaded on startup and appended after each injection.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TranscriptionHistory {
     pub entries: Vec<HistoryEntry>,
@@ -30,13 +29,8 @@ impl Default for TranscriptionHistory {
     }
 }
 
-/// Cap on retained transcripts.
-///
-/// `save()` rewrites the whole file after every injection, so an uncapped log
-/// meant that cost grew without bound over the app's lifetime — each dictation
-/// re-serializing every dictation that came before it. 1000 entries keeps the
-/// file at a few hundred KB and the rewrite in the low milliseconds, while
-/// still covering months of ordinary use. `StatusLog` caps itself the same way.
+/// Retained-transcript cap: `save()` rewrites the whole file per injection,
+/// so an uncapped log makes every dictation re-serialize all prior ones.
 const MAX_ENTRIES: usize = 1000;
 
 impl TranscriptionHistory {
@@ -62,9 +56,7 @@ impl TranscriptionHistory {
                 history
             }
             Err(e) => {
-                // Don't silently start from empty: the next `append` would
-                // overwrite the unreadable file and destroy whatever was in
-                // it for good. Move it aside so it's recoverable by hand.
+                // Move aside, don't overwrite: the next `append` would destroy it for good.
                 let backup = path.with_extension("json.corrupt");
                 tracing::error!(
                     "History at {:?} is not valid JSON ({}); preserving it as {:?} and starting fresh",
@@ -78,11 +70,8 @@ impl TranscriptionHistory {
         }
     }
 
-    /// Persist the log, replacing the file atomically.
-    ///
-    /// Writes to a sibling temp file and renames over the target, so a crash
-    /// or a full disk mid-write leaves the previous history intact rather than
-    /// a half-written file that `load()` would then reject.
+    /// Persist atomically via a sibling temp file + rename, so a crash mid-write
+    /// leaves the previous history intact rather than a half-written file.
     pub fn save(&self) -> Result<()> {
         let dir = Config::config_dir();
         std::fs::create_dir_all(&dir)?;
@@ -113,9 +102,8 @@ impl TranscriptionHistory {
         self.entries.iter().rev().take(n).collect()
     }
 
-    /// Groups entries by calendar day, cloning entries so the result is
-    /// independent of `self` (suitable for caching in a `use_memo`).
-    /// Each entry's timestamp is parsed exactly once per call.
+    /// Groups entries by calendar day, cloning so the result is independent of
+    /// `self` (suitable for caching in a `use_memo`).
     pub fn grouped_by_day(&self) -> Vec<(String, Vec<HistoryEntry>)> {
         let today = Local::now().date_naive();
         let yesterday = today.pred_opt().unwrap_or(today);
@@ -149,8 +137,7 @@ impl TranscriptionHistory {
 mod tests {
     use super::*;
 
-    /// Build a history rooted at a PID-scoped temp path so concurrent test
-    /// runs don't race, and nothing touches the real user config dir.
+    /// PID-scoped temp path, so concurrent test runs don't race the real config dir.
     fn temp_history(tag: &str) -> TranscriptionHistory {
         let dir = std::env::temp_dir().join(format!("beamer_history_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -168,7 +155,6 @@ mod tests {
         }
 
         assert_eq!(history.entries.len(), MAX_ENTRIES, "log must stay bounded");
-        // The 10 oldest are gone; the newest is still last.
         assert_eq!(history.entries.first().unwrap().text, "entry 10");
         assert_eq!(
             history.entries.last().unwrap().text,

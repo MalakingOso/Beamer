@@ -1,29 +1,8 @@
-//! The model-pass pipeline: one App-scoped coroutine that cleans and analyses
-//! notes in the background.
-//!
-//! **Why a coroutine in `App()` rather than a task spawned where the note is
-//! made.** Dioxus drops a spawned task when its owning scope drops
-//! (`dioxus-core-0.7.9/src/tasks.rs:159`). A pass started from a sticky
-//! window's scope would therefore be **silently cancelled** if you closed that
-//! note while the model was still thinking — no error, no log line, just a note
-//! that never gets cleaned. `App()`'s scope outlives every note window, so the
-//! pass owned by it always finishes.
-//!
-//! ⚠️ Dioxus `spawn`, never `tokio::spawn`. Desktop's tokio runtime is
-//! multi-threaded and `Signal`'s generational-box arena is thread-local, so a
-//! `Signal` moved into `tokio::spawn` resolves against the wrong arena.
-//!
-//! **Requests run concurrently, not in series.** A serial loop would let one
-//! hung request stall every later note for up to `request_timeout_ms` — 15
-//! seconds by default. In-flight passes are therefore driven together by a
-//! `FuturesUnordered` inside the coroutine's single future. That keeps the work
-//! owned by `App()`'s scope, which the whole design depends on, while still
-//! letting a slow note overlap a fast one; spawning a fresh Dioxus task per
-//! request would put ownership back in question for no gain.
-//!
-//! Duplicate requests for a note already in flight are dropped rather than
-//! queued. Two passes over one note would race on the compare-and-swap and the
-//! loser's work would be thrown away anyway.
+//! The model-pass pipeline: one App-scoped coroutine that cleans and analyses notes.
+//! Owned by `App()` because Dioxus cancels a task with its owning scope — a pass
+//! started from a sticky window would die silently with the window.
+//! ⚠️ Dioxus `spawn`, never `tokio::spawn`: `Signal`'s arena is thread-local.
+//! In-flight passes run concurrently in one `FuturesUnordered`; duplicates drop.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -43,23 +22,16 @@ use crate::notes::task_store::TaskStore;
 use crate::notes::{blocks, NoteStore, StageState};
 use crate::ui::status_log::{log_status, LogLevel, StatusLog};
 
-/// The sweep's pure decision logic (`sweep_requests`, `should_sweep`,
-/// `RequestOutcome`, `succeeded_from`), split out under `#[path]` for the same
-/// reason `pipeline/tests.rs` is: keeping this file, which is the coroutine
-/// and the stage-running code, under the 500-line limit.
+/// The sweep's pure decision logic, split out to keep this file under 500 lines.
 #[path = "pipeline/sweep.rs"]
 mod sweep;
 use sweep::{should_sweep, succeeded_from, sweep_requests, RequestOutcome};
 
-/// Which stages a request is asking for.
-///
-/// Separate from "which stages are pending" on purpose: the footer's retry
-/// affordance asks for one stage specifically, and re-running a stage that
-/// already succeeded is a legitimate thing to ask for.
+/// Which stages a request asks for. Separate from "pending": retry may
+/// legitimately re-run a stage that already succeeded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stages {
-    /// Cleanup, then extraction against whatever cleanup left behind. The
-    /// automatic path after a dictated capture.
+    /// Cleanup, then extraction against whatever cleanup left. The automatic path.
     Both,
     CleanOnly,
     ExtractOnly,
@@ -69,10 +41,8 @@ pub enum Stages {
 pub struct PipelineRequest {
     pub note_id: String,
     pub stages: Stages,
-    /// Set only by the backlog sweep, see `sweep_requests`. A swept request's
-    /// own completion never triggers another sweep, or a note that keeps
-    /// failing would re-sweep the whole backlog forever every time any other
-    /// note happened to succeed.
+    /// Set only by the backlog sweep. A swept completion never triggers another
+    /// sweep, or one failing note would re-sweep the backlog forever.
     pub swept: bool,
 }
 
@@ -82,10 +52,7 @@ impl PipelineRequest {
         Self { note_id: note_id.into(), stages: Stages::Both, swept: false }
     }
 
-    /// What the footer's retry affordance asks for, and what a fresh request
-    /// for a note already worked on asks for. Not swept: a user pressing the
-    /// footer is not the backlog sweep, even if it happens to re-request a
-    /// stage that previously failed.
+    /// What the footer's retry affordance asks for. Never swept.
     pub fn retry(note_id: impl Into<String>, stages: Stages) -> Self {
         Self { note_id: note_id.into(), stages, swept: false }
     }
@@ -99,9 +66,7 @@ pub fn use_pipeline(
     status_log: Signal<StatusLog>,
 ) -> Coroutine<PipelineRequest> {
     use_coroutine(move |mut rx: UnboundedReceiver<PipelineRequest>| async move {
-        // Not a `Signal`: nothing renders from this, and a signal write would
-        // wake every subscriber twice per pass for a fact the UI reads off the
-        // note's own stage fields instead.
+        // Not a `Signal`: nothing renders from this, and the UI reads the note's own stage fields.
         let in_flight: Rc<RefCell<HashSet<String>>> = Rc::new(RefCell::new(HashSet::new()));
         let mut running = FuturesUnordered::new();
 
@@ -121,19 +86,12 @@ pub fn use_pipeline(
                 Some(finished) = running.next(), if !running.is_empty() => {
                     in_flight.borrow_mut().remove(&finished.note_id);
 
-                    // The sweep trigger: a request that just succeeded is
-                    // itself the evidence the server is reachable, so ask it
-                    // to also carry the rest of the failed backlog. This is
-                    // never a timer, see the never-poll warning on
-                    // `client::probe`. It fires only from a request that
-                    // already completed.
+                    // A succeeded request is itself the evidence the server is
+                    // reachable; have it carry the failed backlog. Never a timer.
                     if should_sweep(finished.succeeded, finished.swept) {
                         let backlog = sweep_requests(&notes.peek());
                         for request in backlog {
-                            // `in_flight` still does its ordinary job here: a
-                            // note that is, say, mid-retry from the footer at
-                            // the exact moment its sweep would fire is left
-                            // alone rather than double-queued.
+                            // `in_flight` still guards here: a mid-retry note is left alone.
                             if in_flight.borrow_mut().insert(request.note_id.clone()) {
                                 running.push(run_request(request, config, notes, tasks, status_log));
                             }
@@ -145,9 +103,7 @@ pub fn use_pipeline(
     })
 }
 
-/// What one finished pass reports back to the coroutine loop: which note it
-/// was, whether it was itself a swept request, and whether it succeeded.
-/// That last fact is what the sweep trigger is built on.
+/// What one finished pass reports back to the coroutine loop.
 struct Finished {
     note_id: String,
     swept: bool,
@@ -165,8 +121,7 @@ async fn run_request(
     let id = request.note_id.clone();
     let swept = request.swept;
 
-    // One snapshot, taken up front. `peek`, not `read`: this runs outside any
-    // reactive scope and has no business subscribing to the config.
+    // One snapshot up front. `peek`, not `read`: no reactive scope here.
     let (enabled, base_url, timeout, cleanup_cfg, extract_cfg) = {
         let cfg = config.peek();
         (
@@ -179,13 +134,8 @@ async fn run_request(
     };
 
     if !enabled {
-        // Skipped, not Pending: the user turned the feature off, so there is
-        // nothing for a retry affordance to offer.
-        //
-        // Only a stage that has never run is downgraded. Without the guard, a
-        // "Run again" press on a finished note with the feature switched off
-        // would rewrite Done as Skipped and erase the record that the passes
-        // ever ran — a state change caused entirely by asking for nothing.
+        // Only never-run stages downgrade to Skipped, or "Run again" on a
+        // finished note would rewrite Done and erase that the passes ever ran.
         let mut store = notes.write();
         if stage_is_pending(&store, &id, Stage::Clean) {
             store.mark_clean_skipped(&id);
@@ -193,16 +143,12 @@ async fn run_request(
         if stage_is_pending(&store, &id, Stage::Extract) {
             store.mark_extract_skipped(&id);
         }
-        // Not `succeeded`: nothing was attempted, so there is no evidence the
-        // server is reachable for the sweep to act on.
+        // Not `succeeded`: nothing attempted, so no evidence the server is reachable.
         return Finished { note_id: id, swept, succeeded: false };
     }
 
-    // One `RequestOutcome` per stage this request actually named, whether or
-    // not that stage went on to make a call. Folded by `succeeded_from` at
-    // the end rather than tracked as a running bool, so "disabled" and
-    // "nothing to send" cannot be silently conflated with "responded" the
-    // way the running-bool version was.
+    // One `RequestOutcome` per named stage, folded by `succeeded_from`, so
+    // "disabled"/"nothing to send" can't conflate with "responded".
     let mut outcomes: Vec<RequestOutcome> = Vec::with_capacity(2);
 
     if matches!(request.stages, Stages::Both | Stages::CleanOnly) {
@@ -244,9 +190,7 @@ enum Stage {
     Extract,
 }
 
-/// Whether a stage has never run. Guards the `Skipped` downgrades: `Skipped`
-/// means "deliberately not run", which is only ever true of a stage that had
-/// not run in the first place.
+/// Whether a stage has never run. Guards the `Skipped` downgrades.
 fn stage_is_pending(store: &NoteStore, id: &str, stage: Stage) -> bool {
     store.get(id).is_some_and(|n| {
         let state = match stage {
@@ -257,49 +201,12 @@ fn stage_is_pending(store: &NoteStore, id: &str, stage: Stage) -> bool {
     })
 }
 
-/// Clean one note, one text run at a time.
-///
-/// ```text
-/// body --parse--> [Text a][Attach x][Text b]
-///                    |                  |
-///               clean(a)            clean(b)   <- tokens are never sent
-///                    +------ reassemble ------+
-///                                  |
-///   apply_cleanup(id, expected = the ORIGINAL FULL body, reassembled)
-/// ```
-///
-/// ⚠️ **A placeholder token must never reach s1-mini.** It is a trained wire
-/// format, not a chat model; out-of-distribution input comes back garbled at
-/// HTTP 200 with a plausible body, so there is nothing to catch downstream.
-/// `blocks::parse` removes the tokens and `blocks::reassemble` puts the answers
-/// back at the fixed positions they came from.
-///
-/// Five rules, each of which preserves an existing behaviour rather than
-/// adding one:
-///
-/// 1. `sent` is still the **whole** body, so the compare-and-swap in
-///    `apply_cleanup` is unchanged and an edit mid-pass still supersedes.
-/// 2. A blank run is not sent at all; it passes through untouched.
-/// 3. A run answering `NothingToChange` keeps its original text.
-/// 4. If **every** run had nothing to change, the pass reports that and the
-///    body is not rewritten — same as before, and it costs no branch here
-///    because `reassemble` returns the body unchanged.
-/// 5. **A note with no attachments yields exactly one run**, so it is one call
-///    carrying the whole body: today's behaviour, reproduced by construction
-///    rather than by a fast-path flag that could get out of step.
-///
-/// A request that **errors** aborts the pass: the stage is marked failed and
-/// nothing is applied. Half a cleaned note is worse than an uncleaned one, and
-/// the footer's retry re-runs the whole thing.
-///
-/// Cost is one call per run — measured at 0.225s each, so a note with two
-/// images is ~0.7s. Serial on purpose: concurrency here would buy a fraction of
-/// a second and risk reordering the answers.
-/// Returns the `RequestOutcome` `succeeded_from` folds over. A note that
-/// vanished before any request went out, or that had nothing but blank runs
-/// to send (an attachment-only or whitespace-only body), is `NotAttempted`:
-/// no `cleanup::clean` call was ever made, so nothing was learned about
-/// whether the server is reachable, and it must not be reported as if it had.
+/// Clean one note, one text run at a time; reassemble and compare-and-swap
+/// against the full original body, so a mid-pass edit still supersedes.
+/// ⚠️ Placeholder tokens must never reach the model: garbled output comes
+/// back at HTTP 200 with nothing to catch downstream. Blank runs are skipped;
+/// an error aborts the pass with nothing applied. `NotAttempted` when no call
+/// went out (missing note, or only blank runs).
 async fn run_cleanup(
     id: &str,
     base_url: &str,
@@ -308,9 +215,7 @@ async fn run_cleanup(
     notes: &mut Signal<NoteStore>,
     status_log: &mut Signal<StatusLog>,
 ) -> RequestOutcome {
-    // The text the request will carry, captured now. Applying the result is a
-    // compare-and-swap against exactly this string — see `lifecycle::apply_cleanup`
-    // for why body equality is the guard and `modified` is not.
+    // The compare-and-swap baseline: the result applies only against exactly this string.
     let Some(sent) = notes.peek().get(id).map(|n| n.body.clone()) else {
         return RequestOutcome::NotAttempted;
     };
@@ -318,10 +223,7 @@ async fn run_cleanup(
     let runs: Vec<String> = blocks::text_runs(&sent).into_iter().map(str::to_string).collect();
     let mut cleaned: Vec<Option<String>> = Vec::with_capacity(runs.len());
     let mut changed = false;
-    // Set only inside the loop below, right before a `cleanup::clean` call
-    // actually goes out. A note with no non-blank runs (all attachments, or
-    // all whitespace) never sets this, and its pass must not read as evidence
-    // the server answered anything.
+    // Set only when a call actually goes out; a blank-only body must not read as reachable.
     let mut contacted_server = false;
 
     for run in &runs {
@@ -345,9 +247,7 @@ async fn run_cleanup(
         }
     }
 
-    // An unchanged reassembly is byte-identical to `sent`, which `apply_cleanup`
-    // reads as "success, change nothing" via the same empty-response path it
-    // has always had.
+    // Unchanged passes an empty response, which `apply_cleanup` reads as "success, change nothing".
     let text = if changed { blocks::reassemble(&sent, &cleaned) } else { String::new() };
 
     match notes.write().apply_cleanup(id, &sent, &text) {
@@ -359,20 +259,14 @@ async fn run_cleanup(
             }
         }
         StageOutcome::Superseded => {
-            // Not a failure and not worth a status-log line: the user typed
-            // while the model was thinking, and their text wins. The stage
-            // stays Pending so the footer still offers it.
+            // The user typed mid-pass; their text wins and the stage stays Pending.
             tracing::info!("cleanup for note {} was superseded by an edit", id);
         }
         StageOutcome::NoteGone => {
             tracing::debug!("note {} disappeared during cleanup", id);
         }
     }
-    // Reached only via `Applied`, `Superseded` or `NoteGone`, all of which
-    // require the loop above to have run to completion without an `Err`. Only
-    // `Responded` when a call actually went out; a zero-call body (nothing
-    // but blank runs) is `NotAttempted` regardless of which of the three this
-    // reaches, since `apply_cleanup` still runs for bookkeeping even then.
+    // The loop completed without error here; still only `Responded` if a call went out.
     if contacted_server {
         RequestOutcome::Responded
     } else {
@@ -380,10 +274,8 @@ async fn run_cleanup(
     }
 }
 
-/// Returns the `RequestOutcome` `succeeded_from` folds over, same contract as
-/// `run_cleanup`. The blank-text fast path below is `NotAttempted`, not a
-/// success: `extract::extract` is never called, so nothing was learned about
-/// whether the server is reachable.
+/// Same outcome contract as `run_cleanup`. Blank text is `NotAttempted`:
+/// `extract::extract` is never called, so nothing about reachability was learned.
 async fn run_extraction(
     id: &str,
     base_url: &str,
@@ -393,15 +285,8 @@ async fn run_extraction(
     tasks: &mut Signal<TaskStore>,
     status_log: &mut Signal<StatusLog>,
 ) -> RequestOutcome {
-    // Read the body **after** cleanup, not the text cleanup was given. That
-    // covers all three outcomes with one line: a cleaned note is analysed as
-    // cleaned, a failed cleanup falls back to `raw` (which `body` still equals),
-    // and a cleanup superseded by an edit analyses what the user actually
-    // typed — which is what they would want looked at.
-    //
-    // Stripped of placeholder tokens, for the same reason cleanup never sends
-    // one. `extract::is_grounded` checks evidence against the string it was
-    // handed, so this also means an evidence span can never contain token text.
+    // Read the post-cleanup body: cleaned, or `raw`/the user's edit on the other
+    // outcomes. Tokens stripped — evidence spans must never contain token text.
     let Some(text) = notes.peek().get(id).map(|n| blocks::plain_text(&n.body)) else {
         return RequestOutcome::NotAttempted;
     };
@@ -410,8 +295,7 @@ async fn run_extraction(
         return RequestOutcome::NotAttempted;
     }
 
-    // Supplied here rather than read inside `extract`, so the validation gates
-    // are testable without mocking the clock.
+    // Passed in so validation gates stay testable without mocking the clock.
     let today = chrono::Local::now().date_naive();
 
     match extract::extract(base_url, cfg, &text, today, timeout).await {
@@ -441,15 +325,11 @@ async fn run_extraction(
                     .collect();
                 store.replace_suggestions(id, rows);
             }
-            // An empty list is a successful answer and the common one. Marking
-            // it Done rather than leaving it Pending is what stops the footer
-            // nagging forever on every ordinary note.
+            // An empty list is a successful answer; marking it Done stops the
+            // footer nagging on every ordinary note.
             notes.write().mark_analyzed(id);
-            // Written now rather than waiting on the tick, and through
-            // `flush_stores` because that is the only thing that writes the
-            // document. `flush_if_dirty` would leave the suggestions in the
-            // JSON mirror alone, which nothing reads back. Placed after the
-            // stage mark so one write carries both.
+            // Through `flush_stores` (the only document writer), after the mark,
+            // so one write carries both. `flush_if_dirty` would skip the document.
             crate::notes::flush_stores(&mut notes.write(), &mut tasks.write());
             tracing::info!("extraction proposed {} task(s) for note {}", count, id);
             RequestOutcome::Responded

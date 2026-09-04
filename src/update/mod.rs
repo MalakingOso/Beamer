@@ -5,7 +5,7 @@ const GITHUB_OWNER: &str = "MalakingOso";
 const GITHUB_REPO: &str = "Beamer";
 const BINARY_NAME: &str = "beamer";
 
-/// State of the update lifecycle, driven by UI actions and background checks.
+/// Update lifecycle state.
 #[derive(Clone, PartialEq, Default)]
 pub enum UpdateStatus {
     #[default]
@@ -21,8 +21,7 @@ pub struct UpdateInfo {
     pub version: String,
 }
 
-/// Check GitHub Releases for a newer version.
-/// **Blocking** — must be called via `tokio::task::spawn_blocking`.
+/// Check GitHub Releases for a newer version. Blocking: use `spawn_blocking`.
 pub fn check_for_update_blocking() -> Result<Option<UpdateInfo>> {
     let updater = self_update::backends::github::Update::configure()
         .repo_owner(GITHUB_OWNER)
@@ -43,8 +42,7 @@ pub fn check_for_update_blocking() -> Result<Option<UpdateInfo>> {
     }
 }
 
-/// Download the latest release and replace the running binary.
-/// **Blocking** — must be called via `tokio::task::spawn_blocking`.
+/// Download the latest release and replace the running binary. Blocking: use `spawn_blocking`.
 pub fn apply_update_blocking() -> Result<()> {
     let status = self_update::backends::github::Update::configure()
         .repo_owner(GITHUB_OWNER)
@@ -59,19 +57,11 @@ pub fn apply_update_blocking() -> Result<()> {
     Ok(())
 }
 
-/// Spawn the updated binary and exit the current process.
+/// Spawn the updated binary and exit. Releases the single-instance guard first
+/// so the child doesn't see this process as a rival instance and quit.
 ///
-/// The single-instance guard is released *before* the spawn: the child runs
-/// `ensure_single_instance()` as the first thing in `main`, and while this
-/// process still held the guard the child would see it (our PID alive in the
-/// lockfile on Linux, `ERROR_ALREADY_EXISTS` on the mutex on Windows), log
-/// "Another instance is already running" and exit. The parent then exited too,
-/// so "Restart Now" made Beamer vanish instead of relaunching.
-///
-/// ⚠️ This also `process::exit`s, same as the tray's Quit handler, and skips
-/// the flush tick along with every destructor the same way. Every caller must
-/// flush both note stores first: see `ui::settings::update_card::UpdateCard`,
-/// the only one there is.
+/// Like the tray Quit handler this `process::exit`s, skipping destructors and
+/// the flush tick — callers must flush the note stores first.
 pub fn restart_app() -> ! {
     let exe = std::env::current_exe().expect("Failed to get current exe path");
     crate::release_single_instance();

@@ -1,8 +1,5 @@
-//! Leaf helpers for driving one recording session's shutdown sequence.
-//!
-//! Split out of `mod.rs` to keep that file under the 500-line limit; these are
-//! the pieces shared by the realtime and batch recording loops that don't need
-//! access to the orchestrator's UI signals beyond the status log.
+//! Helpers for one recording session's shutdown sequence, shared by the
+//! realtime and batch loops.
 
 use dioxus::prelude::*;
 use tokio::sync::mpsc;
@@ -11,35 +8,20 @@ use crate::audio::{try_send_reserving, warn_channel_full, SendOutcome};
 use crate::transcription;
 use crate::ui::status_log::{log_status, LogLevel, StatusLog};
 
-/// Why a recording loop exited. All reasons share the same teardown; they
-/// differ only in whether trailing audio is still worth collecting.
+/// Why a recording loop exited. Only `UserStop` still collects trailing audio.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StopReason {
     /// The user released the hotkey (or the hotkey channel closed).
     UserStop,
-    /// The mic stopped delivering audio — device unplugged, capture error.
+    /// The mic stopped delivering audio.
     AudioLost,
-    /// The backend's transcript stream closed while we were still recording.
-    ///
-    /// Only `UserStop` collects trailing audio, which is right here for the
-    /// same reason it is right for `AudioLost`: there is nothing left on the
-    /// other end to send it to.
+    /// The backend's transcript stream closed mid-recording.
     TranscriptLost,
 }
 
-/// Why the backend's transcript stream ended.
-///
-/// A stream that closes without ever having delivered anything is the
-/// signature of a **rejected connection**, not a finished one — and telling
-/// the two apart is the only way that failure can be named for the user.
-///
-/// This matters because of a specific ElevenLabs behaviour, measured rather
-/// than assumed: it accepts the WebSocket upgrade *before* validating the key,
-/// answering `101 Switching Protocols` in ~130ms and only dropping the socket
-/// some seconds later. Mistral answers `401` at the handshake, so its failures
-/// never reach the recording loop at all. Without this distinction a bad
-/// ElevenLabs key looks exactly like a healthy session that happened to
-/// transcribe nothing.
+/// Why the backend's transcript stream ended. A stream that closes having
+/// delivered nothing is a rejected connection, not a finished one: ElevenLabs
+/// accepts the WebSocket upgrade before validating the key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ClosedStream {
     /// The backend was transcribing, then the stream ended.
@@ -48,13 +30,9 @@ pub(super) enum ClosedStream {
     NeverStarted,
 }
 
-/// Whether an event proves the backend was really transcribing.
-///
-/// `Info` and `Error` deliberately do not count. The ElevenLabs reader emits
-/// an `Info("WebSocket closed")` on its way out **even when the server
-/// rejected the key and sent nothing else**, so counting every event would
-/// make a rejected connection indistinguishable from a working one — which is
-/// the whole thing [`ClosedStream`] exists to distinguish.
+/// Whether an event proves the backend was really transcribing. `Info` and
+/// `Error` do not count: the reader emits `Info("WebSocket closed")` on the
+/// way out even when the server rejected the key.
 pub(super) fn proves_session_live(kind: &transcription::TranscriptKind) -> bool {
     use transcription::TranscriptKind as K;
     matches!(kind, K::Final | K::Partial | K::SessionStarted(_))
@@ -97,10 +75,8 @@ pub(super) const TAIL_CAPTURE_MS: u64 = 400;
 /// How long to wait for the backend's closing transcripts after committing.
 pub(super) const FINAL_TRANSCRIPT_TIMEOUT_MS: u64 = 2000;
 
-/// Forward any audio still arriving for `TAIL_CAPTURE_MS`, then return.
-///
-/// Exits early if the audio channel closes rather than spinning on a closed
-/// `recv()` — which returns `None` immediately — until the deadline.
+/// Forward audio still arriving for `TAIL_CAPTURE_MS`. Breaks early if the
+/// channel closes instead of spinning on a `recv()` that returns `None` at once.
 pub(super) async fn stream_tail_audio(
     audio_rx: &mut mpsc::Receiver<Vec<u8>>,
     audio_tx: &mpsc::Sender<Vec<u8>>,
@@ -115,9 +91,7 @@ pub(super) async fn stream_tail_audio(
                         match try_send_reserving(audio_tx, transcription::AUDIO_SENTINEL_RESERVE, bytes) {
                             SendOutcome::Sent => {}
                             SendOutcome::Full => warn_channel_full(audio_drop_count, "Realtime audio_tx"),
-                            // WebSocket reader task exited (e.g. connection
-                            // dropped) — nobody left to receive; normal
-                            // teardown, not backpressure.
+                            // Reader task exited: normal teardown, not backpressure.
                             SendOutcome::Closed => {}
                         }
                     }
@@ -130,8 +104,7 @@ pub(super) async fn stream_tail_audio(
     }
 }
 
-/// Collect any audio still arriving for `TAIL_CAPTURE_MS` into `buffer`
-/// (the batch path's equivalent of `stream_tail_audio`).
+/// Batch equivalent of `stream_tail_audio`: collect trailing audio into `buffer`.
 pub(super) async fn buffer_tail_audio(
     audio_rx: &mut mpsc::Receiver<Vec<u8>>,
     buffer: &mut Vec<u8>,
@@ -150,15 +123,9 @@ pub(super) async fn buffer_tail_audio(
     }
 }
 
-/// Send the end-of-audio sentinel (an empty `Vec`) telling the backend to
-/// commit/finalize.
-///
-/// `AUDIO_SENTINEL_RESERVE` slots are never touched by the data path (see the
-/// `try_send_reserving` calls), so this should always succeed while the
-/// WebSocket reader task is alive, even if the channel was saturated with
-/// audio moments ago. A `Closed` error just means that task already exited
-/// (e.g. the WebSocket dropped) — there's no backend left to finalize, so it's
-/// dropped silently rather than surfaced as an error.
+/// Send the end-of-audio sentinel (empty `Vec`) telling the backend to commit.
+/// Reserved slots keep room for it even on a saturated channel; `Closed` just
+/// means the reader task already exited, so it is dropped silently.
 pub(super) fn send_commit_sentinel(
     audio_tx: &mpsc::Sender<Vec<u8>>,
     status_log: &mut Signal<StatusLog>,
@@ -187,9 +154,7 @@ mod tests {
 
     #[test]
     fn a_stream_that_closed_before_any_transcript_is_reported_as_a_failure() {
-        // The rejected-key signature. ElevenLabs answers 101 to the upgrade
-        // before it validates anything, so this is the only point at which a
-        // bad key becomes distinguishable from a working session.
+        // A bad key is only distinguishable from a working session here.
         let closed = ClosedStream::classify(false);
         assert_eq!(closed, ClosedStream::NeverStarted);
         assert_eq!(closed.level(), LogLevel::Error);
@@ -213,10 +178,8 @@ mod tests {
 
     #[test]
     fn a_closing_info_event_does_not_count_as_a_live_session() {
-        // The trap this rule exists for. `elevenlabs_realtime`'s reader emits
-        // Info("WebSocket closed") on its way out even when the server
-        // rejected the key and sent nothing else. Counting it would make every
-        // rejected connection look like an interrupted one.
+        // The reader emits this even for a rejected key; counting it would
+        // hide every rejected connection as an interruption.
         assert!(!proves_session_live(&TranscriptKind::Info(
             "WebSocket closed".into()
         )));

@@ -1,18 +1,13 @@
 use dioxus::prelude::*;
 
-/// Loading splash shown while `warmup::warm_all` runs on app startup.
-/// Lives in its own transparent, always-on-top window. Progress updates are
-/// pushed in by the parent vdom via `webview.evaluate_script` (same pattern
-/// as the recording pill — see `src/ui/app.rs`).
+/// Loading splash while `warmup::warm_all` runs. Own transparent always-on-top
+/// window; progress pushed in via `webview.evaluate_script` (pill pattern).
 #[component]
 pub fn SplashWindow() -> Element {
     let icon_data_url = crate::assets::icon_png_data_url();
 
-    // Windows/macOS: dioxus hides every window but the first as its webview
-    // finishes loading — see the long note in `ui::sticky`, which works
-    // around the same thing. Without this the splash never appears there and
-    // `setup_splash`'s 1500ms minimum-visible floor waits out a window
-    // nobody sees.
+    // Windows/macOS: dioxus hides non-first windows on load (see `ui::sticky`);
+    // without this the splash never appears there.
     #[cfg(not(target_os = "linux"))]
     {
         let window = dioxus::desktop::use_window();
@@ -53,13 +48,11 @@ html, body, #main { background:transparent!important; overflow:hidden;
 .splash-icon { width:128px; height:128px; border-radius:12px;
   user-select:none; -webkit-user-drag:none; }
 
-/* 75% of the 240px card width, capsule shape (radius = half the height). */
+/* 75% of card width, capsule (radius = half height). */
 .splash-bar-track { width:180px; height:8px;
   background:#f1f3f9; border-radius:4px; overflow:hidden; }
 
-/* Bar fill is purely time-driven: 0 → 100% over 1500ms, matching the
-   splash's minimum-visible floor in app.rs. Decoupled from real warmup
-   progress so the user always sees a smooth fill regardless of cold/warm. */
+/* Time-driven 0→100% over 1500ms (minimum-visible floor), not real progress. */
 .splash-bar-fill { height:100%; width:0%; background:#4B0082;
   border-radius:4px;
   animation:splash-fill 1500ms cubic-bezier(0.4, 0, 0.2, 1) forwards; }

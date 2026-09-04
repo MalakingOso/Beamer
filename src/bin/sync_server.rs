@@ -1,39 +1,19 @@
-//! `sync_server`: the authoritative replica of `notes.automerge`, reachable
-//! only over the tailnet via `tailscale serve`'s `/sync` proxy.
+//! Authoritative replica of `notes.automerge`, served on loopback only and
+//! reached over the tailnet via `tailscale serve`'s `/sync` proxy. One shared
+//! document plus one `automerge::sync::State` per connection.
 //!
-//! Runs on `callisto` beside `llama-server`. Owns one automerge document,
-//! shared across every connected peer behind a `Mutex`, and keeps one
-//! `automerge::sync::State` per connection, the standard `automerge::sync`
-//! relay shape from the crate's own doc example, just with a WebSocket
-//! instead of the loop in that example driving both sides directly.
+//! No protocol-level auth: `tailscaled` authenticates callers, and only for
+//! traffic that already reached loopback. See `agent_docs/sync.md`.
 //!
-//! ⚠️ **Binds loopback only, and refuses to start otherwise.** There is no
-//! auth anywhere in this protocol; `tailscaled` is what authenticates a
-//! caller, the same trust boundary `llama-beamer.service` already relies on,
-//! and it only vouches for traffic that already reached loopback through the
-//! `tailscale serve` proxy. See `agent_docs/sync.md`.
-//!
-//! ## Why this file looks the way it does
-//!
-//! There is no `src/lib.rs`, so a second binary cannot `use beamer::…`.
-//! `src/notes/sync_doc.rs` was written free of crate-rooted paths for exactly
-//! this reason (see its own module doc), so it `#[path]`-includes cleanly,
-//! same trick `task_eval.rs` uses for `llm/mod.rs` and the three `notes/`
-//! files it needs. This binary needs nothing else from `notes/`: it never
-//! reads a note or a task, only relays whatever the document holds, so
-//! `doc_notes`/`doc_tasks` (which do reach for `super::model`/`super::task`)
-//! stay out of it entirely.
-//!
-//! ## Run it
+//! No `src/lib.rs`, so this binary `#[path]`-includes `notes/sync_doc.rs`
+//! (written free of crate paths for this). It only relays the document, so
+//! `doc_notes`/`doc_tasks` stay out.
 //!
 //! ```text
 //! cargo run --bin sync_server -- --bind 127.0.0.1:8081
 //! ```
 
-// `sync_doc.rs` is `#[path]`-included whole, the same tradeoff `task_eval.rs`
-// makes with `llm/mod.rs`: the alternative is scattering `#[allow]` through
-// shared source to suit one consumer that only needs a slice of it. The tree
-// stays at zero warnings; this file, deliberately, does not need to.
+// Whole-module include pulls in items this binary never calls.
 #![allow(dead_code)]
 
 #[path = "../notes/sync_doc.rs"]
@@ -55,44 +35,27 @@ use sync_doc::{SyncDoc, SyncHandle};
 
 const DEFAULT_BIND: &str = "127.0.0.1:8081";
 
-/// `<config_dir>/sync/notes.automerge`, matching `notes::sync_dir` and
-/// `notes::notes_document_path`. Reimplemented rather than imported: those
-/// live in `notes/mod.rs`, which reaches for `crate::config::Config` to
-/// resolve its own default paths, and dragging that whole module tree in for
-/// two lines of path-joining would be a worse trade than the duplication.
+/// `<config_dir>/sync/notes.automerge`. Duplicated from `notes/mod.rs` to
+/// avoid dragging its whole module tree in for two lines of path-joining.
 fn notes_document_path(config_dir: &Path) -> PathBuf {
     config_dir.join("sync").join("notes.automerge")
 }
 
-/// Deliberately **not** `Config::config_dir()`'s `Beamer` leaf. This box
-/// (`callisto`) can also run a Beamer install directly, for testing this
-/// feature if nothing else, and defaulting to the same directory the app
-/// itself uses would make every operator's first `cargo run --bin
-/// sync_server` a silent, undocumented file-sharing arrangement between two
-/// independent processes.
-///
-/// Two processes racing a write to the same `notes.automerge` is safe now
-/// (`SyncDoc::save`'s temp name is pid-scoped, so a rename can no longer
-/// collide with another process's temp file), but two processes still race
-/// the final `rename` onto one path, and an operator who wants that sharing
-/// on purpose should ask for it explicitly with `--config-dir`, not get it by
-/// omission. See `agent_docs/sync.md`.
+/// Deliberately not the app's own config dir: sharing one `notes.automerge`
+/// between this server and a local Beamer install invites a rename race on
+/// save. Opt into sharing explicitly with `--config-dir`.
 fn default_config_dir() -> PathBuf {
     let base = dirs::config_dir().expect("Could not determine config directory");
     base.join("BeamerSyncServer")
 }
 
-/// Refuse anything but loopback. `tailscaled` is this socket's entire
-/// authentication story (see the module doc) and it only covers loopback,
-/// so binding a routable address would serve the whole corpus, unauthenticated,
-/// to whatever can reach that address.
+/// Refuse anything but loopback: `tailscaled` is the only auth, and it only
+/// covers loopback. Binding a routable address would serve the corpus openly.
 fn ensure_loopback(addr: SocketAddr) -> Result<()> {
     if !addr.ip().is_loopback() {
         anyhow::bail!(
             "refusing to bind {addr}: not a loopback address. This server has no \
-             protocol-level auth of its own; tailscaled, via `tailscale serve`, is what \
-             authenticates every caller, and it only does that for connections that already \
-             reached loopback. Binding anything else exposes the whole corpus."
+             protocol-level auth; tailscaled only vouches for loopback traffic."
         );
     }
     Ok(())
@@ -134,10 +97,7 @@ async fn main() -> Result<()> {
     let doc_path = notes_document_path(&args.config_dir);
     let (doc, load_error) = SyncDoc::open(doc_path.clone());
     if let Some(e) = load_error {
-        // Not fatal: `SyncDoc::open` already quarantined what it could not
-        // read and started this replica from genesis, same as any client
-        // would. Peers still converge; this machine just isn't the one that
-        // remembers what came before.
+        // Not fatal: already quarantined, restarted from genesis like a client.
         tracing::error!("{e}");
     }
     tracing::info!("serving {} from {}", doc_path.display(), args.bind);
@@ -147,11 +107,7 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("could not bind {}", args.bind))?;
 
-    // Bumped whenever any peer's changes land in the document, so every other
-    // connected peer's task wakes and offers a fresh sync message. Without
-    // this, a peer that had already caught up would only learn about a
-    // second peer's edits the next time it happened to send something of its
-    // own, which offline-first clients may not do for a while.
+    // Bumped on every landed change so caught-up peers wake and re-offer.
     let (changed_tx, _) = watch::channel(());
 
     loop {
@@ -167,20 +123,14 @@ async fn main() -> Result<()> {
     }
 }
 
-/// How often an idle connection gets a ping, and how long with no traffic at
-/// all (not even a pong) before it is presumed half-open and closed. Without
-/// this, a peer that drops off the network without a clean TCP close (a
-/// laptop that loses power, a network that black-holes instead of resetting)
-/// parks its `serve_peer` task, its `sync::State` and its `watch::Receiver`
-/// until the OS's own TCP timeout, which can be a long time. A clean
-/// disconnect (`WsMessage::Close`, or the read returning an error) is already
-/// handled without waiting for either of these.
+/// Ping cadence and the silence (not even a pong) after which a connection is
+/// presumed half-open and closed. Without this, an unclean disconnect parks
+/// the task until the OS TCP timeout.
 const PING_INTERVAL: Duration = Duration::from_secs(30);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 
-/// One connection, one `sync::State`, for as long as the socket lives.
-/// Dropping the connection loses only that state; a reconnect starts a fresh
-/// one and the protocol re-converges, at the cost of a fuller first message.
+/// One connection, one `sync::State`. Losing it only costs a fuller first
+/// message on reconnect; the protocol re-converges.
 async fn serve_peer(stream: TcpStream, handle: SyncHandle, changed_tx: watch::Sender<()>) -> Result<()> {
     let ws = tokio_tungstenite::accept_async(stream).await?;
     let (mut ws_write, mut ws_read) = ws.split();
@@ -200,22 +150,14 @@ async fn serve_peer(stream: TcpStream, handle: SyncHandle, changed_tx: watch::Se
                     Some(Ok(WsMessage::Binary(bytes))) => {
                         let msg = SyncMessage::decode(&bytes)
                             .context("could not decode an incoming sync message")?;
-                        // Gated on the document actually moving: most
-                        // messages in this protocol are handshakes and acks
-                        // that carry no changes, and rewriting the document
-                        // to disk (and waking every other connected peer)
-                        // for one of those would make every idle connection
-                        // a source of needless disk I/O and wakeups.
+                        // Save + broadcast only when the document moved: most
+                        // messages are change-free handshakes/acks.
                         if apply_and_save(&handle, &mut state, msg)? {
-                            // Our own send below already reflects this change
-                            // for this peer; the broadcast is for every
-                            // *other* peer whose `changed_rx.changed()` is
-                            // waiting on it.
                             let _ = changed_tx.send(());
                         }
                     }
                     Some(Ok(WsMessage::Close(_))) | None => return Ok(()),
-                    Some(Ok(_)) => {} // ping/pong/text: only pings/pongs arrive here, and tungstenite answers pings on our behalf
+                    Some(Ok(_)) => {} // pings/pongs/text: tungstenite answers pings
                     Some(Err(e)) => return Err(e.into()),
                 }
             }
@@ -236,9 +178,7 @@ async fn serve_peer(stream: TcpStream, handle: SyncHandle, changed_tx: watch::Se
     }
 }
 
-/// Applies one incoming message and, only if it actually moved the
-/// document's heads, saves and returns `true`. See the call site's comment
-/// on why a no-op message must not trigger either.
+/// Apply one message; save and return `true` only if heads moved.
 fn apply_and_save(handle: &SyncHandle, state: &mut SyncState, msg: SyncMessage) -> Result<bool> {
     let mut doc = handle.lock();
     if doc.is_read_only() {
@@ -256,12 +196,9 @@ fn apply_and_save(handle: &SyncHandle, state: &mut SyncState, msg: SyncMessage) 
 
 type WsSink = futures_util::stream::SplitSink<WebSocketStream<TcpStream>, WsMessage>;
 
-/// Locking and generating happen in a plain function, never inline in the
-/// `async fn` below: a `std::sync::MutexGuard` is `!Send`, and holding one
-/// across an `.await`, even one that only lexically follows an explicit
-/// `drop`, inside the same async fn, poisons that fn's whole future as
-/// `!Send`, which `tokio::spawn` then refuses. A synchronous function has no
-/// such ambiguity: the guard is provably gone the moment it returns.
+/// Lock + generate in a sync fn, never inline in async code: holding a
+/// `std::sync::MutexGuard` across `.await` makes the future `!Send`, which
+/// `tokio::spawn` refuses. Here the guard provably drops on return.
 fn generate_pending(handle: &SyncHandle, state: &mut SyncState) -> Option<SyncMessage> {
     let mut doc = handle.lock();
     let msg = doc.doc_mut().sync().generate_sync_message(state);
@@ -288,9 +225,7 @@ mod tests {
     #[test]
     fn a_wildcard_or_routable_bind_is_refused() {
         assert!(ensure_loopback("0.0.0.0:8081".parse().unwrap()).is_err());
-        // A real tailnet-range address (100.64.0.0/10), which is exactly the
-        // mistake this check exists to catch: it looks private, and it is
-        // reachable from every other device on the tailnet.
+        // Tailnet-range (100.64.0.0/10): looks private, reachable tailnet-wide.
         assert!(ensure_loopback("100.101.102.103:8081".parse().unwrap()).is_err());
         assert!(ensure_loopback("[::]:8081".parse().unwrap()).is_err());
     }
@@ -318,14 +253,8 @@ mod tests {
         assert!(parse_args(["--nope"].into_iter().map(String::from)).is_err());
     }
 
-    /// The document format the server opens is exactly `SyncDoc`'s own, and
-    /// that includes starting from the shared genesis change when nothing is
-    /// on disk yet, the same call every Beamer client makes. This is a
-    /// direct assertion on that fact, not a re-test of `SyncDoc` itself
-    /// (which has its own suite in `notes::sync_tests`): if `sync_server`
-    /// ever stopped calling `SyncDoc::open`/`new_document` and built a
-    /// document some other way, this is what would catch it re-introducing
-    /// the whole-map conflict genesis exists to prevent.
+    /// A fresh server and a fresh client must start from the same genesis, or
+    /// their first sync re-introduces the whole-map conflict genesis prevents.
     #[test]
     fn a_fresh_server_document_starts_from_the_same_genesis_a_client_would() {
         let dir = std::env::temp_dir().join(format!("beamer_sync_server_test_{}", std::process::id()));
@@ -333,15 +262,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         let (mut server_doc, load_error) = SyncDoc::open(notes_document_path(&dir));
-        assert!(load_error.is_none(), "a fresh directory has nothing to fail to read");
+        assert!(load_error.is_none());
 
         let mut client_doc = sync_doc::new_document();
-        assert_eq!(
-            server_doc.heads(),
-            client_doc.get_heads(),
-            "a server with no document on disk yet must start from the same genesis as a client, \
-             or the first sync between them repeats the whole-map conflict genesis exists to prevent"
-        );
+        assert_eq!(server_doc.heads(), client_doc.get_heads());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

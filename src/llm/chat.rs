@@ -1,15 +1,8 @@
 //! `POST /v1/chat/completions` against the standalone llama.cpp server.
-//!
-//! Mirrors `client.rs`: plain async `reqwest` on the runtime dioxus-desktop
-//! owns, sharing its connection pool rather than opening a second one.
-//!
-//! **The request body carries the model, the messages and nothing else.**
-//! Sampling parameters and the thinking switch both models require are set
-//! server-side in `deploy/llama-models.ini`. Re-sending them from here would
-//! create two owners of one setting, and the failure mode is silent: both
-//! models answer HTTP 200 with a plausible body when misconfigured, so a
-//! Beamer-side `temperature` that disagreed with the preset would degrade
-//! output with nothing to catch. A test pins their absence.
+//! The body carries model, messages and nothing else: sampling and the thinking
+//! switch live server-side in `deploy/llama-models.ini`. Both models answer
+//! HTTP 200 when misconfigured, so a test pins that Beamer sends no sampling
+//! parameters.
 
 use std::time::Duration;
 
@@ -17,8 +10,6 @@ use serde::{Deserialize, Serialize};
 
 use super::client::{failure_message, http_client};
 
-/// `POST {base_url}/v1/chat/completions`, tolerating a trailing slash on the
-/// configured URL for the same reason `models_url` does.
 pub fn chat_url(base_url: &str) -> String {
     format!("{}/v1/chat/completions", base_url.trim_end_matches('/'))
 }
@@ -39,10 +30,8 @@ impl Message {
     }
 }
 
-/// llama.cpp's grammar constraint. Requesting it makes the server emit
-/// structurally valid JSON by construction rather than by hope — but not every
-/// server version honours it, which is why the extraction parser still
-/// tolerates fences.
+/// Grammar constraint requesting valid JSON. Not honoured by every server
+/// version, so the extraction parser still tolerates fences.
 #[derive(Debug, Clone, Serialize)]
 pub struct ResponseFormat {
     #[serde(rename = "type")]
@@ -59,33 +48,22 @@ impl ResponseFormat {
 pub struct ChatRequest {
     pub model: String,
     pub messages: Vec<Message>,
-    /// Omitted entirely when absent — a `null` here is not the same as an
-    /// unconstrained request to every server version.
+    /// Omitted when absent — `null` is not unconstrained to every server.
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_format: Option<ResponseFormat>,
 }
 
-/// Why a completion did not produce usable text.
-///
-/// Deliberately not `anyhow::Error`: the caller branches on these, and
-/// `ThinkingEnabled` in particular has a specific remedy to name.
+/// Why a completion produced no usable text. Not `anyhow::Error`: callers branch on these.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatError {
-    /// Connection refused, DNS, timeout — the server is not answering. This is
-    /// a normal state, not an error condition: the server is standalone and
-    /// may simply not be running.
+    /// Server not answering (refused, DNS, timeout). Normal: the server is standalone.
     Unreachable(String),
-    /// A response arrived, with a status that was not 2xx.
     Http(u16),
-    /// A 2xx body that was not the shape we expect.
     Malformed(String),
-    /// `content` was empty while `reasoning_content` was not.
-    ///
-    /// This is the exact misconfiguration both models fall into when the
-    /// server preset is missing its thinking switch, and it is worth its own
-    /// variant because it otherwise surfaces as an inscrutable parse error.
-    /// Neither model reports it: the HTTP status is 200 and the body is valid
-    /// JSON. Only the empty/non-empty pairing gives it away.
+    /// `content` empty while `reasoning_content` is not: the server preset is
+    /// missing its thinking switch. Status is 200 with valid JSON, so without
+    /// this variant it surfaces as an inscrutable parse error.
     ThinkingEnabled,
 }
 
@@ -120,21 +98,14 @@ struct Choice {
 struct ResponseMessage {
     #[serde(default)]
     content: Option<String>,
-    /// Present only when the model reasoned. Never used as output — it exists
-    /// here solely to diagnose [`ChatError::ThinkingEnabled`].
+    /// Never output; exists only to diagnose [`ChatError::ThinkingEnabled`].
     #[serde(default)]
     reasoning_content: Option<String>,
 }
 
-/// Pull the assistant's text out of a completion body.
-///
-/// Split from the request for the same reason `client.rs` splits
-/// `failure_message`: a `reqwest::Error` cannot be constructed in a test, and
-/// this is the part that can actually be wrong.
-///
-/// An empty string is returned as `Ok("")`, not an error. For cleanup that is
-/// a *correct* answer — filler-only speech normalizes to nothing — so the
-/// decision of what empty means belongs to the caller, not here.
+/// Pull the assistant's text out of a completion body. Split from the request
+/// because `reqwest::Error` cannot be built in tests. Empty `Ok("")` is a
+/// correct answer (filler-only speech); the caller decides what it means.
 pub fn parse_completion(body: &str) -> Result<String, ChatError> {
     let parsed: ChatResponse =
         serde_json::from_str(body).map_err(|e| ChatError::Malformed(e.to_string()))?;
@@ -153,27 +124,21 @@ pub fn parse_completion(body: &str) -> Result<String, ChatError> {
     Ok(content)
 }
 
-/// The placeholder-token opener, spelled out here because `src/llm/**` may not
-/// use crate-rooted paths and so cannot reach `notes::blocks::token_for`. A
-/// test in that module pins the literal, so a drift is caught there.
+/// Placeholder-token opener, spelled out: this module cannot reach the note
+/// block helper, and a test there pins the literal.
 const NOTE_TOKEN_MARKER: &str = "[[beamer:";
 
-/// Send one completion and return the assistant's text.
-///
-/// ⚠️ Does **not** probe `GET /v1/models` first. A status read resets the
-/// server's per-model idle clock, so probing before every request would pin
-/// the extraction model in VRAM permanently with no error and no symptom.
-/// Connection-refused is fast and well classified; just make the call.
+/// Send one completion and return the assistant's text. Does not probe
+/// `GET /v1/models` first: a status read resets the per-model idle clock and
+/// would pin the extraction model in VRAM with no symptom.
 pub async fn complete(
     base_url: &str,
     request: &ChatRequest,
     timeout: Duration,
 ) -> Result<String, ChatError> {
-    // ⚠️ A placeholder token in an outgoing message is an invariant violation,
-    // not a formatting quirk: s1-mini answers out-of-distribution input with
-    // garbled text at HTTP 200, so nothing downstream can catch it. Warned
-    // about rather than merely logged, because there is no other symptom.
-    // See `agent_docs/local_inference.md`, failure mode 6.
+    // A placeholder token here makes the model answer garbage at HTTP 200 —
+    // nothing downstream can catch it, so this warns rather than just logging.
+
     if let Some(bad) = request.messages.iter().find(|m| m.content.contains(NOTE_TOKEN_MARKER)) {
         tracing::warn!(
             "chat request to {} carries a note placeholder token in its {} message — \
@@ -261,10 +226,6 @@ mod tests {
 
     #[test]
     fn empty_content_with_reasoning_content_is_diagnosed_as_thinking_enabled() {
-        // Verbatim shape of what llama-server returns for Gemma 4 when its
-        // preset is missing chat-template-kwargs: HTTP 200, valid JSON, the
-        // answer sitting in the wrong field. Without this variant the caller
-        // sees "cleaned to nothing" and quietly blanks a working feature.
         let body = r#"{"choices":[{"message":{"role":"assistant","content":"",
                        "reasoning_content":"The user wants me to think about this."}}]}"#;
         assert_eq!(parse_completion(body), Err(ChatError::ThinkingEnabled));
@@ -272,24 +233,19 @@ mod tests {
 
     #[test]
     fn an_empty_completion_with_no_reasoning_is_a_successful_empty_answer() {
-        // s1-mini genuinely returns "" for filler-only speech. That is the
-        // model working, not failing, so it must not be an error here.
         let body = r#"{"choices":[{"message":{"role":"assistant","content":""}}]}"#;
         assert_eq!(parse_completion(body), Ok(String::new()));
     }
 
     #[test]
     fn reasoning_alongside_real_content_is_not_an_error() {
-        // Thinking that still produced an answer is wasteful, not broken. The
-        // diagnosis is specifically the *empty content* pairing.
         let body = r#"{"choices":[{"message":{"content":"Hello.","reasoning_content":"hmm"}}]}"#;
         assert_eq!(parse_completion(body), Ok("Hello.".to_string()));
     }
 
     #[test]
     fn a_response_with_no_choices_is_malformed_not_empty() {
-        // Returning Ok("") here would be indistinguishable from a correct
-        // empty cleanup, and would mark a broken pass as Done.
+        // Ok("") here would mark a broken pass as Done.
         assert!(matches!(
             parse_completion(r#"{"choices":[]}"#),
             Err(ChatError::Malformed(_))

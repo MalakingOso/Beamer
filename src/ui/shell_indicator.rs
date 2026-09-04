@@ -1,12 +1,8 @@
 #![cfg(target_os = "linux")]
 
-//! Client for the GNOME Shell extension's recording pill (extension v2).
-//!
-//! All D-Bus traffic runs on one dedicated worker thread fed by a channel, so
-//! UI code can fire-and-forget from any context. Level updates are coalesced
-//! (only the newest matters) and every call degrades to a silent no-op when
-//! the helper extension isn't active — non-GNOME desktops keep the tray-icon
-//! swap as their only indicator.
+//! Client for the GNOME Shell extension's recording pill. One worker thread fed
+//! by a channel (fire-and-forget from anywhere); level updates coalesced to the
+//! newest; silent no-op when the helper isn't active.
 
 use std::sync::mpsc::{self, Sender};
 use std::sync::OnceLock;
@@ -43,44 +39,18 @@ fn sender() -> &'static Sender<Cmd> {
 }
 
 struct Worker {
-    /// This worker's own cached D-Bus proxy/connection, built lazily in
-    /// `proxy()` below with a fixed 200ms method timeout sized for the
-    /// ~15Hz level-update cadence this worker drives.
-    ///
-    /// `src/injection/focus.rs` keeps a separate cached session-bus
-    /// connection (`CONN`) for its own D-Bus calls (focus lookup,
-    /// TypeText/SendPasteChord). The two caches are deliberately not
-    /// unified: this one lives on a single dedicated worker thread with a
-    /// baked-in timeout tuned for coalesced level updates, while
-    /// `focus.rs`'s is shared across arbitrary callers each wanting their
-    /// own per-call timeout — different enough usage patterns that sharing
-    /// one cache would mean compromising both.
+    /// Own cached proxy, 200ms timeout sized for the ~15Hz level cadence. Kept
+    /// separate from `focus.rs`'s cache (different thread/timeout needs).
     proxy: Option<zbus::blocking::Proxy<'static>>,
-    /// Whether the helper answered a v2 GetVersion at the last probe. Gates
-    /// `Level` so a missing extension costs one probe per recording rather
-    /// than 15 failed D-Bus calls a second — which is the whole reason the
-    /// flag exists. See [`needs_probe`] for why `Hide` is not gated the same
-    /// way.
+    /// Whether the helper answered GetVersion at the last probe. Gates `Level`
+    /// so a missing extension costs one probe per recording, not 15 failures/s.
     helper_active: bool,
 }
 
-/// Whether a command has to probe for the helper before it can be sent.
-///
-/// `Show` always probes: it starts an indicator session and its answer is what
-/// gates everything after it.
-///
-/// `Hide` probes **when no session is active**, and that case is the whole
-/// point. A `Hide` with no preceding `Show` is the stale-pill case: a previous
-/// Beamer died without hiding the indicator — a crash, a SIGTERM, a `dx serve`
-/// rebuild — and GNOME Shell is still drawing a pill for a recording that has
-/// no process behind it. The indicator lives inside the shell, so nothing but
-/// Beamer can clear it, and the only moment it can is startup, where
-/// `helper_active` is false by construction. Dropping that `Hide` is exactly
-/// what stranded the pill: `linux_integration`'s effect already sends one on
-/// first render, and it went nowhere.
-///
-/// `Level` never probes. It is the 15Hz flood the gate was built for, and a
-/// dropped level update costs one frame of a waveform.
+/// Whether a command must probe first. `Show` always probes (it opens the
+/// session). `Hide` probes when no session is active — the stale-pill case: a
+/// previous Beamer died without hiding, and startup's `Hide` is the only thing
+/// that can clear it. `Level` never probes (a drop costs one waveform frame).
 fn needs_probe(cmd: &Cmd, helper_active: bool) -> bool {
     match cmd {
         Cmd::Show(_) => true,
@@ -180,10 +150,7 @@ mod tests {
 
     #[test]
     fn a_hide_with_no_session_probes_rather_than_being_dropped() {
-        // The stale-pill case. A previous Beamer died without hiding the
-        // indicator, so GNOME Shell is still drawing one; the startup Hide
-        // that clears it arrives with helper_active false, and skipping it
-        // leaves the pill on screen with no error to explain it.
+        // Stale pill: skipping this leaves it on screen with no error.
         assert!(needs_probe(&Cmd::Hide, false));
     }
 
@@ -194,16 +161,12 @@ mod tests {
 
     #[test]
     fn a_level_update_never_probes() {
-        // Levels arrive at ~15Hz. Probing here is what the gate was built to
-        // prevent, and a dropped level costs one frame of a waveform.
         assert!(!needs_probe(&Cmd::Level(0.5), false));
         assert!(!needs_probe(&Cmd::Level(0.5), true));
     }
 
     #[test]
     fn a_show_always_probes() {
-        // Show opens the session, and its answer is what gates everything
-        // after it — including whether the extension is there at all.
         assert!(needs_probe(&Cmd::Show("recording"), false));
         assert!(needs_probe(&Cmd::Show("recording"), true));
     }

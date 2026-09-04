@@ -39,16 +39,13 @@ pub trait InjectionBackend: Send + Sync {
 
 // ─── Text sanitation ──────────────────────────────────────────────────────────
 
-/// Prepare text for keystroke-based injection (gnome/wtype/ydotool backends).
-/// Transliterates the smart punctuation transcription APIs produce, and maps
-/// newlines/tabs to spaces — a typed Enter would submit chat boxes and forms
-/// mid-injection. The clipboard path keeps newlines: an atomic paste doesn't
-/// press keys.
+/// Prepare text for keystroke typing (gnome/wtype/ydotool).
+/// Newlines/tabs become spaces — a typed Enter would submit forms
+/// mid-injection. The clipboard path keeps newlines (atomic paste).
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn sanitize_for_typing(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    // Set when the previous char emitted was a '\r' mapping, so a following
-    // '\n' (i.e. a "\r\n" pair) contributes no extra space of its own.
+    // Tracks a '\r' mapping so "\r\n" yields one space, not two.
     let mut last_was_cr = false;
 
     for ch in text.chars() {
@@ -115,9 +112,7 @@ mod sanitize_tests {
 
     #[test]
     fn mixed_smart_quotes_and_em_dash_adjacency() {
-        // Quote and dash transliterations abut with no separating text —
-        // pins that each replace() only touches its own code point and
-        // doesn't get confused by neighboring ASCII output from another.
+        // Adjacent replacements must not interfere with each other.
         assert_eq!(sanitize_for_typing("\u{201C}\u{2014}\u{201D}"), "\"--\"");
         assert_eq!(
             sanitize_for_typing("\u{2018}\u{2014}\u{2019}word"),
@@ -127,13 +122,8 @@ mod sanitize_tests {
 
     #[test]
     fn crlf_collapses_to_exactly_one_space_not_two() {
-        // The '\r' arm pushes a space and sets `last_was_cr`; the following
-        // '\n' is then swallowed by the `last_was_cr` check at the top of
-        // the loop instead of falling through to its own '\n' => push(' ')
-        // arm, so a "\r\n" pair produces exactly one space, not two.
         assert_eq!(sanitize_for_typing("a\r\nb"), "a b");
         assert_eq!(sanitize_for_typing("a\r\nb\r\nc"), "a b c");
-        // A bare "\r\n" becomes a single space, then trim_end() removes it.
         assert_eq!(sanitize_for_typing("\r\n"), "");
     }
 
@@ -165,13 +155,11 @@ mod sanitize_tests {
 
 // ─── Registry ─────────────────────────────────────────────────────────────────
 
-/// All backends available on this platform. `paste_shortcut` is the
-/// already-loaded `injection.paste_shortcut` config value, threaded into the
-/// clipboard backend so it never re-reads config.toml per paste.
+/// All backends for this platform. `paste_shortcut` is the loaded
+/// `injection.paste_shortcut` value, passed down so pastes never re-read disk.
 pub fn all_backends(paste_shortcut: &str) -> Vec<Box<dyn InjectionBackend>> {
     let mut backends: Vec<Box<dyn InjectionBackend>> = Vec::new();
-    // Referenced unconditionally so the parameter isn't "unused" on the
-    // platform whose branch below doesn't read it.
+    // Keeps the parameter used on the platform branch that ignores it.
     let _ = paste_shortcut;
 
     #[cfg(target_os = "windows")]
@@ -194,9 +182,7 @@ pub fn all_backends(paste_shortcut: &str) -> Vec<Box<dyn InjectionBackend>> {
     backends
 }
 
-/// Check which backends are available (for Settings UI display). Doesn't
-/// invoke `inject()`, so the paste shortcut value passed here is irrelevant —
-/// "auto" is a harmless placeholder.
+/// Backend availability for the Settings UI. Never invokes `inject()`.
 pub fn check_availability() -> Vec<(&'static str, &'static str, Result<(), String>)> {
     all_backends("auto")
         .iter()
@@ -223,9 +209,8 @@ pub fn default_backend_names() -> Vec<String> {
 
 // ─── Dispatch ─────────────────────────────────────────────────────────────────
 
-/// Inject text into the focused window using the configured backend chain.
-/// `paste_shortcut` is the caller's already-loaded `injection.paste_shortcut`
-/// config value (passed down instead of reloading config.toml per call).
+/// Inject text via the configured backend chain, first success wins.
+/// `paste_shortcut` is the already-loaded config value (not re-read per call).
 pub async fn inject_text(text: &str, backends: &[String], paste_shortcut: &str) -> Result<InjectionResult> {
     let text = text.to_string();
     let backends = backends.to_vec();

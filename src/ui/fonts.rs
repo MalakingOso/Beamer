@@ -1,16 +1,7 @@
-//! Embedded webfonts for secondary windows.
-//!
-//! The main window loads `assets/styles.css` through a `<link>`, so its
-//! `@font-face` rules resolve against Dioxus's asset handler. Secondary windows
-//! (stickies, pill, splash) inject their CSS as an inline `<style>` via
-//! `with_custom_head` instead, which carries no `@font-face` at all — so every
-//! `font-family:"DM Mono"` in those windows has silently fallen back to a
-//! system font while the main window rendered in the real one.
-//!
-//! These rules close that gap with `data:` URIs. A URI cannot fail to resolve,
-//! which an asset URL in a hand-built head string might: there is no visual
-//! test here, and a font that silently falls back looks like a design choice
-//! rather than a bug. The three faces total ~85 KB, encoded once per process.
+//! Embedded webfonts for secondary windows. Those inject CSS as an inline
+//! `<style>` via `with_custom_head`, which carries no `@font-face` — without
+//! this every `font-family:"DM Mono"` there silently falls back to a system
+//! font. `data:` URIs can't fail to resolve; three faces, ~85 KB, encoded once.
 
 use std::sync::OnceLock;
 
@@ -28,13 +19,8 @@ fn face(family: &str, weight: &str, bytes: &[u8]) -> String {
     )
 }
 
-/// `@font-face` rules for the app's three faces, ready to concatenate into a
-/// `with_custom_head` stylesheet. Built once and cached — a note window can be
-/// opened many times per session and the encoding is pure.
-///
-/// `font-display:block` rather than `swap`: the bytes are already in memory, so
-/// there is no network to wait on, and `swap` would flash a fallback face for a
-/// frame on a window that is only ~320px wide.
+/// `@font-face` rules for the three faces, built once and cached. `block`, not
+/// `swap`: bytes are in memory, so `swap` would only flash a fallback face.
 pub fn embedded_font_css() -> &'static str {
     static CSS: OnceLock<String> = OnceLock::new();
     CSS.get_or_init(|| {
@@ -42,7 +28,6 @@ pub fn embedded_font_css() -> &'static str {
             "{}{}{}",
             face("DM Mono", "400", DM_MONO_REGULAR),
             face("DM Mono", "500", DM_MONO_MEDIUM),
-            // Recursive is a variable font: one file serves the whole range.
             face("Recursive", "300 1000", RECURSIVE_VARIABLE),
         )
     })
@@ -61,9 +46,7 @@ mod tests {
         assert!(css.contains("font-family:\"Recursive\";font-weight:300 1000"));
     }
 
-    /// A `data:` URI is only useful if it decodes back to the file. Guards
-    /// against a truncated `include_bytes!` or an encoder swap that emits
-    /// URL-safe base64, which WebKit would reject.
+    /// Guards a truncated `include_bytes!` or a URL-safe-base64 encoder swap.
     #[test]
     fn the_data_uri_round_trips_to_the_original_woff2() {
         let css = embedded_font_css();
@@ -76,7 +59,6 @@ mod tests {
             .expect("must be standard base64, not URL-safe");
 
         assert_eq!(decoded, DM_MONO_REGULAR, "first face is DM Mono 400");
-        // woff2 files begin with the signature "wOF2".
         assert_eq!(&decoded[..4], b"wOF2", "not a woff2 payload");
     }
 

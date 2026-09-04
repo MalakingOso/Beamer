@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 
 use crate::ui::components::Select;
 
-/// Split "Ctrl+Space" into (ctrl, alt, shift, win, key).
+/// Split "Ctrl+Space" into `(ctrl, alt, shift, win, key)`.
 pub fn parse_hotkey_parts(hotkey: &str) -> (bool, bool, bool, bool, String) {
     let mut ctrl = false;
     let mut alt = false;
@@ -20,8 +20,7 @@ pub fn parse_hotkey_parts(hotkey: &str) -> (bool, bool, bool, bool, String) {
         }
     }
 
-    // When Win is active, it IS the trigger — no separate key needed.
-    // Otherwise default to Space.
+    // Win is its own trigger; otherwise default to Space.
     if key.is_empty() && !win {
         key = "Space".to_string();
     }
@@ -29,8 +28,7 @@ pub fn parse_hotkey_parts(hotkey: &str) -> (bool, bool, bool, bool, String) {
     (ctrl, alt, shift, win, key)
 }
 
-/// Reassemble modifier+key into a hotkey string.
-/// Uses "Super" for Win key. Omits key when Win is the trigger.
+/// Reassemble into a chord string ("Super" for Win; no key when Win triggers).
 pub fn format_hotkey(ctrl: bool, alt: bool, shift: bool, win: bool, key: &str) -> String {
     let mut parts = Vec::new();
     if ctrl { parts.push("Ctrl"); }
@@ -56,7 +54,7 @@ pub fn normalize_key(key: &str) -> String {
         s if s.starts_with("KEY") && s.len() == 4 => s[3..].to_string(),
         s if s.starts_with("DIGIT") && s.len() == 6 => s[5..].to_string(),
         _ => {
-            // Title-case: first char upper, rest lower
+            // Title-case.
             let mut chars = key.chars();
             match chars.next() {
                 Some(c) => {
@@ -70,10 +68,8 @@ pub fn normalize_key(key: &str) -> String {
     }
 }
 
-/// Dropdown options for the key selector.
-/// Fixed content — built once as a static slice rather than reconstructed on every render.
+/// Key dropdown options (static so they aren't rebuilt per render).
 static KEY_OPTIONS: &[(&str, &str)] = &[
-    // Common keys
     ("Space", "Space"),
     ("Enter", "Enter"),
     ("Tab", "Tab"),
@@ -84,26 +80,21 @@ static KEY_OPTIONS: &[(&str, &str)] = &[
     ("End", "End"),
     ("PageUp", "PageUp"),
     ("PageDown", "PageDown"),
-    // Letters A-Z
     ("A", "A"), ("B", "B"), ("C", "C"), ("D", "D"), ("E", "E"),
     ("F", "F"), ("G", "G"), ("H", "H"), ("I", "I"), ("J", "J"),
     ("K", "K"), ("L", "L"), ("M", "M"), ("N", "N"), ("O", "O"),
     ("P", "P"), ("Q", "Q"), ("R", "R"), ("S", "S"), ("T", "T"),
     ("U", "U"), ("V", "V"), ("W", "W"), ("X", "X"), ("Y", "Y"),
     ("Z", "Z"),
-    // Digits 0-9
     ("0", "0"), ("1", "1"), ("2", "2"), ("3", "3"), ("4", "4"),
     ("5", "5"), ("6", "6"), ("7", "7"), ("8", "8"), ("9", "9"),
-    // F-keys
     ("F1", "F1"), ("F2", "F2"), ("F3", "F3"), ("F4", "F4"),
     ("F5", "F5"), ("F6", "F6"), ("F7", "F7"), ("F8", "F8"),
     ("F9", "F9"), ("F10", "F10"), ("F11", "F11"), ("F12", "F12"),
-    // Arrows
     ("Up", "Up"),
     ("Down", "Down"),
     ("Left", "Left"),
     ("Right", "Right"),
-    // Punctuation / symbols
     ("-", "Minus (-)"),
     ("=", "Equal (=)"),
     ("[", "Left Bracket ([)"),
@@ -119,22 +110,18 @@ static KEY_OPTIONS: &[(&str, &str)] = &[
 
 #[derive(Props, Clone, PartialEq)]
 pub struct HotkeyPickerProps {
-    /// Current chord, e.g. "Ctrl+Super" or "Ctrl+Alt+Space".
+    /// Current chord, e.g. "Ctrl+Super".
     pub hotkey: String,
-    /// Emits the reassembled chord. The caller persists it.
+    /// Emits the reassembled chord; the caller persists it.
     pub on_change: EventHandler<String>,
 }
 
-/// Modifier pills plus a trigger-key dropdown, shared by the dictation and
-/// note-capture rows so the two chords can never be parsed differently.
+/// Modifier pills plus a trigger-key dropdown, shared by both capture rows.
 #[component]
 pub fn HotkeyPicker(props: HotkeyPickerProps) -> Element {
     let (ctrl, alt, shift, win, key) = parse_hotkey_parts(&props.hotkey);
-    // Win-as-trigger is the invariant for every closure below, not just the
-    // Win pill's. Without this, a hand-edited "Ctrl+Super+Space" seeds
-    // key = "Space", and clicking Ctrl would emit "Super+Space" — the exact
-    // Super+<key> chord the engine silently degrades (see todo.md). Clearing
-    // it here normalizes such a chord on first interaction instead.
+    // Win-as-trigger holds for every closure: clear a stray key (e.g. from a
+    // hand-edited "Ctrl+Super+Space") so pills can't emit "Super+<key>".
     let key = if win { String::new() } else { key };
 
     rsx! {
@@ -162,8 +149,8 @@ pub fn HotkeyPicker(props: HotkeyPickerProps) -> Element {
                     let key = key.clone();
                     move |_| {
                         let new_win = !win;
-                        // When Win is toggled on, it becomes the trigger (drop key).
-                        // When toggled off, restore Space as default trigger.
+                        // Win on: it becomes the trigger (drop key). Win off:
+                        // restore Space when no key remains.
                         let effective_key = if new_win { "" } else if key.is_empty() { "Space" } else { &key };
                         props.on_change.call(format_hotkey(ctrl, alt, shift, new_win, effective_key));
                     }
@@ -189,7 +176,7 @@ pub struct CaptureModeRadioProps {
     pub on_change: EventHandler<String>,
 }
 
-/// Push-to-talk vs toggle. Shared so both capture modes read identically.
+/// Push-to-talk vs toggle, shared by both capture rows.
 #[component]
 pub fn CaptureModeRadio(props: CaptureModeRadioProps) -> Element {
     rsx! {
@@ -242,7 +229,7 @@ mod tests {
     fn win_only_chord_keeps_super_as_the_trigger() {
         let (ctrl, alt, shift, win, key) = parse_hotkey_parts("Ctrl+Super");
         assert!(ctrl && win && !alt && !shift);
-        assert_eq!(key, "", "Super IS the trigger — no separate key may be invented");
+        assert_eq!(key, "", "Super is the trigger; no separate key");
     }
 
     #[test]
@@ -251,14 +238,11 @@ mod tests {
         assert_eq!(format_hotkey(ctrl, alt, shift, win, &key), "Ctrl+Alt+Space");
     }
 
-    /// The picker and `HotkeyConfig::parse` are two independent readers of the
-    /// same string format. Nothing in the type system keeps them in step, so
-    /// what the UI writes must be pinned against what the engine registers —
-    /// a picker that emits a chord the engine drops fails silently.
+    /// The picker and `HotkeyConfig::parse` read the same format independently;
+    /// pin what the UI writes against what the engine registers.
     #[test]
     fn what_the_picker_emits_is_what_the_engine_registers() {
         let cases: &[(&str, bool, bool, bool, u32)] = &[
-            // chord,            ctrl,  alt,   shift, trigger_vk
             ("Ctrl+Alt+Space",   true,  true,  false, 0x20),
             ("Ctrl+Super",       true,  false, false, VK_LWIN),
             ("Ctrl+Shift+N",     true,  false, true,  0x4E),
@@ -278,33 +262,19 @@ mod tests {
         }
     }
 
-    /// The footgun this test used to document is fixed. Super is expressible
-    /// only as a *trigger*: `HotkeyConfig` has no Meta modifier field, so
-    /// "Ctrl+Super+Space" has nowhere to put Super alongside a key. The
-    /// engine now rejects the combination outright, rather than silently
-    /// registering it as plain Ctrl+Space. `note_hotkey_config()` already
-    /// reads `None` as unbound, so a rejected parse just means "no binding".
-    ///
-    /// The picker never produces such a chord anyway, since its Win pill
-    /// clears the trigger key, so the rest of this test keeps the
-    /// hand-edited-config path safe on the picker side too.
+    /// Super is expressible only as a *trigger* (`HotkeyConfig` has no Meta
+    /// modifier field), so the engine rejects "Ctrl+Super+Space" outright
+    /// instead of silently registering Ctrl+Space; `None` reads as unbound.
     #[test]
     fn super_plus_a_key_is_rejected_by_the_engine() {
-        assert!(
-            HotkeyConfig::parse("Ctrl+Super+Space", false).is_none(),
-            "Super has no modifier field to share with a trigger key"
-        );
+        assert!(HotkeyConfig::parse("Ctrl+Super+Space", false).is_none());
 
-        // The picker normalizes such a chord if it is handed one:
-        // `HotkeyPicker` clears the key whenever Win is on, so every modifier
-        // pill reassembles the chord as Super-as-trigger.
+        // The picker normalizes such a chord: Win on clears the key.
         let (c, a, sh, w, k) = parse_hotkey_parts("Ctrl+Super+Space");
-        assert!(w, "Win reads as on");
-        assert_eq!(k, "Space", "the raw parse still carries the stray key");
+        assert!(w);
+        assert_eq!(k, "Space", "raw parse still carries the stray key");
         let normalized = if w { String::new() } else { k };
         assert_eq!(format_hotkey(c, a, sh, w, &normalized), "Ctrl+Super");
-        // ...and toggling Ctrl off from that state stays safe, rather than
-        // emitting "Super+Space".
         assert_eq!(format_hotkey(!c, a, sh, w, &normalized), "Super");
     }
 }

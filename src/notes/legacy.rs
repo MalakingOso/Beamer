@@ -1,10 +1,6 @@
-//! The one-time path off the old JSON-only storage.
-//!
-//! Everything here runs when there is no `notes.automerge` yet: the legacy
-//! attachment shape is upgraded, `pos`/`size`/`open` are lifted into
-//! `machine.json`, and the resulting notes seed a fresh document. Once the
-//! document exists, `NoteStore::load_from` reads that and none of this runs
-//! again.
+//! One-time seed off the old JSON-only storage. Runs only when no `notes.automerge`
+//! exists yet: upgrades the legacy attachment shape, lifts `pos`/`size`/`open` into
+//! `machine.json`, and seeds a fresh document.
 
 use std::path::{Path, PathBuf};
 
@@ -13,11 +9,8 @@ use serde::Deserialize;
 use super::sync_doc::SyncHandle;
 use super::{MachineStore, NoteStore};
 
-/// Fields `notes.json` carried before this task, read independently of
-/// `Note`'s own (now narrower) shape so a legacy file's window state can be
-/// lifted into `machine.json` without losing anything. `Note` has no
-/// `deny_unknown_fields`, so its own parse just ignores these keys; this is
-/// the parse that catches them on the way past.
+/// Window-state fields a legacy `notes.json` carries. Parsed separately from `Note`
+/// (which ignores these keys) so the migration can lift them into `machine.json`.
 #[derive(Deserialize)]
 struct LegacyWindowFields {
     id: String,
@@ -36,8 +29,7 @@ struct LegacyNotesFile {
 }
 
 impl NoteStore {
-    /// The pre-document load path, now used only to seed a fresh document
-    /// from a `notes.json` written before this task.
+    /// Seed a fresh document from a pre-document `notes.json`.
     pub(super) fn seed_from_json(
         path: PathBuf,
         machine: MachineStore,
@@ -73,12 +65,8 @@ impl NoteStore {
                 return store;
             }
         };
-        // `shape_upgraded` is independent of whether `migrate_legacy_attachments`
-        // below finds anything it can actually adopt: a note whose attachment
-        // file is missing gets the shape upgrade but no hash, so without this
-        // the store would never dirty and `notes.json` would carry the old
-        // `path`-only shape forever, which `task_eval`'s own strict,
-        // non-upgrading parse of the same file cannot read.
+        // Independent of whether any bytes were adoptable: a missing file still gets
+        // the shape upgrade, and without the flag the old shape would linger on disk.
         let (upgraded, shape_upgraded) = Self::upgrade_legacy_attachment_shape(&contents);
         match serde_json::from_str::<NoteStore>(&upgraded) {
             Ok(mut store) => {
@@ -95,8 +83,7 @@ impl NoteStore {
                 store
             }
             Err(e) => {
-                // Same reasoning as history.rs: don't start empty, or the next
-                // write destroys the user's notes for good.
+                // Never start empty on corrupt input, or the next write destroys the notes.
                 let backup = path.with_extension("json.corrupt");
                 let message = format!(
                     "Notes at {} are not valid JSON ({e}); preserved as {}",
@@ -112,20 +99,9 @@ impl NoteStore {
         }
     }
 
-    /// Lift `pos`/`size`/`open` off a `notes.json` written before this task,
-    /// into `machine.json`. A no-op once every note in the file has been
-    /// migrated once (`MachineStore::migrate_legacy` will not overwrite an
-    /// existing entry), and a no-op forever after the first save, since
-    /// `Note` stops serializing these fields at all.
-    ///
-    /// Sets `self.dirty` when anything was actually lifted, so the next flush
-    /// rewrites `notes.json` without the stale keys. Leaving them on disk
-    /// looked harmless locally (an unrelated edit would eventually flush them
-    /// away), but once `notes.json` syncs (Task 10), a legacy file that never
-    /// gets a content edit before it reaches a second machine would carry its
-    /// `pos`/`size`/`open` there and let that machine's own migration import
-    /// the first machine's geometry and open set. Machine-local state leaking
-    /// through the synced file is exactly what this task exists to prevent.
+    /// Lift `pos`/`size`/`open` into `machine.json`. Dirties the store when anything
+    /// moves, so the next flush rewrites `notes.json` without the stale keys — a
+    /// synced mirror must never carry one machine's geometry to another.
     fn migrate_legacy_window_state(&mut self, contents: &str) {
         let Ok(legacy) = serde_json::from_str::<LegacyNotesFile>(contents) else {
             return;
@@ -137,28 +113,11 @@ impl NoteStore {
         }
     }
 
-    /// Rewrite any legacy, path-shaped attachment object in `contents` into
-    /// the current `{filename, location}` shape, as a JSON transform rather
-    /// than a Rust-level one.
-    ///
-    /// `Attachment`'s own `Deserialize` only ever accepts the current shape:
-    /// it has no reason to know about the old one, and giving it one would
-    /// mean carrying that knowledge in `model.rs` forever. Without this
-    /// upgrade step, a `notes.json` written before this task would fail
-    /// `Note`'s parse, which fails `NoteStore`'s parse, and the whole file
-    /// would be quarantined as corrupt: the exact loss `load_from`'s error
-    /// path exists to prevent, on every install that predates this task.
-    ///
-    /// A no-op on a file that is already current: every attachment it walks
-    /// already carries `location`, so nothing is rewritten. Falls back to
-    /// `contents` unchanged if it is not even valid JSON, leaving the
-    /// subsequent strict parse to fail exactly as it always has.
-    ///
-    /// Returns whether anything was actually rewritten, alongside the text to
-    /// parse. Re-serializing through `serde_json::Value` changes formatting
-    /// even when the data is identical (compact rather than the pretty-print
-    /// `save()` writes), so that can never be read off a plain string
-    /// comparison against `contents`; this flag is the only honest signal.
+    /// Rewrite legacy path-shaped attachments into the `{filename, location}` shape as
+    /// a JSON transform, so `Attachment`'s `Deserialize` never learns the old shape.
+    /// Without it, any pre-migration file would fail the strict parse and be quarantined.
+    /// Returns the text to parse plus whether anything changed (re-serialization alone
+    /// changes formatting, so the flag cannot be read off a string comparison).
     fn upgrade_legacy_attachment_shape(contents: &str) -> (String, bool) {
         let Ok(mut value) = serde_json::from_str::<serde_json::Value>(contents) else {
             return (contents.to_string(), false);
@@ -184,8 +143,7 @@ impl NoteStore {
         }
     }
 
-    /// Rewrites one attachment object in place if it is in the legacy shape.
-    /// Returns whether it changed anything.
+    /// Rewrite one attachment object in place if legacy. Returns whether it changed.
     fn upgrade_one_attachment(attachment: &mut serde_json::Value) -> bool {
         let Some(obj) = attachment.as_object_mut() else { return false };
         let kind = obj.get("kind").and_then(|k| k.as_str()).map(str::to_string);

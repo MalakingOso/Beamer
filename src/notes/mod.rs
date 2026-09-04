@@ -1,17 +1,7 @@
-//! Sticky note storage.
-//!
-//! The `Vec<Note>` here is the in-memory source of truth. What it persists to
-//! is an automerge document shared with `TaskStore`, at
-//! `<config_dir>/sync/notes.automerge`, so two machines editing offline merge
-//! instead of one overwriting the other. `notes.json` survives as a derived
-//! export, written but never read; `task_eval` and a curious pair of eyes are
-//! its readers. See `sync_doc` for the document, `flush` for the one place it
-//! is written, and `legacy` for the one-time seed off the old JSON-only store.
-//!
-//! Writes are debounced rather than per-change (notes are edited per
-//! keystroke, and history's rewrite-everything-on-append would be pathological
-//! here), and there is no entry cap: notes are authored content, so they are
-//! archived rather than evicted.
+//! Sticky note storage. The `Vec<Note>` is the in-memory source of truth,
+//! persisted to an automerge document shared with `TaskStore`; `notes.json` is
+//! a derived export, written but never read. Writes are debounced; notes are
+//! archived rather than evicted, so there is no entry cap.
 
 use anyhow::Result;
 use chrono::Local;
@@ -30,8 +20,7 @@ pub mod edit;
 pub mod flush;
 pub mod ics;
 mod legacy;
-/// Public so `StageOutcome` is nameable from the model-pass callers; a private
-/// module would make it a private-in-public return type.
+/// Public so `StageOutcome` is nameable from the model-pass callers.
 pub mod lifecycle;
 mod machine;
 mod model;
@@ -44,28 +33,18 @@ pub use flush::flush_stores;
 pub use machine::MachineStore;
 pub use model::{Attachment, Location, Note, NoteColor, NoteOrigin, StageState};
 
-/// `<config_dir>/sync`, the root of everything that syncs between machines.
-///
-/// Takes `config_dir` explicitly rather than calling `Config::config_dir()`
-/// itself, so it stays a pure function: a test can point it at a temp
-/// directory instead of the user's real `~/.config/Beamer`. Tasks 9-11 build
-/// the rest of `sync/` on top of this.
+/// `<config_dir>/sync`, the root of everything that syncs. Takes `config_dir`
+/// explicitly so tests can point it at a temp directory.
 pub fn sync_dir(config_dir: &Path) -> PathBuf {
     config_dir.join("sync")
 }
 
-/// Where Beamer keeps its own, content-addressed copy of attachment bytes.
-/// See `model::Attachment`'s doc comment for why a note owns this copy
-/// instead of pointing at wherever the user's original file happens to sit.
+/// Where Beamer keeps its own content-addressed copy of attachment bytes.
 pub fn attachments_dir(config_dir: &Path) -> PathBuf {
     sync_dir(config_dir).join("attachments")
 }
 
-/// The automerge document holding both the note and task corpus.
-///
-/// One file, two roots. Tasks 10 and 11 share and sync exactly this path, so
-/// splitting tasks into a second document would give them a second stream to
-/// carry for no gain in merge behaviour.
+/// The automerge document holding both the note and task corpus. One file, two roots.
 pub fn notes_document_path(config_dir: &Path) -> PathBuf {
     sync_dir(config_dir).join("notes.automerge")
 }
@@ -77,47 +56,29 @@ pub struct NoteStore {
     pub(crate) path: PathBuf,
     #[serde(skip)]
     pub(crate) dirty: bool,
-    /// Window geometry and openness, keyed by note id. Never synced. See
-    /// `machine::MachineStore`'s module doc for why it lives apart from
-    /// `Note`. Skipped here too: `machine.json` is its own file, written
-    /// through its own atomic save.
+    /// Window geometry and openness, keyed by note id. Never synced; `machine.json`
+    /// is its own file with its own atomic save.
     #[serde(skip)]
     machine: MachineStore,
-    /// Where this store's own copies of attachment bytes live. Injectable
-    /// like `path` and `machine`'s path, so tests point it at a temp
-    /// directory rather than the user's real `~/.config/Beamer/sync`.
+    /// Injectable like `path`, so tests use a temp directory.
     #[serde(skip)]
     pub(crate) attachments_dir: PathBuf,
     /// The automerge document, shared with `TaskStore`. See `sync_doc`.
     #[serde(skip)]
     pub(crate) doc: SyncHandle,
-    /// An edit that has reached `notes.json` but not yet the document.
-    ///
-    /// `flush_if_dirty` clears `dirty` the moment it writes the JSON mirror,
-    /// including at the call sites that flush inline. Without a second flag
-    /// the 500 ms tick would see a clean store and the document would never
-    /// catch up.
+    /// An edit that reached `notes.json` but not yet the document. Without a second
+    /// flag the tick would see a clean store and the document would never catch up.
     #[serde(skip)]
     pub(crate) doc_dirty: bool,
-    /// Why the corpus failed to load, if it did. `App()` pushes this into the
-    /// status log on the first render. A corrupt store replaced by an empty
-    /// one, with nothing said, is the failure this exists to stop.
+    /// Why the corpus failed to load, if it did. Surfaced in the status log on first render.
     #[serde(skip)]
     pub load_error: Option<String>,
-    /// Document entries that could not be read back into a `Note`. Kept so
-    /// the next reconcile does not prune them and `machine.gc` does not wipe
-    /// their window state. See `doc_notes::Hydrated`.
+    /// Document entries that could not be read back into a `Note`. Kept so the next
+    /// reconcile does not prune them and `machine.gc` does not wipe their window state.
     #[serde(skip)]
     pub(crate) unreadable_notes: Vec<String>,
-    /// Whether this machine has a sync server configured, i.e. whether
-    /// `config.sync.url` is non-empty. Defaults to `false`, the same
-    /// empty-means-off value `SyncConfig::url` itself defaults to; set once,
-    /// at startup, from `sync_client::use_sync_client`.
-    ///
-    /// `edit::release_attachment_bytes` reads this to decide whether it is
-    /// still safe to delete an attachment's local bytes once nothing in this
-    /// store references them any more. See that function's doc comment for
-    /// why the answer changes once a second machine is in the picture.
+    /// Whether a sync server is configured (set once at startup). Gates whether
+    /// `release_attachment_bytes` may delete unreferenced local bytes.
     #[serde(skip)]
     pub(crate) sync_enabled: bool,
 }
@@ -139,33 +100,16 @@ impl Default for NoteStore {
     }
 }
 
-/// Monotonic within a process run, so two notes created in the same
-/// millisecond still get distinct ids without pulling in a uuid dependency.
-///
-/// `pub(crate)` so attachment and task ids come from the same scheme.
-/// Dropping three files at once, or extracting several tasks from one note,
-/// must not give two of them the same id, which a timestamp alone would.
-///
-/// Note ids are minted by `next_note_id` instead, not this function. See its
-/// doc comment for why they need a machine component and this scheme does not.
+/// Monotonic within a process run, so same-millisecond ids stay distinct without a
+/// uuid dependency. Shared by attachment and task ids; note ids use `next_note_id`.
 pub(crate) fn next_id() -> String {
     let (millis, n) = raw_id_parts();
     format!("{millis:x}-{n:04x}")
 }
 
-/// Same counter as `next_id`, plus a per-install suffix.
-///
-/// `Task.note_id` is a foreign key into the note id namespace. Two machines
-/// creating their first note in the same millisecond both produce
-/// `…-0000` under the plain scheme above, and a sync merge would then have
-/// two machines' unrelated notes sharing one id, silently reparenting one
-/// machine's tasks onto the other's note. The suffix is `machine`, this
-/// install's `MachineStore::machine_id`, so that collision cannot happen
-/// even at the same millisecond and the same counter value.
-///
-/// Sharing `raw_id_parts`' counter with `next_id` is deliberate, for the same
-/// reason `next_id`'s doc comment gives for attachments: two notes created in
-/// the same millisecond must not draw the same counter value either.
+/// Same counter as `next_id`, plus a per-install suffix. Without it, two machines
+/// creating a note in the same millisecond would mint the same id, and a sync merge
+/// would silently reparent one machine's tasks onto the other's note.
 pub(crate) fn next_note_id(machine: &str) -> String {
     let (millis, n) = raw_id_parts();
     format_note_id(millis, n, machine)
@@ -208,59 +152,33 @@ impl NoteStore {
         )
     }
 
-    /// The shared document handle, so `TaskStore` can hold the other half of
-    /// the same corpus.
+    /// The shared document handle, so `TaskStore` can hold the other half of the same corpus.
     pub fn sync_doc(&self) -> SyncHandle {
         self.doc.clone()
     }
 
-    /// Record whether a sync server is configured for this machine. Called
-    /// once, at startup, from `sync_client::use_sync_client`, using the same
-    /// `should_start` check that decides whether the sync client itself
-    /// connects.
-    ///
-    /// This is the one thing `edit::release_attachment_bytes` needs to know
-    /// to decide whether deleting an attachment's local bytes is still safe.
-    /// See its doc comment.
+    /// Record whether a sync server is configured. Called once at startup.
     pub fn set_sync_enabled(&mut self, enabled: bool) {
         self.sync_enabled = enabled;
     }
 
-    /// Whether anything is waiting on either the JSON mirror or the document.
-    ///
-    /// The tick reads this rather than `is_dirty`: an inline `flush_if_dirty`
-    /// clears `dirty` as soon as the mirror lands, and the document write is
-    /// still outstanding at that point.
+    /// Whether anything is waiting on the JSON mirror or the document.
     pub fn needs_flush(&self) -> bool {
         self.is_dirty() || self.doc_dirty
     }
 
-    /// Whether the document file has been written since we last wrote it,
-    /// which is how a copy synced in from another machine gets noticed. A
-    /// stat, cheap enough for the 500 ms tick.
+    /// Whether the document file changed since our last write (how a synced-in copy is noticed).
     pub fn doc_file_moved(&self) -> bool {
         self.doc.lock().file_moved()
     }
 
-    /// Whether the document is there but unreadable, so nothing derived from
-    /// it may be written. See `sync_doc::SyncDoc::read_only`.
+    /// Whether the document is unreadable, so nothing derived from it may be written.
     pub fn document_read_only(&self) -> bool {
         self.doc.lock().is_read_only()
     }
 
-    /// The real logic behind `load()`, taking all four paths explicitly so
-    /// it is testable without reaching into the user's real config dir, the
-    /// same improvement `TaskStore::load_from` made over the equivalent code
-    /// here before it existed.
-    ///
-    /// GC only runs in the `Ok` branch below, deliberately. A missing,
-    /// unreadable or quarantined `notes.json` tells us nothing about which
-    /// notes exist; it is a read failure, not proof of absence. GCing on any
-    /// of those would permanently wipe `machine.json` on a transient error, a
-    /// risk that stops being theoretical once a sync writer can be
-    /// mid-replace of `notes.json` when this reads it. A genuine fresh
-    /// install pays nothing for the restriction: its `machine.json` is
-    /// already empty.
+    /// Paths taken explicitly so tests avoid the real config dir. GC runs only on a
+    /// successful read: a missing/unreadable file is not proof any note is gone.
     fn load_from(
         path: PathBuf,
         machine_path: PathBuf,
@@ -269,17 +187,11 @@ impl NoteStore {
     ) -> Self {
         let machine = MachineStore::load_from(machine_path);
         let (mut doc, load_error) = SyncDoc::open(doc_path);
-        // `vocabulary.txt` sits beside `notes.json` in the config directory,
-        // so deriving it from `path` rather than calling `Config::config_dir()`
-        // keeps every test rooted in its own temp directory instead of the
-        // real vocabulary. This is the only caller that opts a document in;
-        // `sync_server` has no vocabulary and leaves it `None`.
+        // Derived from `path` so tests stay in their temp dir. Only caller that opts in.
         if let Some(dir) = path.parent() {
             doc.set_vocab_path(dir.join("vocabulary.txt"));
         }
-        // A document already on disk is the corpus. `notes.json` is a derived
-        // export from that point on, never read again, so a stale or
-        // hand-edited mirror cannot resurrect anything.
+        // A document on disk is the corpus; `notes.json` is never read again after that.
         let from_document = doc.existed();
         let handle = SyncHandle::new(doc);
 
@@ -305,13 +217,8 @@ impl NoteStore {
                 sync_enabled: false,
             };
             store.migrate_legacy_attachments();
-            // An entry we could not read is a read failure, not proof the
-            // note is gone, so its window state is spared along with its key.
-            //
-            // Skipped outright when the document could not be read at all:
-            // the store came up empty, so every id would look gone and the GC
-            // would wipe `machine.json` on the strength of a file we never
-            // managed to open.
+            // Unreadable entries are read failures, not deletions: spare their window
+            // state. Skipped entirely when the document could not be read at all.
             if !store.document_read_only() {
                 let valid: std::collections::HashSet<&str> = store
                     .notes
@@ -325,25 +232,15 @@ impl NoteStore {
         }
 
         let mut store = Self::seed_from_json(path, machine, attachments_dir, handle);
-        // Seeding happens at most once per install. A second machine gets the
-        // document through sync, never by seeding its own copy of the JSON:
-        // two independent seeds mint different automerge object ids for the
-        // same notes, and those do not merge character by character, they
-        // conflict whole.
+        // Seeding happens at most once per install; a second machine gets the
+        // document through sync, never by seeding its own copy.
         store.doc_dirty = true;
         store.load_error = load_error.or_else(|| store.load_error.take());
         store
     }
 
-    /// Persist the store, replacing the file atomically.
-    ///
-    /// Writes to a sibling temp file and renames over the target, so a crash
-    /// mid-write leaves the previous notes intact rather than a half-written
-    /// file that `load()` would then quarantine.
-    ///
-    /// The directory created is `self.path`'s parent, not `Config::config_dir()`
-    /// as in `history.rs` — the two are the same in production, but the tests
-    /// point `path` at a temp dir and must not reach into the real config dir.
+    /// Persist atomically via a sibling temp file + rename, so a crash mid-write
+    /// leaves the previous file intact rather than a half-written one.
     pub fn save(&self) -> Result<()> {
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir)?;
@@ -359,32 +256,20 @@ impl NoteStore {
         Ok(())
     }
 
-    /// Write only if something changed since the last flush. Driven by a
-    /// ~500ms interval task so per-keystroke edits coalesce into one write.
-    ///
-    /// Covers both files. `notes.json` and `machine.json` fail independently:
-    /// if one write errors, its store stays dirty for the next tick to retry
-    /// while the other still lands.
+    /// Write only if something changed (driven by a ~500ms tick so keystrokes
+    /// coalesce). The two files fail independently: one error retries next tick.
     pub fn flush_if_dirty(&mut self) -> bool {
         if self.document_read_only() {
-            // The document is the corpus and we could not read it, so this
-            // store came up empty. Writing `notes.json` from it would destroy
-            // the second copy as surely as saving the document would have
-            // destroyed the first. The flags are cleared rather than left
-            // standing, or the tick would ask again twice a second forever.
-            //
-            // `machine.json` is unrelated to the document and still flushes:
-            // window geometry is machine-local and additive.
+            // This store came up empty; writing `notes.json` from it would destroy
+            // the only other copy. Flags are cleared so the tick does not retry forever.
+            // `machine.json` still flushes: window geometry is machine-local and additive.
             self.dirty = false;
             self.doc_dirty = false;
             return self.machine.flush_if_dirty();
         }
         let mut wrote = false;
         if self.dirty {
-            // The document write belongs to the 500 ms tick, which is the one
-            // place both stores have reconciled before a merge can land. All
-            // this call can do is remember that the document still owes a
-            // write.
+            // The document write itself belongs to the tick (see `flush`); just mark it owed.
             self.doc_dirty = true;
             match self.save() {
                 Ok(()) => {
@@ -400,15 +285,12 @@ impl NoteStore {
         wrote
     }
 
-    /// Whether either store has an edit pending a write. Read before taking a
-    /// `write()` lock on the signal so an idle tick does not notify every
-    /// subscriber.
+    /// Whether either store has an edit pending a write.
     pub fn is_dirty(&self) -> bool {
         self.dirty || self.machine.is_dirty()
     }
 
-    /// `origin` is passed explicitly rather than defaulted: it is corpus
-    /// provenance, and a silent default is exactly what corrupts a corpus.
+    /// `origin` is explicit: a silent default would corrupt corpus provenance.
     pub fn create(&mut self, raw: String, color: NoteColor, origin: NoteOrigin) -> String {
         let now = Local::now().to_rfc3339();
         let id = next_note_id(&self.machine.machine_id);
@@ -434,34 +316,22 @@ impl NoteStore {
         self.notes.iter().find(|n| n.id == id)
     }
 
-    /// Where this note's window last sat, in logical coordinates. Machine-
-    /// local, see `machine::MachineStore`.
-    ///
-    /// No production caller yet, matching `Note::pos`'s status before this
-    /// task. Nothing captures a window's actual position on Linux, and
-    /// nothing should (see `set_pos`). Kept, and given a `NoteStore` method
-    /// alongside `MachineStore`'s, because it is part of the persisted schema
-    /// and `with_position` is honoured natively on Windows. A future
-    /// placement feature reads it from here.
+    /// Machine-local; no production caller yet. Kept because it is part of the
+    /// persisted schema and honoured natively on Windows.
     #[allow(dead_code)]
     pub fn pos(&self, id: &str) -> Option<(i32, i32)> {
         self.machine.pos(id)
     }
 
-    /// This note's window size, in logical pixels. Machine-local.
     pub fn size(&self, id: &str) -> Option<(u32, u32)> {
         self.machine.size(id)
     }
 
-    /// Whether this note's window is showing. Machine-local.
     pub fn is_open(&self, id: &str) -> bool {
         self.machine.is_open(id)
     }
 
-    /// Record where this note's window last sat. A machine write like
-    /// `set_size`: does not bump `modified`, does not dirty `notes.json`.
-    ///
-    /// No production caller yet. See `pos`'s doc comment.
+    /// Machine write: does not bump `modified`. No production caller yet; see `pos`.
     #[allow(dead_code)]
     pub fn set_pos(&mut self, id: &str, pos: (i32, i32)) {
         if self.get(id).is_none() {
@@ -491,14 +361,8 @@ impl NoteStore {
         }
     }
 
-    /// Record whether a note's window is showing.
-    ///
-    /// Machine-local and does **not** call `touch()`. It used to. Bumping
-    /// `modified` here is what made `open` dangerous under any last-write-
-    /// wins sync merge. Closing a sticky on one machine would make that note
-    /// look newer than a real edit made on another and win a merge it had no
-    /// business winning. `MachineStore::set_open` still no-ops when the value
-    /// is unchanged, so a redundant call from an event handler costs nothing.
+    /// Machine-local; does **not** call `touch()`. Bumping `modified` here let a
+    /// window close win a sync merge over a real edit on another machine.
     pub fn set_open(&mut self, id: &str, open: bool) {
         if self.get(id).is_none() {
             return;
@@ -513,11 +377,7 @@ impl NoteStore {
         self.machine.set_open(id, false);
     }
 
-    /// Return an archived note to the active list.
-    ///
-    /// Leaves `open` alone. Restoring puts a note back on the board; popping a
-    /// window open on top of that would be a second, unasked-for action, and
-    /// clicking the card is already how you get the window back.
+    /// Return an archived note to the active list. Leaves `open` alone.
     pub fn restore(&mut self, id: &str) {
         if self.get(id).is_none_or(|n| !n.archived) {
             return;
@@ -528,26 +388,17 @@ impl NoteStore {
         }
     }
 
-    /// Non-archived notes, newest first.
     pub fn active(&self) -> Vec<&Note> {
         Self::newest_first(self.notes.iter().filter(|n| !n.archived).collect())
     }
 
-    /// Archived notes, newest first.
     pub fn archived(&self) -> Vec<&Note> {
         Self::newest_first(self.notes.iter().filter(|n| n.archived).collect())
     }
 
-    /// Active notes matching `query`, newest first. An empty query matches all.
-    ///
-    /// Searches `raw` as well as `body`. A cleanup pass rewrites `body` and can
-    /// remove the very words that were spoken, so searching only the display
-    /// text would fail to find a note by something you actually said — which is
-    /// the most natural thing to search for.
-    ///
-    /// `body` is matched through `blocks::plain_text`, so a note's own
-    /// attachment tokens are not searchable text. Without that, every note
-    /// holding an image would match the query "beamer".
+    /// Active notes matching `query`, newest first. Searches `raw` too (cleanup can
+    /// rewrite away spoken words) and matches `body` through `blocks::plain_text`
+    /// so attachment tokens are not searchable text.
     pub fn search(&self, query: &str) -> Vec<&Note> {
         let needle = query.trim().to_lowercase();
         if needle.is_empty() {

@@ -5,34 +5,16 @@ use tokio::sync::mpsc;
 
 use super::{try_send_reserving, warn_channel_full, SendOutcome};
 
-/// Bounded capacity for the raw-sample channel from the cpal callback.
-///
-/// cpal's `BufferSize::Default` hands buffer-size (and therefore callback
-/// cadence) selection to the host audio API. Measured/typical callback
-/// periods across WASAPI (Windows), CoreAudio (macOS) and PulseAudio/
-/// PipeWire (Linux) commonly fall in the 5-20ms range depending on the
-/// device and host. We size the channel for the fastest realistic cadence
-/// (5ms per callback -> 200 callbacks/sec) so it holds >=60s of audio even
-/// on the device with the shortest observed callback period; on a device
-/// with a longer period this buffers correspondingly *more* than 60s of
-/// audio, which is still bounded and therefore fine.
-///
-///   60s * (1000ms/s / 5ms per callback) = 60 * 200 = 12_000
+/// Raw-sample channel capacity, sized for the fastest realistic callback cadence
+/// (5ms per callback → 200/sec) so it holds >= 60s of audio: 60 * 200 = 12_000.
 pub(crate) const SAMPLE_CHANNEL_CAPACITY: usize = 12_000;
 
-/// Slots permanently withheld from ordinary sample data so the rare
-/// device-error sentinel (an empty `Vec` sent from the cpal error callback)
-/// always has room to `try_send`, even when a stalled consumer has let the
-/// data path saturate the rest of the channel. Device errors are
-/// exceedingly rare (not per-callback), so a small reserve is ample. Note
-/// that the sentinel is currently just skipped by its consumer once
-/// delivered (see the error-callback comment below) — the reserve still
-/// matters because it's what guarantees delivery isn't lost to backpressure.
+/// Slots withheld from sample data so the rare device-error sentinel (empty
+/// `Vec` from the cpal error callback) always has room to `try_send`.
 const SENTINEL_RESERVE: usize = 4;
 
-/// Wraps cpal device setup and provides a mono 16 kHz f32 sample stream.
-/// Resamples from the device's native rate when it differs from 16 kHz, and
-/// converts from the device's native sample format when it isn't `f32`.
+/// cpal device setup producing a mono 16 kHz f32 sample stream, resampling and
+/// downmixing from the device's native rate/channels when they differ.
 pub struct AudioCapture {
     device: Device,
     config: StreamConfig,
@@ -54,7 +36,7 @@ impl AudioCapture {
             supported.sample_format()
         );
 
-        // 16 kHz mono — the format both ElevenLabs and Voxtral expect
+        // 16 kHz mono — the format the transcription backends expect.
         let config = StreamConfig {
             channels: 1,
             sample_rate: SampleRate(16000),
@@ -69,11 +51,9 @@ impl AudioCapture {
     pub fn start(&self) -> Result<(Stream, mpsc::Receiver<Vec<f32>>)> {
         let (tx, rx) = mpsc::channel::<Vec<f32>>(SAMPLE_CHANNEL_CAPACITY);
 
-        // One query, used for rate, channel count AND sample format — the
-        // format used to be read for the log line and then ignored, with the
-        // stream hard-coded to `f32`. Devices that only offer integer formats
-        // (common for USB interfaces, and for ALSA hw: devices on Linux) then
-        // failed stream construction with an opaque backend error.
+        // One query drives rate, channel count AND sample format: integer-only
+        // devices (common for USB interfaces) fail stream construction if the
+        // format is assumed to be `f32`.
         let supported = self.device.default_input_config()?;
         let native_rate = supported.sample_rate().0;
         let native_channels = supported.channels() as usize;
@@ -82,8 +62,7 @@ impl AudioCapture {
         let config = if native_rate == 16000 && native_channels == 1 {
             self.config.clone()
         } else {
-            // Device can't capture at 16 kHz directly — capture at native
-            // rate/channels and resample + downmix in the callback
+            // Capture at native rate/channels; resample + downmix in the callback.
             StreamConfig {
                 channels: native_channels as u16,
                 sample_rate: SampleRate(native_rate),
@@ -115,8 +94,7 @@ impl AudioCapture {
         Ok((stream, rx))
     }
 
-    /// Build the input stream for one concrete device sample type `T`,
-    /// converting to `f32` in the callback via cpal's `Sample` trait.
+    /// Build the input stream for one concrete device sample type `T`.
     fn build_stream<T>(
         &self,
         config: &StreamConfig,
@@ -149,8 +127,7 @@ impl AudioCapture {
         let stream = self.device.build_input_stream(
             config,
             move |data: &[T], _info: &cpal::InputCallbackInfo| {
-                // Normalize to f32 in [-1.0, 1.0]. For T = f32 this is the
-                // identity conversion and optimizes out.
+                // Normalize to f32 in [-1.0, 1.0] (identity for T = f32).
                 float_buf.clear();
                 float_buf.extend(data.iter().map(|s| s.to_sample::<f32>()));
 
@@ -174,16 +151,9 @@ impl AudioCapture {
                     samples
                 };
 
-                // Never blocks/spins: `try_send_reserving` is a `try_send`
-                // gated on cheap atomic capacity()/is_closed() reads. On a
-                // stalled consumer this drops the chunk instead of growing
-                // memory without bound, and leaves `SENTINEL_RESERVE` slots
-                // untouched so the error-callback sentinel below can never
-                // be starved out by ordinary audio data. A `Closed` result
-                // (consumer torn down — normal teardown) is dropped
-                // silently, matching pre-branch behavior; only a genuinely
-                // `Full` channel (consumer alive but stalled) is worth
-                // warning about.
+                // Never blocks: drops the chunk on a stalled consumer instead of
+                // growing memory, and leaves `SENTINEL_RESERVE` slots untouched
+                // for the error-callback sentinel below.
                 match try_send_reserving(&tx, SENTINEL_RESERVE, out.to_vec()) {
                     SendOutcome::Sent => {}
                     SendOutcome::Full => warn_channel_full(&mut dropped_chunks, "Audio sample"),
@@ -192,26 +162,10 @@ impl AudioCapture {
             },
             move |err| {
                 tracing::error!("Audio capture error: {}", err);
-                // Sentinel convention: an empty Vec is delivered to the
-                // consumer to mark that a capture error occurred. The only
-                // consumer today (`AudioPipeline::start`'s chunker thread in
-                // `src/audio/mod.rs`) currently just skips empty batches
-                // (`if samples.is_empty() { continue; }`) without acting on
-                // the error — this delivery preserves pre-branch behavior
-                // (silent drop-and-continue) rather than being unused
-                // plumbing; a future consumer could still read it as an
-                // explicit error signal instead of a plain empty batch.
-                // `SENTINEL_RESERVE` slots are never
-                // touched by the data-callback path above, so this
-                // `try_send` should always succeed while a consumer is
-                // still attached. If it fails with `Full`, something has
-                // gone very wrong (e.g. concurrent error callbacks racing
-                // each other for reserved slots) — that's rare and
-                // important enough to always log, not rate-limit. A
-                // `Closed` failure just means the consumer already tore
-                // down (e.g. the recording session ended moments ago) —
-                // nobody is left to notify, so it's dropped silently rather
-                // than logged as an error.
+                // Empty Vec marks a capture error. The consumer skips empty
+                // batches; reserved slots keep this deliverable. `Full` here
+                // is unexpected enough to always log; `Closed` means the
+                // consumer already tore down, so drop silently.
                 match err_tx.try_send(Vec::new()) {
                     Ok(()) => {}
                     Err(mpsc::error::TrySendError::Full(_)) => {
@@ -235,9 +189,8 @@ struct ResampleState {
     last_sample: f32,
 }
 
-/// Linear interpolation resampler. Lower quality than polyphase/sinc but
-/// sufficient for speech audio and adds negligible latency per buffer.
-/// State is persisted across callbacks to avoid discontinuities at buffer edges.
+/// Linear interpolation resampler, sufficient for speech. State persists across
+/// callbacks to avoid discontinuities at buffer edges.
 fn resample_linear(
     input: &[f32],
     ratio: f64,
@@ -267,16 +220,9 @@ mod tests {
         }
     }
 
-    /// At 48000Hz -> 16000Hz the ratio is exactly 1/3, so the accumulator
-    /// crosses 1.0 with a ~0 fractional remainder every time (the overshoot
-    /// after subtracting 1.0 is exactly 0.0 in f64). With overshoot == 0,
-    /// the correctly-weighted interpolation (overshoot / ratio) is also
-    /// exactly 0, so the output correctly picks the current sample with no
-    /// blending — the sample boundary lands exactly on an input sample, so
-    /// there is nothing to interpolate between. This is the correct result
-    /// for this integer-ratio edge case, not a bug: it pins the same values
-    /// as before the /ratio fix (verified by hand-walking the accumulator:
-    /// 1/3, 2/3, 1.0→0 remainder, repeating exactly every 3 input samples).
+    /// At 48000 → 16000 the ratio is exactly 1/3, so each output lands exactly
+    /// on an input sample with nothing to blend — picking it unblended is
+    /// correct here, not a bug.
     #[test]
     fn resample_48k_to_16k_exact_ratio_picks_current_sample() {
         let ratio = 16000.0 / 48000.0;
@@ -289,13 +235,7 @@ mod tests {
         assert_eq!(output, vec![2.0, 5.0, 8.0]);
     }
 
-    /// 44100Hz -> 16000Hz golden vector, captured from the function's actual
-    /// output after the /ratio interpolation-weight fix (methodology: ran
-    /// this test with a placeholder expectation, printed the real output,
-    /// then pasted it back in as the pinned golden value). Each output was
-    /// independently spot-checked by hand as a properly weighted blend of
-    /// its two adjacent input samples (`last_sample * t + sample * (1 - t)`
-    /// for the accumulator's fractional position `t` at that crossing).
+    /// 44100 → 16000 golden vector pinning the interpolation weights.
     #[test]
     fn resample_44100_to_16000_ramp_golden() {
         let ratio = 16000.0 / 44100.0;
@@ -305,8 +245,6 @@ mod tests {
 
         resample_linear(&input, ratio, &mut state, &mut output);
 
-        // Captured from actual output on 2026-07-18, after the /ratio fix
-        // (see the doc comment above for the capture methodology).
         let expected: Vec<f32> = vec![
             0.0175625, 0.045125, 0.0726875, 0.10025, 0.1278125, 0.155375, 0.1829375,
             0.2105, 0.2380625, 0.265625, 0.2931875, 0.32075, 0.34831253, 0.375875,
@@ -318,9 +256,7 @@ mod tests {
         assert_eq!(output, expected);
     }
 
-    /// State must persist across calls: feeding 100 samples in one call must
-    /// produce the same output as feeding the same 100 samples split across
-    /// two 50-sample calls sharing the same state.
+    /// Split feeds sharing one state must match a single whole feed.
     #[test]
     fn resample_state_continuity_across_calls() {
         let ratio = 16000.0 / 44100.0;

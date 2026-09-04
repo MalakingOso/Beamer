@@ -1,10 +1,6 @@
 //! Mapping between `Vec<Task>` and the `tasks` root of the automerge document.
-//!
-//! Same shape as `doc_notes`: a map keyed by task id, reconciled from the
-//! store's vec and hydrated back after a merge. Task rows are written by the
-//! extraction pass and then decided once by the user, so nothing here is
-//! character-merged; keying by id is what matters, because it means two
-//! machines deciding different rows keep both decisions.
+//! Same shape as `doc_notes`: a map keyed by task id. Rows are decided once,
+//! so nothing is character-merged; keying by id keeps both machines' decisions.
 
 use anyhow::Result;
 use automerge::{AutoCommit, ObjId, ReadDoc};
@@ -17,14 +13,13 @@ use super::sync_doc::{
 };
 use super::task::{Task, TaskKind, TaskStatus};
 
-/// A hydrate's result. See `doc_notes::Hydrated`, which this mirrors.
+/// A hydrate's result: readable tasks plus ids kept so `reconcile` won't prune them.
 pub struct Hydrated {
     pub tasks: Vec<Task>,
     pub unreadable: Vec<String>,
 }
 
-/// Push `tasks` into the document. `unreadable` holds ids that were in the
-/// document but could not be read back; they are kept, not pruned.
+/// Push `tasks` into the document. Unreadable ids are kept, not pruned.
 pub fn reconcile(sync: &mut SyncDoc, tasks: &[Task], unreadable: &[String]) -> Result<()> {
     let root = sync.root_map(TASKS_KEY)?;
     let doc = sync.doc_mut();
@@ -52,11 +47,7 @@ pub fn reconcile(sync: &mut SyncDoc, tasks: &[Task], unreadable: &[String]) -> R
     Ok(())
 }
 
-/// Read the document's tasks back out, oldest first.
-///
-/// `created` then id, the same ordering rule `doc_notes::hydrate` uses and
-/// for the same reason: `tasks.json` is append-only, so this is the order the
-/// file already had.
+/// Read the document's tasks back out, oldest first (`created`, then id).
 pub fn hydrate(sync: &SyncDoc) -> Hydrated {
     let Some(root) = sync.root_map_if_present(TASKS_KEY) else {
         return Hydrated { tasks: Vec::new(), unreadable: Vec::new() };
@@ -91,9 +82,7 @@ fn read_task(doc: &AutoCommit, obj: &ObjId, key: &str) -> Option<Task> {
         note_id: get_str(doc, obj, "note_id")?,
         text: get_str(doc, obj, "text")?,
         evidence: get_str(doc, obj, "evidence").unwrap_or_default(),
-        // Deliberately not clamped. A value outside 0.0-1.0 means the prompt
-        // or the parser misfired, and that anomaly is what the corpus wants
-        // to keep. See `task::Task::confidence`.
+        // Deliberately not clamped: an out-of-range value is a misfire signal the corpus keeps.
         confidence: get_f64(doc, obj, "confidence").unwrap_or_default() as f32,
         status: read_enum::<TaskStatus>(doc, obj, "status"),
         done: get_bool(doc, obj, "done").unwrap_or(false),

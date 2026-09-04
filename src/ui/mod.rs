@@ -32,63 +32,24 @@ use dioxus::desktop::tao::window::Icon;
 use dioxus::desktop::{Config, WindowBuilder, WindowCloseBehaviour};
 use dioxus::prelude::*;
 
-/// Encode `s` as a null-terminated UTF-16 buffer, the form Win32 wide-string
-/// APIs (`PCWSTR`) need.
-///
-/// Split out so it can be unit-tested without a Windows target: it is plain
-/// `char` encoding with no OS call in it, so the terminator-appending logic
-/// is checkable on any host. Gated on `test` as well as `windows`, since its
-/// only non-test caller is windows-only and a plain Linux `cargo check` has
-/// no test harness to keep it alive otherwise.
-///
-/// Does not guard against an embedded NUL in `s`: if one is present,
-/// `PCWSTR` (which reads up to the first zero code unit) truncates there
-/// silently, same as any Win32 wide-string API. A truncated target can only
-/// fail to open or open a shorter path; it cannot make `ShellExecuteW` run
-/// something else, so this is an ordinary correctness limitation rather than
-/// a reopening of the injection risk `open_external` exists to close. Note
-/// content is not expected to carry a NUL.
+/// Null-terminated UTF-16 for Win32 wide-string APIs (`PCWSTR`).
+/// An embedded NUL truncates silently at the first zero code unit, as with any
+/// Win32 wide-string API; note content is not expected to carry one.
 #[cfg(any(target_os = "windows", test))]
 fn to_wide_null(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// Hand a URL or a file path to whatever the desktop has registered for it.
-///
-/// Detached either way, but the two platforms detach differently. On Linux
-/// this is `Command::spawn`: the child process is left to run and its exit
-/// status is never collected, because the opener keeps running for as long
-/// as the browser or calendar does, and a failure to spawn is logged and
-/// nothing else. On Windows there is no child process to leave running:
-/// `ShellExecuteW` runs on a detached OS thread so the caller isn't blocked
-/// on it, but that thread does check the call's own outcome (the `<= 32`
-/// pseudo-handle test below) and logs a failure there, which the Linux path
-/// has no equivalent of. Either way, a failure to open does nothing more
-/// than log: the user clicked a link, and freezing the note over it would be
-/// worse than the link not opening.
-///
-/// Not `webbrowser::open`, even though dioxus-desktop already depends on it:
-/// this also has to open a local `.ics`, which is a file association rather
-/// than a browser concern.
+/// Hand a URL or file path to the desktop's registered handler, detached.
+/// A failure to open only logs. Not `webbrowser::open`: this also opens local
+/// `.ics` files, which are a file association rather than a browser concern.
 pub fn open_external(target: &str) {
     #[cfg(target_os = "windows")]
     {
-        // ShellExecuteW, not `cmd /C start "" <target>`. The old form put the
-        // target through cmd's own parser, which only quotes arguments Rust
-        // decided need it (spaces or quotes). An unescaped `&` still splits
-        // there, so the browser got a truncated URL and cmd ran whatever came
-        // after the `&` as its own command. `target` comes from note content
-        // (a link chip, an `.ics` export), so this is a command-injection
-        // surface reachable from anything a note captured. ShellExecuteW
-        // never touches a shell parser; the whole target travels as one
-        // opaque wide string.
-        //
-        // Runs on a plain OS thread, not `tokio::task::spawn_blocking`: this
-        // function is called synchronously from Dioxus event handlers with no
-        // guarantee the calling thread has an entered tokio context, and a
-        // detached `std::thread::spawn` keeps the same "fire and forget"
-        // character as the `Command::spawn` call it replaces, without
-        // depending on one.
+        // ShellExecuteW, not `cmd /C start`: cmd's parser splits on `&`, and
+        // `target` comes from note content — a command-injection surface.
+        // Plain OS thread, not `spawn_blocking`: event handlers guarantee no
+        // entered tokio context.
         let owned = target.to_owned();
         std::thread::spawn(move || unsafe {
             use windows::core::PCWSTR;
@@ -97,10 +58,8 @@ pub fn open_external(target: &str) {
             use windows::Win32::UI::Shell::ShellExecuteW;
             use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
-            // Shell APIs expect an STA; balance the reference the same way
-            // `injection::uia` does, since `RPC_E_CHANGED_MODE` means this
-            // thread was already initialized in a different apartment and no
-            // reference was actually taken.
+            // Shell APIs expect an STA; `RPC_E_CHANGED_MODE` means no reference
+            // was taken, same balance as `injection::uia`.
             let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
             let we_initialized = hr.is_ok();
 
@@ -113,9 +72,7 @@ pub fn open_external(target: &str) {
                 PCWSTR::null(),
                 SW_SHOWNORMAL,
             );
-            // ShellExecuteW's return is a status pseudo-handle, not a real
-            // HINSTANCE: values above 32 mean success, anything else is an
-            // SE_ERR_* code.
+            // Pseudo-handle, not a real HINSTANCE: > 32 is success, else SE_ERR_*.
             if outcome.0 as usize <= 32 {
                 tracing::warn!("Could not open {:?}: ShellExecuteW returned {}", owned, outcome.0 as usize);
             }
@@ -148,13 +105,8 @@ mod open_external_tests {
 
     #[test]
     fn a_target_containing_an_ampersand_encodes_unmodified() {
-        // Pins the UTF-16 encoding step only: `to_wide_null` does not parse,
-        // escape, or otherwise treat `&` specially, so a target carrying one
-        // comes out as plain code units plus the terminator, same as any
-        // other string. This does not, and cannot, test "never reaches a
-        // shell parser" - that property comes from calling `ShellExecuteW`
-        // instead of `cmd`, which is structural to `open_external` and not
-        // unit-testable on a Linux host.
+        // Encoding step only: `&` gets no special treatment. "Never reaches a
+        // shell parser" is structural (ShellExecuteW, not cmd), not unit-testable here.
         let target = "https://example.com/?a=1&b=2";
         let wide = to_wide_null(target);
         let decoded: Vec<u16> = target.encode_utf16().collect();
@@ -167,37 +119,18 @@ mod open_external_tests {
     }
 }
 
-/// WebView user-data dir must be writable and persistent across launches.
-///
-/// `dirs::data_local_dir()`, not `dirs::data_dir()`. On Windows those two
-/// resolve to different folders (`data_dir` is Roaming `%APPDATA%`,
-/// `data_local_dir` is `%LOCALAPPDATA%`; verified against `dirs-6.0.0`'s
-/// `src/win.rs`), and Roaming is also where `notes.json`, `machine.json`,
-/// `config.toml` and `sync/` live. WebView2's `EBWebView` profile held open
-/// file handles in that same folder for the whole process lifetime, so any
-/// "delete `%APPDATA%\Beamer` to reset" instruction, or a future cleanup
-/// walking the config dir, could hit locked files mid-delete. It is also a
-/// browser cache, and Roaming profiles get copied at logon in managed
-/// environments.
-///
-/// On Linux and macOS this is a no-op: checked against the same crate's
-/// `src/lin.rs` and `src/mac.rs`, `data_dir()` and `data_local_dir()` are the
-/// same function on both platforms (`$XDG_DATA_HOME`/`~/.local/share` on
-/// Linux, `~/Library/Application Support` on macOS), so only Windows users
-/// see a change here.
-///
-/// Existing Windows installs get a fresh WebView2 profile the first time
-/// this ships. That is a cache, so it costs one slower first launch and
-/// nothing else.
+/// WebView user-data dir. `data_local_dir`, not `data_dir`: on Windows the latter
+/// is Roaming `%APPDATA%`, where WebView2's open file handles would collide with
+/// resets/cleanups and roam a browser cache at logon. No-op elsewhere (same dir).
+/// Existing Windows installs get a fresh profile once: one slower first launch.
 pub fn webview_data_dir() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("Beamer")
 }
 
-/// Configure and launch the Dioxus desktop window. This call blocks the main
-/// thread for the lifetime of the application — the tray icon keeps the process
-/// alive even when the window is hidden (`WindowCloseBehaviour::WindowHides`).
+/// Launch the Dioxus desktop window. Blocks the main thread; the tray icon keeps
+/// the process alive while the window is hidden (`WindowHides`).
 pub fn launch_app() {
     let icon_bytes = crate::assets::ICON_PNG;
     let icon_image = image::load_from_memory(icon_bytes)
@@ -215,11 +148,8 @@ pub fn launch_app() {
                 .with_window(
                     WindowBuilder::new()
                         .with_title("Beamer")
-                        // Always start hidden — the splash window owns the
-                        // launch moment. After the splash dismisses, app.rs
-                        // reveals the main window on platforms where it
-                        // would have been visible at launch (everything
-                        // except Windows, which waits for tray-click).
+                        // Start hidden: the splash owns the launch moment (non-Windows
+                        // reveals the main window when the splash dismisses).
                         .with_visible(false)
                         .with_decorations(false)
                         .with_transparent(true)

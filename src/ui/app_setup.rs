@@ -1,8 +1,5 @@
-//! Window/splash/tray/menu wiring hooks for `App`.
-//!
-//! These are Dioxus hooks extracted verbatim out of `app.rs` into standalone
-//! functions — each is called once from within `App()`'s render body, so the
-//! usual "hooks must run in a fixed order every render" rule still holds.
+//! Window/splash/tray/menu wiring hooks for `App`. Each runs once from within
+//! `App()`'s render body, so hooks still run in a fixed order every render.
 
 use dioxus::desktop::tao::dpi::{PhysicalPosition, PhysicalSize};
 #[cfg(target_os = "windows")]
@@ -31,7 +28,7 @@ use crate::warmup::{self, WarmupProgress};
 
 use super::app::Page;
 
-/// Build the tray menu and register the tray icon. Runs once on first render.
+/// Build the tray menu and register the tray icon.
 pub(super) fn setup_tray_menu() -> TrayMenuItems {
     use_hook(|| {
         let (menu, items) = tray::build_tray_menu();
@@ -41,7 +38,6 @@ pub(super) fn setup_tray_menu() -> TrayMenuItems {
     })
 }
 
-/// Center the window on the primary monitor (runs once on first render).
 pub(super) fn setup_window_centering(window: DesktopContext) {
     use_hook({
         let window = window.clone();
@@ -59,10 +55,8 @@ pub(super) fn setup_window_centering(window: DesktopContext) {
     });
 }
 
-/// Cold-start warmup splash. Runs once on first render: opens a small
-/// centered window, walks `warm_all` through keyring/audio/(mpris)/network,
-/// then closes itself. Pays the one-time costs that would otherwise stall
-/// the first recording.
+/// Cold-start warmup splash: pays the one-time costs that would otherwise stall
+/// the first recording, then closes itself and flips `app_ready`.
 pub(super) fn setup_splash(window: DesktopContext, mut app_ready: Signal<bool>) {
     let warmup_progress = use_signal(WarmupProgress::default);
     let mut splash_ctx: Signal<Option<DesktopContext>> = use_signal(|| None);
@@ -114,9 +108,7 @@ pub(super) fn setup_splash(window: DesktopContext, mut app_ready: Signal<bool>) 
                 let started = std::time::Instant::now();
                 warmup::warm_all(warmup_progress).await;
 
-                // The splash bar fills via a CSS keyframe over 1500ms (see
-                // SPLASH_CSS), so the floor must match that duration — otherwise
-                // the splash dismisses while the fill is still animating.
+                // Floor matches the splash bar's 1500ms CSS keyframe (see SPLASH_CSS).
                 let min_visible = std::time::Duration::from_millis(1500);
                 let elapsed = started.elapsed();
                 if elapsed < min_visible {
@@ -128,13 +120,9 @@ pub(super) fn setup_splash(window: DesktopContext, mut app_ready: Signal<bool>) 
                 }
                 splash_ctx.set(None);
 
-                // Sticky notes restored from disk wait on this — the loading
-                // screen going away is the signal, not a fixed delay.
                 app_ready.set(true);
 
-                // Reveal the main window on platforms where it would have
-                // shown at launch. Windows keeps it hidden until tray-click,
-                // matching the original tray-app convention.
+                // Non-Windows reveals the main window here; Windows waits for tray-click.
                 #[cfg(not(target_os = "windows"))]
                 window.set_visible(true);
             });
@@ -142,11 +130,8 @@ pub(super) fn setup_splash(window: DesktopContext, mut app_ready: Signal<bool>) 
     });
 }
 
-// Recording pill window — small, transparent, click-through, always-on-top.
-// Linux: the pill is replaced by an AppIndicator tray-icon swap (see
-// `linux_integration.rs`). GNOME Shell doesn't accept in-tray GTK widgets
-// from standalone apps, and the floating-pill approach has
-// compositor/transparency quirks under Wayland.
+// Recording pill: small, transparent, click-through, always-on-top. Linux uses
+// an AppIndicator tray-icon swap instead (see `linux_integration.rs`).
 #[cfg(not(target_os = "linux"))]
 pub(super) fn setup_recording_pill(
     window: DesktopContext,
@@ -156,10 +141,8 @@ pub(super) fn setup_recording_pill(
 ) {
     let mut pill_ctx: Signal<Option<DesktopContext>> = use_signal(|| None);
     let mut pill_click_through_set: Signal<bool> = use_signal(|| false);
-    // Edge-detects the hidden->visible transition, same as indicator.js's
-    // `wasVisible` check in `show()`: reposition and play the entrance
-    // animation only when the pill was not already up, not on every
-    // recording -> processing state change while it stays on screen.
+    // Edge-detects hidden->visible: reposition only when the pill was not
+    // already up, not on every recording -> processing change.
     let mut pill_was_shown: Signal<bool> = use_signal(|| false);
     let mut pill_size: Signal<(u32, u32)> = use_signal(|| (0, 0));
 
@@ -176,21 +159,15 @@ pub(super) fn setup_recording_pill(
                     .map(|m| m.size())
                     .unwrap_or(PhysicalSize::new(1920, 1080));
 
-                // Sized from PILL_WINDOW_*, which are derived from PILL_CSS's
-                // own box — the arithmetic is on those constants. The window
-                // is deliberately larger than the pill at rest: a webview
-                // clips at its viewport edge, and the pill's bottom border,
-                // its hard-offset shadow and the 20px its entrance animation
-                // starts below its resting place all paint outside a window
-                // sized to the resting box alone.
+                // Window deliberately larger than the resting pill: the border,
+                // shadow and entrance-animation offset paint outside it and the
+                // webview clips at its viewport edge.
                 let pill_w = (PILL_WINDOW_W * scale) as u32;
                 let pill_h = (PILL_WINDOW_H * scale) as u32;
                 pill_size.set((pill_w, pill_h));
                 let x = (monitor_size.width.saturating_sub(pill_w)) / 2;
-                // Placed so the pill's *ink* sits 60px above the monitor's
-                // bottom edge, not the window's empty animation headroom.
-                // Windows overrides this on first show (see
-                // `reposition_to_foreground_monitor`); on macOS it stands.
+                // Pill *ink* 60px above the bottom edge. Windows repositions on
+                // first show (`reposition_to_foreground_monitor`); macOS keeps this.
                 let y = monitor_size
                     .height
                     .saturating_sub(((PILL_INK_BOTTOM + 60.0) * scale) as u32);
@@ -214,14 +191,8 @@ pub(super) fn setup_recording_pill(
                     .with_data_directory(super::webview_data_dir())
                     .with_window(builder)
                     .with_background_color((0, 0, 0, 0))
-                    // DM Mono is inlined from the bundled woff2 rather than
-                    // fetched from fonts.googleapis.com: no outbound request
-                    // from a local dictation app, and the pill renders in the
-                    // right typeface offline. No body-level opacity wrapper
-                    // here any more — `.pill` in PILL_CSS starts hidden
-                    // (opacity:0, scaled/translated down) on its own, and
-                    // `beamerSetState` animates it in/out, so nothing extra
-                    // is needed to hide it before the first state arrives.
+                    // Bundled DM Mono (no Google Fonts request; renders offline).
+                    // `.pill` starts hidden in CSS; `beamerSetState` animates it.
                     .with_custom_head(format!(
                         r#"<style>{}{}</style><script>{}</script>"#,
                         crate::assets::dm_mono_face_css(),
@@ -233,17 +204,9 @@ pub(super) fn setup_recording_pill(
                 let dom = VirtualDom::new(RecordingPill);
                 let ctx: DesktopContext = window.new_window(dom, cfg).await;
 
-                // On Windows, realize the window immediately so
-                // set_ignore_cursor_events works, then hide it again. Nothing
-                // should show until recording actually starts. No DWM system
-                // backdrop here — see the removed `apply_windows_pill_backdrop`
-                // in git history: Acrylic silently falls back to a solid
-                // color over Remote Desktop (the compositor can't blend with
-                // desktop content), and that fallback painted an opaque box
-                // behind the pill's own CSS, which had already been thinned
-                // out on the assumption the material was actually showing.
-                // The plain transparent CSS capsule below is the known-good
-                // state confirmed on bearcave before Acrylic was ever added.
+                // Realize immediately so click-through applies, then hide: nothing
+                // shows until recording starts. No DWM backdrop (Acrylic falls
+                // back to opaque over RDP); plain transparent CSS is known-good.
                 #[cfg(target_os = "windows")]
                 {
                     ctx.set_visible(true);
@@ -257,7 +220,6 @@ pub(super) fn setup_recording_pill(
         }
     });
 
-    // Update pill appearance when recording state changes (Windows/macOS only).
     use_effect(move || {
         let state = *rec_state.read();
         let mode = *active_mode.read();
@@ -265,9 +227,7 @@ pub(super) fn setup_recording_pill(
         if let Some(ctx) = pill_ctx.read().as_ref() {
             let js_state = crate::ui::pill::pill_state(state, mode).filter(|_| pill_enabled);
             if let Some(js_state) = js_state {
-                // Windows already realized the window and set click-through at
-                // creation (see the constructor above), so it only needs
-                // showing here. macOS does both lazily, on first show.
+                // Windows set click-through at creation; macOS does it lazily below.
                 ctx.set_visible(true);
                 #[cfg(not(target_os = "windows"))]
                 {
@@ -277,9 +237,7 @@ pub(super) fn setup_recording_pill(
                     }
                 }
 
-                // Same edge as indicator.js's `wasVisible`: follow the
-                // foreground window's monitor only on the hidden->visible
-                // transition, not on every recording -> processing update.
+                // Follow the foreground monitor only on hidden->visible (see above).
                 if !*pill_was_shown.read() {
                     pill_was_shown.set(true);
                     #[cfg(target_os = "windows")]
@@ -292,12 +250,7 @@ pub(super) fn setup_recording_pill(
             } else {
                 pill_was_shown.set(false);
                 let _ = ctx.webview.evaluate_script("beamerSetState('idle');");
-                // Hide on every platform this function runs on (Windows and
-                // macOS): CSS opacity alone used to be Windows's only defence
-                // against a visible idle window, and that defence only works
-                // when WebView2 transparency actually takes. 200ms matches
-                // beamerSetState's own exit-animation duration, so the window
-                // disappears right as the fade-out finishes.
+                // 200ms matches beamerSetState's exit animation; hide as the fade ends.
                 let ctx_clone = ctx.clone();
                 spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -307,9 +260,7 @@ pub(super) fn setup_recording_pill(
         }
     });
 
-    // Pump live mic levels into the pill's waveform (~15Hz) — the Windows/
-    // macOS twin of linux_integration.rs's identically-commented loop, so
-    // both platforms' bars react to the same signal at the same rate.
+    // Mic levels into the pill waveform at ~15Hz (mirrors linux_integration).
     use_hook(move || {
         spawn(async move {
             let mut level_rx = crate::audio::subscribe_levels();
@@ -329,18 +280,10 @@ pub(super) fn setup_recording_pill(
     });
 }
 
-/// Move the pill window to the bottom-center of whatever monitor the
-/// foreground window is on, mirroring indicator.js's `_reposition()`
-/// (`BOTTOM_MARGIN = 32`, run once per show rather than continuously). tao
-/// has no cross-platform "which monitor is window X on" query, so this goes
-/// straight to Win32: `GetForegroundWindow` + `MonitorFromWindow`, then
-/// matched back to a tao `MonitorHandle` by comparing `HMONITOR` handles —
-/// the same match-by-handle approach `work_area.rs`'s `windows_work_rect`
-/// uses for the taskbar-aware rectangle.
-///
-/// A failed lookup (no foreground window, or its monitor not found among
-/// tao's enumerated ones) leaves the pill at its last position rather than
-/// erroring — a stale position is a much smaller mistake than a hidden pill.
+/// Move the pill to the bottom-center of the foreground window's monitor
+/// (`GetForegroundWindow` + `MonitorFromWindow`, matched back to tao by
+/// `HMONITOR` handle as in `work_area.rs`). A failed lookup keeps the last
+/// position — stale beats hidden.
 #[cfg(target_os = "windows")]
 fn reposition_to_foreground_monitor(ctx: &DesktopContext, (pill_w, pill_h): (u32, u32)) {
     use dioxus::desktop::tao::platform::windows::MonitorHandleExtWindows;
@@ -371,22 +314,12 @@ fn reposition_to_foreground_monitor(ctx: &DesktopContext, (pill_w, pill_h): (u32
     if !unsafe { GetMonitorInfoW(hm, &mut info) }.as_bool() {
         return;
     }
-    // `rcWork`, not `rcMonitor`: the taskbar is its own topmost shell
-    // surface, so an ordinary always-on-top window (this pill included)
-    // renders *behind* it rather than over it. `BOTTOM_MARGIN` in
-    // indicator.js is measured from the monitor edge because GNOME's panel
-    // is top-anchored and the Shell draws its pill above every other
-    // window regardless — neither assumption holds here. `rcWork` already
-    // excludes the taskbar (same field `work_area.rs`'s `windows_work_rect`
-    // reads for the identical reason), so the margin below is pure
-    // breathing room, not taskbar-clearance duty.
+    // `rcWork`, not `rcMonitor`: an always-on-top window renders *behind* the
+    // taskbar, and `rcWork` already excludes it (as in `work_area.rs`).
     let rc = info.rcWork;
     let scale = monitor.scale_factor();
-    // 32px of breathing room below the pill's *ink*, matching indicator.js's
-    // BOTTOM_MARGIN. The window's bottom `PILL_WINDOW_H - PILL_INK_BOTTOM`
-    // rows are transparent headroom for the entrance animation, so they
-    // already count towards that gap and have to come back out of the
-    // margin — otherwise the pill floats that much higher than the GNOME one.
+    // 32px below the pill's *ink*; the window's transparent animation headroom
+    // already counts towards that gap, so it comes back out of the margin.
     let margin = ((32.0 - (PILL_WINDOW_H - PILL_INK_BOTTOM)) * scale) as i32;
 
     let work_w = (rc.right - rc.left).max(0);
@@ -396,32 +329,20 @@ fn reposition_to_foreground_monitor(ctx: &DesktopContext, (pill_w, pill_h): (u32
     ctx.set_outer_position(PhysicalPosition::new(x, y));
 }
 
-/// How often the notes store is checked for pending edits.
-///
-/// Note bodies are edited per keystroke; writing the whole file on each one
-/// would be pathological, so edits coalesce into at most one write per tick.
+/// Coalesce per-keystroke edits into at most one write per tick.
 const NOTES_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// Drive the debounced writes for both note stores.
-///
-/// Dirtiness is checked through `peek()` rather than `read()` on purpose: a
-/// `write()` on every tick would notify every subscriber — including each open
-/// sticky window — twice a second, whether or not anything had changed.
-///
-/// Tasks ride the same tick. Their two *decisions* flush inline, since a lost
-/// decision is lost eval signal — but ticking a task done does not, and without
-/// this that checkbox would live in memory until some later accept or dismiss
-/// happened to write the file.
+/// Debounced writes for both stores. `peek()`, not `read()`: a `write()` every
+/// tick would notify every subscriber twice a second. Task done-ticks ride
+/// here too (accept/dismiss decisions flush inline instead).
 pub(super) fn setup_notes_flush(mut notes: Signal<NoteStore>, mut tasks: Signal<TaskStore>) {
     use_hook(move || {
         spawn(async move {
             loop {
                 tokio::time::sleep(NOTES_FLUSH_INTERVAL).await;
-                // `needs_flush` rather than `is_dirty`: an inline flush
-                // clears `dirty` as soon as the JSON mirror lands, and the
-                // automerge document still owes a write at that point. The
-                // third arm is the mtime stat that catches a document synced
-                // in from the other machine.
+                // `needs_flush`, not `is_dirty`: an inline flush clears `dirty`
+                // when the JSON mirror lands while the document still owes a
+                // write. Third arm is the mtime stat catching a synced-in document.
                 let pending = notes.peek().needs_flush()
                     || tasks.peek().needs_flush()
                     || notes.peek().doc_file_moved();
@@ -435,11 +356,8 @@ pub(super) fn setup_notes_flush(mut notes: Signal<NoteStore>, mut tasks: Signal<
     });
 }
 
-/// Push whatever went wrong while loading the corpus into the status log.
-///
-/// A corrupt `notes.automerge` is quarantined and replaced by an empty store,
-/// which is the right recovery and the wrong silence: the user has to be told
-/// their notes did not come back. Runs once, on the first render.
+/// Surface corpus load failures in the status log: a quarantined store recovers
+/// silently otherwise, and the user must know their notes did not come back.
 pub(super) fn report_load_errors(
     notes: Signal<NoteStore>,
     tasks: Signal<TaskStore>,
@@ -489,15 +407,9 @@ pub(super) fn setup_update_check(config: Signal<Config>, mut update_status: Sign
     });
 }
 
-/// Register Beamer's AppUserModelID by creating (or repairing) its Start
-/// Menu shortcut. Runs once on first render, off the render thread: shortcut
-/// creation is COM and filesystem work, so it goes through
-/// `tokio::task::spawn_blocking` the same way `injection::inject_text` does
-/// for UIA, rather than blocking the Dioxus event loop.
-///
-/// Best-effort. See `ui::windows_shortcut::ensure_shortcut` for the failure
-/// handling. A missing or stale shortcut only degrades toast branding; it
-/// never blocks dictation.
+/// Register Beamer's AppUserModelID via its Start Menu shortcut (COM + fs work,
+/// so off the render thread). Best-effort: a stale shortcut only degrades toast
+/// branding, never blocks dictation.
 #[cfg(target_os = "windows")]
 pub(super) fn setup_windows_aumid_shortcut() {
     use_hook(|| {
@@ -509,12 +421,8 @@ pub(super) fn setup_windows_aumid_shortcut() {
     });
 }
 
-/// Wire up tray menu item clicks.
-///
-/// NOTE: use_muda_event_handler instead of use_tray_menu_event_handler because
-/// dioxus-desktop 0.7.3 has a bug: set_menubar_receiver() claims the muda OnceCell
-/// before set_tray_icon_receiver(), so tray menu clicks arrive as MudaMenuEvent,
-/// never as TrayMenuEvent.
+/// Tray menu clicks. `use_muda_event_handler`, not the tray variant: a
+/// dioxus-desktop 0.7.3 bug delivers tray clicks as MudaMenuEvent.
 pub(super) fn setup_menu_handlers(
     items: &TrayMenuItems,
     window: DesktopContext,
@@ -537,13 +445,9 @@ pub(super) fn setup_menu_handlers(
         move |event| {
             if event.id == quit_id {
                 tracing::info!("Quit menu item clicked — exiting");
-                // `process::exit` below skips the 500ms flush tick along with
-                // every destructor, so any note edit still sitting in memory
-                // has to be written out here or it dies with the process.
+                // `process::exit` skips the flush tick and destructors, so flush
+                // here and release the single-instance guard explicitly.
                 crate::notes::flush_stores(&mut notes.write(), &mut tasks.write());
-                // `process::exit` skips destructors, so the single-instance
-                // guard has to be handed back explicitly or the lockfile
-                // outlives us.
                 crate::release_single_instance();
                 std::process::exit(0);
             } else if event.id == home_id {
@@ -600,7 +504,7 @@ pub(super) fn setup_menu_handlers(
     });
 }
 
-/// Left-click the tray icon to toggle the main window's visibility.
+/// Left-click the tray icon toggles the main window.
 pub(super) fn setup_tray_click_handler(window: DesktopContext) {
     use_tray_icon_event_handler({
         let window = window.clone();

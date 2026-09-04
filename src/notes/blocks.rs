@@ -1,26 +1,9 @@
-//! How a note body maps to renderable blocks.
+//! Note body ↔ renderable blocks. Pure functions only, no I/O.
 //!
-//! A note is one string. Attachments live in it as **placeholder tokens** —
-//! `[[beamer:<id>]]` alone on a line — which keeps reading order in the body
-//! itself rather than in a parallel structure that could drift from it.
-//!
-//! ⚠️ **A token must never reach either model.** `body` is handed to s1-mini and
-//! overwritten wholesale with the reply, and s1-mini is a trained wire format,
-//! not a chat model: out-of-distribution input comes back garbled at HTTP 200
-//! with a plausible body (see the standing warning in `llm/prompts.rs`). So
-//! tokens are *removed* before a call and restored after — never escaped, never
-//! quoted. [`parse`] splits the body into runs and [`reassemble`] puts the
-//! answers back at fixed token positions; that pair is the whole mechanism.
-//!
-//! Pure functions only. No Dioxus, no I/O — the same discipline that keeps
-//! `ui::note_layout` testable.
-//!
-//! **The grammar is deliberately narrow.** A token counts only when it is alone
-//! on its own line after trimming; anything else, including a token mid-line, is
-//! literal text. `[[` cannot come out of dictation, so no transcript can
-//! accidentally produce one, and an id with no matching `Attachment` renders as
-//! plain text — a desynchronised note fails visibly rather than silently
-//! swallowing a line.
+//! Attachments live in the body as `[[beamer:<id>]]` tokens, one per line.
+//! ⚠️ Tokens must never reach either model: strip before a call, restore after.
+//! A token counts only alone on its line; anything else is literal text, and an
+//! unmatched id renders as plain text so desync fails visibly.
 
 /// One piece of a note body, in reading order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,11 +28,7 @@ pub fn token_for(id: &str) -> String {
     format!("{OPEN}{id}{CLOSE}")
 }
 
-/// The id in `line`, if the whole line is a token.
-///
-/// Whitespace around it is tolerated — a textarea edit can leave a stray space
-/// — but nothing else on the line is, and an id may not contain whitespace or
-/// brackets of its own.
+/// The id in `line`, if the whole line is a token (surrounding whitespace tolerated).
 fn token_id(line: &str) -> Option<&str> {
     let inner = line.trim().strip_prefix(OPEN)?.strip_suffix(CLOSE)?;
     let ok = !inner.is_empty()
@@ -59,17 +38,15 @@ fn token_id(line: &str) -> Option<&str> {
     ok.then_some(inner)
 }
 
-/// One tile of the body. `raw` slices concatenate back to the body exactly,
-/// which is what lets `reassemble` be byte-identical when nothing changed.
+/// `raw` slices concatenate back to the body exactly.
 #[derive(Debug, Clone, Copy)]
 struct Segment<'a> {
     raw: &'a str,
-    /// `Some(id)` for a token line, `None` for a run of text lines.
+    /// `Some(id)` for a token line, `None` for a text run.
     id: Option<&'a str>,
 }
 
-/// Tile `body` into strictly alternating text and attachment segments,
-/// starting and ending with a text segment (either may be empty).
+/// Tile `body` into strictly alternating text/attachment segments.
 fn segments(body: &str) -> Vec<Segment<'_>> {
     let mut out: Vec<Segment> = Vec::new();
     let mut run_start = 0usize;
@@ -97,11 +74,7 @@ fn content(raw: &str) -> &str {
     raw.strip_suffix('\n').unwrap_or(raw)
 }
 
-/// Split a body into the blocks that render it.
-///
-/// A body with no tokens yields **exactly one** `Text` run holding the whole
-/// body — today's single-textarea behaviour, reproduced by construction rather
-/// than by a fast-path branch that could get out of step.
+/// Split a body into the blocks that render it. A token-free body yields exactly one `Text`.
 pub fn parse(body: &str) -> Vec<Block<'_>> {
     let segs = segments(body);
     let last = segs.len().saturating_sub(1);
@@ -120,7 +93,7 @@ pub fn parse(body: &str) -> Vec<Block<'_>> {
         .collect()
 }
 
-/// Just the text runs, in order. What the cleanup pass is given, one call each.
+/// Just the text runs, in order — one cleanup call each.
 pub fn text_runs(body: &str) -> Vec<&str> {
     let segs = segments(body);
     let last = segs.len().saturating_sub(1);
@@ -131,11 +104,7 @@ pub fn text_runs(body: &str) -> Vec<&str> {
         .collect()
 }
 
-/// The body with every token line removed.
-///
-/// What reaches the extraction model, and what `NoteStore::search` matches over
-/// — without it every attachment-bearing note would match the query "beamer"
-/// via its own tokens.
+/// The body with every token line removed (model input; what `search` matches).
 pub fn plain_text(body: &str) -> String {
     segments(body)
         .into_iter()
@@ -144,24 +113,13 @@ pub fn plain_text(body: &str) -> String {
         .collect()
 }
 
-/// Ids referenced by the body, in reading order. Duplicates are kept — a
-/// duplicate is a fact about the body, and `prune_attachments` needs to see it.
+/// Ids referenced by the body, in order. Duplicates kept for `prune_attachments`.
 pub fn referenced_ids(body: &str) -> Vec<&str> {
     segments(body).into_iter().filter_map(|s| s.id).collect()
 }
 
-/// Put cleaned text runs back, leaving every token exactly where it was.
-///
-/// `cleaned_runs` is one entry per `Text` run, in `parse` order. `None` — and
-/// an empty or whitespace-only `Some` — keeps the original run. So an
-/// all-`None` result returns `body` byte for byte, which is what makes
-/// `apply_cleanup`'s existing `!cleaned.trim().is_empty()` guard still
-/// meaningful: **a run can never become empty through this function.**
-///
-/// A run that was itself blank is never substituted either. Blank runs are not
-/// sent to the model (`pipeline` skips them), so an answer for one could only
-/// come from a misaligned index — and writing text into the gap above an image
-/// is exactly the corruption that would be hardest to notice.
+/// Put cleaned runs back, tokens untouched. `None`/blank keeps the original;
+/// a blank original is never substituted (an answer for one is a misaligned index).
 pub fn reassemble(body: &str, cleaned_runs: &[Option<String>]) -> String {
     let segs = segments(body);
     let last = segs.len().saturating_sub(1);
@@ -184,8 +142,7 @@ pub fn reassemble(body: &str, cleaned_runs: &[Option<String>]) -> String {
         match replacement {
             Some(text) => {
                 out.push_str(text);
-                // A run followed by a token must still end the line, or the
-                // token stops being alone on its own and becomes literal text.
+                // Keep the token that follows alone on its line.
                 if i != last {
                     out.push('\n');
                 }
@@ -196,11 +153,7 @@ pub fn reassemble(body: &str, cleaned_runs: &[Option<String>]) -> String {
     out
 }
 
-/// Replace the `index`th text run with `text` — the UI's per-textarea write.
-///
-/// Out-of-range is a no-op returning the body unchanged, rather than a panic:
-/// the caller is a render-time index and a note can be rewritten by a model
-/// pass between render and keystroke.
+/// Replace the `index`th text run. Out-of-range is a no-op (render-time index can go stale).
 pub fn set_run(body: &str, index: usize, text: &str) -> String {
     let segs = segments(body);
     let last = segs.len().saturating_sub(1);
@@ -214,9 +167,7 @@ pub fn set_run(body: &str, index: usize, text: &str) -> String {
         }
         if run == index {
             out.push_str(text);
-            // An empty run needs no separator: the token that follows it
-            // already starts a line, either at the body start or after the
-            // previous token's own newline.
+            // An empty run needs no separator: the following token already starts a line.
             if i != last && !text.is_empty() {
                 out.push('\n');
             }
@@ -229,10 +180,6 @@ pub fn set_run(body: &str, index: usize, text: &str) -> String {
 }
 
 /// Add a token for `id` on its own line, at the end of the body or the start.
-///
-/// Only the end is reachable from the UI today; dropping *between* two runs is
-/// deferred. The `at_end: false` arm exists because a note whose body is empty
-/// but for one attachment is otherwise unreachable, and it is tested.
 pub fn insert_token(body: &str, id: &str, at_end: bool) -> String {
     let token = token_for(id);
     if body.is_empty() {
@@ -247,9 +194,6 @@ pub fn insert_token(body: &str, id: &str, at_end: bool) -> String {
 }
 
 /// Remove every token line for `id`, closing the gap.
-///
-/// The text runs either side merge, which is what the user asked for by
-/// deleting the block between them.
 pub fn remove_token(body: &str, id: &str) -> String {
     let segs = segments(body);
     let mut out = String::with_capacity(body.len());
@@ -270,8 +214,6 @@ mod tests {
 
     #[test]
     fn a_body_with_no_tokens_is_exactly_one_run() {
-        // Today's behaviour, and the thing segmentation must not change: one
-        // run means one cleanup call carrying the whole body, as before.
         let body = "call the vet\nabout Biscuit";
         assert_eq!(parse(body), vec![Block::Text(body)]);
         assert_eq!(text_runs(body), vec![body]);
@@ -297,8 +239,7 @@ mod tests {
 
     #[test]
     fn text_and_attachment_blocks_strictly_alternate() {
-        // The UI depends on this: without a synthesized empty run there would
-        // be no textarea above a leading image or below a trailing one.
+        // Empty runs give the UI a textarea above/below every attachment.
         let body = format!("{IMG}\n[[beamer:img2]]");
         assert_eq!(
             parse(&body),
@@ -384,8 +325,6 @@ mod tests {
 
     #[test]
     fn an_empty_reply_for_one_run_leaves_that_run_intact() {
-        // `Cleaned::NothingToChange` arrives as an empty string. Substituting
-        // it would blank half the note.
         let body = format!("keep me\n{IMG}\nclean me");
         let got = reassemble(&body, &[Some(String::new()), Some("Clean me.".into())]);
         assert_eq!(got, format!("keep me\n{IMG}\nClean me."));
@@ -393,9 +332,7 @@ mod tests {
 
     #[test]
     fn a_blank_run_is_never_substituted() {
-        // Blank runs are not sent, so an answer for one is a misaligned index.
-        // Writing text into the gap above an image is the corruption that
-        // would be hardest to spot afterwards.
+        // Blank runs are never sent, so an answer for one is a misaligned index.
         let body = format!("{IMG}\ntext");
         let got = reassemble(&body, &[Some("invented".into()), Some("Text.".into())]);
         assert_eq!(got, format!("{IMG}\nText."));
@@ -496,17 +433,13 @@ mod tests {
 
     #[test]
     fn the_token_opener_is_the_literal_the_chat_guard_duplicates() {
-        // `src/llm/chat.rs` cannot reach this module — no crate-rooted paths
-        // are allowed under `src/llm/` — so it spells `[[beamer:` out. This is
-        // the test that catches the two drifting apart.
+        // `src/llm/chat.rs` cannot import this module, so it duplicates the literal.
         assert_eq!(OPEN, "[[beamer:");
         assert!(token_for("x").starts_with("[[beamer:"));
     }
 
     #[test]
     fn token_for_matches_what_parse_accepts() {
-        // One spelling, in one place. A drift between writer and reader would
-        // turn every new attachment into literal text.
         let token = token_for("abc-0001");
         assert_eq!(referenced_ids(&token), vec!["abc-0001"]);
     }

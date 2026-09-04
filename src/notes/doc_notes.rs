@@ -1,14 +1,6 @@
 //! Mapping between `Vec<Note>` and the `notes` root of the automerge document.
-//!
-//! The vec stays the in-memory source of truth. This file is the only place
-//! that knows how a note is laid out inside the document, and it runs in two
-//! directions: `reconcile` pushes the vec's current state into the document as
-//! a diff, and `hydrate` reads a document back out into a vec after a merge.
-//!
-//! Layout is a map keyed by note id rather than a list. Concurrent creations
-//! on two machines then land under two keys and merge without either one
-//! having to guess at a list position, and there is no way for the same note
-//! to appear twice.
+//! `reconcile` pushes the vec in as a diff; `hydrate` reads it back after a merge.
+//! A map keyed by note id (not a list), so concurrent creations on two machines merge.
 
 use anyhow::Result;
 use automerge::{AutoCommit, ObjId, ReadDoc};
@@ -21,24 +13,15 @@ use super::sync_doc::{
     NOTES_KEY,
 };
 
-/// A hydrate's result: the notes it could read, and the ids of the entries it
-/// could not.
+/// A hydrate's result: readable notes, plus ids `reconcile` must keep.
+/// A read failure is not proof the note is gone; pruning it would delete it.
 pub struct Hydrated {
     pub notes: Vec<Note>,
-    /// Entries `read_note` rejected. Carried back so `reconcile` keeps their
-    /// keys and `machine.gc` keeps their window state: dropping an entry from
-    /// the vec is a read failure, and treating it as proof the note is gone
-    /// would delete it from the document on the next tick.
     pub unreadable: Vec<String>,
 }
 
-/// Push `notes` into the document.
-///
-/// Every write is guarded on the stored value, so a tick where nothing
-/// changed produces no operations at all and the document stops growing.
-///
-/// `unreadable` holds ids that were in the document but could not be read
-/// back into a `Note`. They are kept, not pruned. See [`Hydrated`].
+/// Push `notes` into the document. Writes are guarded on the stored value,
+/// so an unchanged tick produces no operations. Unreadable ids are kept.
 pub fn reconcile(sync: &mut SyncDoc, notes: &[Note], unreadable: &[String]) -> Result<()> {
     let root = sync.root_map(NOTES_KEY)?;
     let doc = sync.doc_mut();
@@ -53,9 +36,7 @@ pub fn reconcile(sync: &mut SyncDoc, notes: &[Note], unreadable: &[String]) -> R
         put_str(doc, &obj, "created", &note.created)?;
         put_str(doc, &obj, "modified", &note.modified)?;
         put_str(doc, &obj, "raw", &note.raw)?;
-        // The one field that merges character by character. See
-        // `sync_doc::put_text`.
-        put_text(doc, &obj, "body", &note.body)?;
+        put_text(doc, &obj, "body", &note.body)?; // character-merged, see `sync_doc::put_text`
         put_str(doc, &obj, "clean_state", &enum_name(&note.clean_state))?;
         put_str(doc, &obj, "extract_state", &enum_name(&note.extract_state))?;
         put_str(doc, &obj, "origin", &enum_name(&note.origin))?;
@@ -66,18 +47,8 @@ pub fn reconcile(sync: &mut SyncDoc, notes: &[Note], unreadable: &[String]) -> R
     Ok(())
 }
 
-/// Read the document's notes back out, oldest first.
-///
-/// Order comes from `created`, with the id breaking ties. `notes.json` has
-/// always been append-only and therefore creation-ordered, so this reproduces
-/// the order the file already had, and it stays stable across machines where
-/// a map's key order would not.
-///
-/// An entry missing the fields a note cannot do without is reported rather
-/// than filled in with invented values, and its id comes back in
-/// [`Hydrated::unreadable`] so nothing downstream deletes it. Nothing this
-/// code writes produces such an entry; one appearing means the document was
-/// written by something else.
+/// Read the document's notes back out, oldest first (`created`, then id).
+/// Entries missing required fields are reported in `unreadable`, never invented.
 pub fn hydrate(sync: &SyncDoc) -> Hydrated {
     let Some(root) = sync.root_map_if_present(NOTES_KEY) else {
         return Hydrated { notes: Vec::new(), unreadable: Vec::new() };
@@ -123,15 +94,9 @@ fn read_note(doc: &AutoCommit, obj: &ObjId, key: &str) -> Option<Note> {
     })
 }
 
-/// Attachments are stored as a map keyed by attachment id, each value the
-/// attachment serialized to JSON.
-///
-/// Per-attachment rather than per-field, because an attachment is added or
-/// removed far more often than it is edited, and keying by id means two
-/// machines attaching different files to one note both keep theirs. The
-/// nested shape (`Location`, and its `Owned`/`External` split) then stays
-/// defined in exactly one place, `model.rs`, which the `task_eval` binary
-/// includes and which must never learn about automerge.
+/// Attachments as a map keyed by attachment id (JSON values), so two machines
+/// attaching different files to one note both keep theirs. The shape stays
+/// defined in `model.rs`, which must never learn about automerge.
 fn reconcile_attachments(
     doc: &mut AutoCommit,
     note: &ObjId,
@@ -147,12 +112,7 @@ fn reconcile_attachments(
     Ok(())
 }
 
-/// Read a note's attachments back, ordered by id.
-///
-/// `Note::attachments` is documented as being in no particular order (`body`
-/// owns reading order through its tokens), and attachment ids come from
-/// `next_id`, whose hex millisecond prefix sorts the same way it counts. So
-/// id order is insertion order in practice and stable everywhere.
+/// Read a note's attachments back, ordered by id (insertion order in practice).
 fn read_attachments(doc: &AutoCommit, note: &ObjId) -> Vec<Attachment> {
     let Ok(Some((value, map))) = doc.get(note, "attachments") else { return Vec::new() };
     if !value.is_object() {
@@ -174,8 +134,7 @@ fn read_attachments(doc: &AutoCommit, note: &ObjId) -> Vec<Attachment> {
         .collect()
 }
 
-/// The serde name of a unit enum, so the document spells `clean_state` the
-/// same way `notes.json` does and the mapping lives in `model.rs` alone.
+/// The serde name of a unit enum, matching the `notes.json` spelling.
 fn enum_name<T: Serialize>(value: &T) -> String {
     serde_json::to_value(value)
         .ok()

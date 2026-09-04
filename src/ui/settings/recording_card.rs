@@ -3,16 +3,10 @@ use dioxus::prelude::*;
 use crate::ui::components::{Card, Toggle};
 use crate::ui::settings::hotkey_picker::{CaptureModeRadio, HotkeyPicker};
 
-/// Chord proposed when note capture is switched on from the UI.
-///
-/// Deliberately NOT the serde default for `note_hotkey`, which stays empty so
-/// no chord is ever stolen from another app by a config file appearing. This
-/// is only a starting point for a user who has explicitly asked for the
-/// feature, and it is theirs to change from the picker right below the switch.
-///
-/// Ctrl+Alt+Space, not Ctrl+Super+Space: dictation's `Ctrl+Super` is a strict
-/// prefix of the latter, so pressing Ctrl then Super would start a dictation
-/// recording before Space was ever reached. See `hotkey::matching_binding`.
+/// Chord proposed when note capture is switched on. Not the serde default
+/// (which stays empty so no chord is stolen by a config file appearing).
+/// Ctrl+Alt+Space, not Ctrl+Super+Space: dictation's `Ctrl+Super` is a prefix
+/// of the latter and would fire first (see `hotkey::matching_binding`).
 const DEFAULT_NOTE_HOTKEY: &str = "Ctrl+Alt+Space";
 
 #[derive(Props, Clone, PartialEq)]
@@ -20,7 +14,7 @@ pub struct RecordingCardProps {
     hotkey: String,
     mode: String,
     pause_media: bool,
-    /// Empty means note capture is off entirely — no binding is registered.
+    /// Empty means note capture is off; no binding is registered.
     note_hotkey: String,
     note_mode: String,
     on_hotkey_change: EventHandler<String>,
@@ -62,9 +56,8 @@ pub fn RecordingCard(props: RecordingCardProps) -> Element {
                 span { class: "card-label", "Note capture" }
                 Toggle {
                     value: note_enabled,
-                    // Off clears the chord rather than remembering it: an empty
-                    // string is the one state the hotkey layer reads as
-                    // "register nothing", so off must genuinely mean unbound.
+                    // Off clears the chord: empty is the only "register
+                    // nothing" state the hotkey layer reads.
                     ontoggle: move |on: bool| {
                         let next = if on { DEFAULT_NOTE_HOTKEY } else { "" };
                         props.on_note_hotkey_change.call(next.to_string());
@@ -96,9 +89,7 @@ mod tests {
     use super::*;
     use crate::hotkey::HotkeyConfig;
 
-    /// The chord the switch proposes must be one the engine can actually
-    /// register — an unparseable suggestion would turn the feature on while
-    /// binding nothing, which looks identical to a broken hotkey.
+    /// The proposed chord must be one the engine can actually register.
     #[test]
     fn the_proposed_note_chord_parses() {
         let parsed = HotkeyConfig::parse(DEFAULT_NOTE_HOTKEY, true).expect("must parse");
@@ -106,19 +97,13 @@ mod tests {
         assert_eq!(parsed.trigger_vk, 0x20, "Space");
     }
 
-    /// Dictation's default chord must not be a prefix of the note chord.
-    ///
-    /// `matching_binding` compares the modifier set held *at the moment the
-    /// trigger goes down*. If the note chord's trigger were reached only after
-    /// passing through the dictation chord's exact state, dictation would fire
-    /// first, every time. This is why the default is not Ctrl+Super+Space.
+    /// Dictation's chord must not be a prefix of the note chord, or dictation
+    /// would fire first on the way to the note trigger.
     #[test]
     fn the_proposed_note_chord_does_not_pass_through_the_dictation_chord() {
         let dictation = HotkeyConfig::parse("Ctrl+Super", false).expect("parses");
         let note = HotkeyConfig::parse(DEFAULT_NOTE_HOTKEY, true).expect("parses");
 
-        // Distinct triggers is the strong form: no press order can reach the
-        // note trigger via the dictation trigger.
         assert_ne!(
             dictation.trigger_vk, note.trigger_vk,
             "chords sharing a trigger key can only be told apart by modifiers"

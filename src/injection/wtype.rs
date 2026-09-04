@@ -1,11 +1,8 @@
 #![cfg(not(target_os = "windows"))]
 
-//! Text typing via `wtype` (the `zwp_virtual_keyboard_v1` Wayland protocol).
-//!
-//! Works on wlroots-family compositors (Sway, Hyprland, river, niri, labwc)
-//! plus COSMIC — full Unicode with zero setup, because wtype uploads its own
-//! keymap. GNOME and KDE both refuse this protocol, which the availability
-//! probe detects instantly, so this backend cleanly falls through there.
+//! Typing via `wtype` (`zwp_virtual_keyboard_v1`). Works on wlroots-family
+//! compositors plus COSMIC with zero setup. GNOME/KDE refuse the protocol,
+//! which the availability probe detects so this backend falls through there.
 
 use super::{InjectionBackend, InjectionResult};
 use anyhow::Result;
@@ -25,10 +22,8 @@ impl InjectionBackend for WtypeBackend {
         if std::env::var("WAYLAND_DISPLAY").is_err() {
             return Err("not a Wayland session".into());
         }
-        // Typing an empty string binds the protocol without pressing any key:
-        // exit 0 where the compositor implements virtual-keyboard-v1, exit 1
-        // with "Compositor does not support the virtual keyboard protocol"
-        // on GNOME/KDE, and a spawn error when wtype isn't installed.
+        // Empty-string probe binds the protocol without pressing a key:
+        // exit 0 where supported, exit 1 on GNOME/KDE, spawn error if missing.
         match std::process::Command::new("wtype").arg("").output() {
             Ok(out) if out.status.success() => Ok(()),
             Ok(out) => Err(format!(
@@ -44,8 +39,7 @@ impl InjectionBackend for WtypeBackend {
         if sanitized.is_empty() {
             anyhow::bail!("nothing to type after sanitization");
         }
-        // -d 8: 8 ms between keystrokes. Chromium/Electron apps drop events
-        // typed at wtype's default full speed (known upstream bug).
+        // -d 8: Chromium/Electron drop events typed at wtype's default speed.
         let output = std::process::Command::new("wtype")
             .arg("-d")
             .arg("8")
@@ -64,8 +58,7 @@ impl InjectionBackend for WtypeBackend {
     }
 }
 
-/// Send Ctrl(+Shift)+V via wtype. Last-resort chord mechanism for the
-/// clipboard backend on wlroots compositors without ydotool.
+/// Paste chord via wtype (last resort on wlroots without ydotool).
 pub(crate) fn send_paste_chord(use_shift: bool) -> bool {
     let args: &[&str] = if use_shift {
         &["-M", "ctrl", "-M", "shift", "-k", "v", "-m", "shift", "-m", "ctrl"]

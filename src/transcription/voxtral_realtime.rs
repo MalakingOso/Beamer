@@ -15,27 +15,20 @@ use super::{
 };
 
 /// Build the `input_audio.append` frame for a non-empty chunk into `out`,
-/// reusing its allocation instead of building a fresh `serde_json::Value` +
-/// `String` per frame.
-///
-/// Base64 output only ever contains `[A-Za-z0-9+/=]`, none of which require
-/// JSON string escaping, so `b64` is safe to write directly into the
-/// manually built JSON text below.
+/// reusing its allocation. Base64 needs no JSON escaping.
 fn build_audio_frame(b64: &str, out: &mut String) {
     out.clear();
     let _ = write!(out, r#"{{"type":"input_audio.append","audio":"{b64}"}}"#);
 }
 
-/// Build the `input_audio.end` frame (the end-of-audio convention: an empty
-/// chunk from the mic pipeline) into `out`.
+/// Build the `input_audio.end` frame (end-of-audio convention: empty chunk).
 fn build_end_of_audio_frame(out: &mut String) {
     out.clear();
     out.push_str(r#"{"type":"input_audio.end"}"#);
 }
 
-/// Open a WebSocket to the Mistral Voxtral Mini realtime transcription endpoint.
-/// Requires an initial `session.update` message to configure audio format (pcm_s16le @ 16 kHz).
-/// Language is auto-detected by the model.
+/// Open a WebSocket to the Mistral Voxtral Mini realtime endpoint. Requires an
+/// initial `session.update` declaring pcm_s16le @ 16 kHz; language is auto-detected.
 pub async fn start_realtime_session(api_key: &str) -> Result<RealtimeSession> {
     let url = "wss://api.mistral.ai/v1/audio/transcriptions/realtime\
                ?model=voxtral-mini-transcribe-realtime-2602";
@@ -54,10 +47,8 @@ pub async fn start_realtime_session(api_key: &str) -> Result<RealtimeSession> {
         .body(())
         .context("Failed to build WebSocket request")?;
 
-    // Bounded, because `connect_async` imposes no timeout at any layer and a
-    // stalled handshake would strand both callers: the recording loop, which
-    // owns the hotkey receiver, and the startup warmup, which runs behind the
-    // splash while the main window is still hidden.
+    // Bounded: `connect_async` imposes no timeout, and a stalled handshake
+    // would strand the recording loop (hotkey owner) and the startup warmup.
     let (ws_stream, _) = tokio::time::timeout(
         super::WS_CONNECT_TIMEOUT,
         tokio_tungstenite::connect_async(request),
@@ -73,7 +64,6 @@ pub async fn start_realtime_session(api_key: &str) -> Result<RealtimeSession> {
 
     let (mut write, mut read) = ws_stream.split();
 
-    // Voxtral requires explicit audio format declaration before streaming
     let session_config = serde_json::json!({
         "type": "session.update",
         "session": {
@@ -92,14 +82,12 @@ pub async fn start_realtime_session(api_key: &str) -> Result<RealtimeSession> {
     let (transcript_tx, transcript_rx) =
         mpsc::channel::<TranscriptEvent>(TRANSCRIPT_CHANNEL_CAPACITY);
 
-    // Audio sender: encodes PCM → base64 JSON and streams to the WebSocket
     tokio::spawn(async move {
         let engine = base64::engine::general_purpose::STANDARD;
         let mut b64_buf = String::new();
         let mut frame_buf = String::new();
         while let Some(chunk) = audio_rx.recv().await {
             if chunk.is_empty() {
-                // Convention: empty Vec signals end-of-audio
                 build_end_of_audio_frame(&mut frame_buf);
                 let _ = write.send(Message::Text(frame_buf.as_str().into())).await;
                 continue;
@@ -118,19 +106,11 @@ pub async fn start_realtime_session(api_key: &str) -> Result<RealtimeSession> {
         let _ = write.close().await;
     });
 
-    // Transcript receiver: parses JSON messages into TranscriptEvents
     tokio::spawn(async move {
-        // No sentinel convention on this channel — every event is ordinary
-        // data, so a plain rate-limited `try_send` (no reserved headroom)
-        // is sufficient.
         let mut dropped_transcripts: u64 = 0;
         let mut send_event = |ev: TranscriptEvent| {
-            // Only warn on a genuinely full channel (consumer alive but
-            // stalled). A `Closed` error means the orchestrator already
-            // dropped `transcript_rx` (e.g. session teardown), which
-            // happens on every session's trailing "WebSocket closed" Info
-            // event — that's normal shutdown, not backpressure, so it's
-            // dropped silently rather than logged as a bogus stall warning.
+            // Warn only on `Full`. `Closed` is normal session teardown, which
+            // every session reaches on its trailing "WebSocket closed" event.
             match transcript_tx.try_send(ev) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(_)) => {
@@ -217,9 +197,7 @@ pub async fn start_realtime_session(api_key: &str) -> Result<RealtimeSession> {
 mod tests {
     use super::*;
 
-    /// The manually built `input_audio.append` frame must be structurally
-    /// identical to what the old `json!{...}` + `.to_string()` construction
-    /// produced, for a representative non-empty chunk.
+    /// The hand-built frame must match the `json!` construction for a sample chunk.
     #[test]
     fn audio_frame_matches_json_macro_for_sample_chunk() {
         let chunk: Vec<u8> = vec![0, 1, 2, 3, 250, 251, 252, 253, 254, 255];
@@ -238,8 +216,7 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
-    /// The end-of-audio frame (empty chunk convention) must remain
-    /// byte-semantically identical to the old `json!{...}` construction.
+    /// The end-of-audio (empty chunk) frame must match the `json!` construction.
     #[test]
     fn end_of_audio_frame_matches_json_macro_for_empty_chunk() {
         let mut out = String::new();

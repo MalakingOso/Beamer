@@ -2,18 +2,13 @@ use dioxus::desktop::trayicon::menu::{Menu, MenuItem, PredefinedMenuItem};
 use dioxus::desktop::trayicon::Icon;
 use std::sync::OnceLock;
 
-/// Cached RGBA data for idle icon (decoded once on first use)
 static IDLE_ICON_RGBA: OnceLock<(Vec<u8>, u32, u32)> = OnceLock::new();
 
-/// Cached RGBA data for recording icon (decoded once on first use)
-///
-/// Linux-only, not dead: its sole reader is `load_recording_icon` below,
-/// which is itself only called from `ui::linux_integration`
-/// (`#![cfg(target_os = "linux")]`) to swap the tray icon while recording.
+/// Linux-only; read by `load_recording_icon` for the recording indicator.
 #[cfg(target_os = "linux")]
 static RECORDING_ICON_RGBA: OnceLock<(Vec<u8>, u32, u32)> = OnceLock::new();
 
-/// Menu item IDs used to match events in the tray menu handler.
+/// Menu item handles for matching tray menu events.
 #[derive(Clone)]
 pub struct TrayMenuItems {
     pub home: MenuItem,
@@ -74,10 +69,7 @@ pub fn load_icon() -> Icon {
     Icon::from_rgba(rgba_data, width, height).expect("Failed to create tray icon")
 }
 
-/// Linux-only, not dead: called only from `ui::linux_integration`
-/// (`#![cfg(target_os = "linux")]`), which swaps the tray icon while
-/// recording. Gated here to match, rather than left to show up as unused on
-/// every other target.
+/// Linux-only recording indicator icon.
 #[cfg(target_os = "linux")]
 pub fn load_recording_icon() -> Icon {
     let (rgba_data, width, height) = RECORDING_ICON_RGBA
