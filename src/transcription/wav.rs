@@ -8,20 +8,17 @@ pub fn pcm_to_wav(pcm: &[u8]) -> Vec<u8> {
     let block_align = channels * bits_per_sample / 8;
 
     let mut wav = Vec::with_capacity(44 + pcm.len());
-    // RIFF header
     wav.extend_from_slice(b"RIFF");
     wav.extend_from_slice(&(36 + data_len).to_le_bytes());
     wav.extend_from_slice(b"WAVE");
-    // fmt chunk
     wav.extend_from_slice(b"fmt ");
-    wav.extend_from_slice(&16u32.to_le_bytes()); // chunk size
-    wav.extend_from_slice(&1u16.to_le_bytes()); // PCM format
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
     wav.extend_from_slice(&channels.to_le_bytes());
     wav.extend_from_slice(&sample_rate.to_le_bytes());
     wav.extend_from_slice(&byte_rate.to_le_bytes());
     wav.extend_from_slice(&block_align.to_le_bytes());
     wav.extend_from_slice(&bits_per_sample.to_le_bytes());
-    // data chunk
     wav.extend_from_slice(b"data");
     wav.extend_from_slice(&data_len.to_le_bytes());
     wav.extend_from_slice(pcm);
@@ -61,11 +58,11 @@ mod tests {
         let bits_per_sample = u16::from_le_bytes(wav[34..36].try_into().unwrap());
 
         assert_eq!(fmt_chunk_size, 16);
-        assert_eq!(audio_format, 1); // PCM
-        assert_eq!(channels, 1); // mono
+        assert_eq!(audio_format, 1);
+        assert_eq!(channels, 1);
         assert_eq!(sample_rate, 16000);
-        assert_eq!(byte_rate, 16000 * 1 * 16 / 8); // 32000
-        assert_eq!(block_align, 1 * 16 / 8); // 2
+        assert_eq!(byte_rate, 16000 * 1 * 16 / 8);
+        assert_eq!(block_align, 1 * 16 / 8);
         assert_eq!(bits_per_sample, 16);
     }
 

@@ -1,8 +1,7 @@
 #![cfg(not(target_os = "windows"))]
 #![allow(dead_code)]
 
-//! Install / enable / disable helper for the bundled Beamer Focus Helper
-//! GNOME Shell extension.
+//! Install/enable/disable helper for the bundled GNOME Shell extension.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -12,50 +11,25 @@ pub const EXTENSION_UUID: &str = "beamer-focus@beamer.app";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
-    /// Extension is ACTIVE in GNOME Shell — the D-Bus interface is live.
+    /// ACTIVE in GNOME Shell; the D-Bus interface is live.
     Enabled,
-    /// Shell has scanned the extension but it's not currently ACTIVE — either
-    /// it's INITIALIZED (just after first login) or explicitly disabled by the
-    /// user. Activating it is a single `gnome-extensions enable` call; no
-    /// log-out required.
+    /// Scanned but not ACTIVE. One `gnome-extensions enable` fixes it.
     Disabled,
-    /// Files are on disk at the expected path but GNOME Shell doesn't know
-    /// about the UUID yet. This is the expected outcome of the very first
-    /// install on Wayland — Shell only rescans `~/.local/share/gnome-shell/
-    /// extensions/` at login. The user has to log out and back in; after
-    /// that the state flips to `Disabled` and a single enable finishes the
-    /// install.
+    /// On disk but unknown to Shell: first install on Wayland only rescans at
+    /// login, so the user must log out and back in.
     PendingRestart,
-    /// No files on disk, not known to GNOME Shell — never installed (or
-    /// already cleanly uninstalled).
+    /// Not on disk and unknown to Shell.
     NotInstalled,
-    /// Extension is ACTIVE but the running (or installed) version is older
-    /// than the bundled one — reinstalling picks up new capabilities
-    /// (v2 added direct typing + the recording pill).
+    /// ACTIVE but older than the bundled version.
     UpdateAvailable,
-    /// Files on disk are current but GNOME Shell is still running the old
-    /// code — Shell only reloads extension code at login.
+    /// Files current but Shell still runs the old code; needs a re-login.
     UpdatePendingRestart,
 }
 
-/// Parses a line from `gnome-extensions list --details`. Output is
-/// whitespace-indented key/value lines per extension, with optional blank
-/// lines and unindented description continuation text between blocks:
-///
-/// ```text
-/// other-ext@example.com
-///   Description: Multi-line description text
-///
-/// Unindented continuation text here.
-///
-///   State: ACTIVE
-/// beamer-focus@beamer.app
-///   State: ACTIVE
-/// ```
-///
-/// A real UUID line is identified by containing `@` and no leading
-/// whitespace. Any other unindented text is treated as free-form continuation
-/// and ignored. Returns `None` if the UUID is not mentioned.
+/// Parse `gnome-extensions list --details`: blocks keyed by UUID line (an
+/// unindented line containing `@`), each followed by indented `Key: value`
+/// lines. Unindented non-UUID text is description continuation; ignored.
+/// Returns `None` if the UUID is absent.
 fn parse_status(output: &str, uuid: &str) -> Option<Status> {
     let mut in_block = false;
     for line in output.lines() {
@@ -70,7 +44,7 @@ fn parse_status(output: &str, uuid: &str) -> Option<Status> {
             continue;
         }
         if is_uuid_line && in_block {
-            // Crossed into the next extension's block without finding State:.
+            // Next block without a State: line; treat as scanned but inactive.
             return Some(Status::Disabled);
         }
         if in_block {
@@ -85,12 +59,8 @@ fn parse_status(output: &str, uuid: &str) -> Option<Status> {
     if in_block { Some(Status::Disabled) } else { None }
 }
 
-/// Where on disk the extension's files live, to copy from at install time.
-/// Resolution order:
-///   1. `$BEAMER_EXTENSION_DIR` env var (dev / packaging override)
-///   2. `<exe_dir>/../share/beamer/extension/beamer-focus@beamer.app/` (FHS-packaged)
-///   3. `<exe_dir>/extension/beamer-focus@beamer.app/` (portable / dev cwd)
-///   4. `./extension/beamer-focus@beamer.app/` (cargo-run from repo root)
+/// Extension source dir: `$BEAMER_EXTENSION_DIR`, then FHS, portable, then
+/// `./extension/` for cargo-run from the repo root.
 pub fn locate_source_dir() -> Option<PathBuf> {
     if let Ok(env) = std::env::var("BEAMER_EXTENSION_DIR") {
         let p = PathBuf::from(env);
@@ -125,32 +95,31 @@ fn target_dir() -> Result<PathBuf> {
         .join(EXTENSION_UUID))
 }
 
-/// Extract `"version": N` from an extension metadata.json.
+/// `"version": N` from an extension metadata.json.
 fn parse_metadata_version(json: &str) -> Option<u32> {
     let value: serde_json::Value = serde_json::from_str(json).ok()?;
     value.get("version")?.as_u64().map(|v| v as u32)
 }
 
-/// Version of the extension bundled with this Beamer build.
+/// Bundled extension version.
 pub fn bundled_version() -> Option<u32> {
     let src = locate_source_dir()?;
     let json = std::fs::read_to_string(src.join("metadata.json")).ok()?;
     parse_metadata_version(&json)
 }
 
-/// Version of the extension files installed in the user's GNOME dir.
+/// Installed extension version.
 fn installed_version() -> Option<u32> {
     let dst = target_dir().ok()?;
     let json = std::fs::read_to_string(dst.join("metadata.json")).ok()?;
     parse_metadata_version(&json)
 }
 
-/// Refine an ACTIVE extension's status with version information. `live` is
-/// what the running Shell reports (v1 has no GetVersion method, so a D-Bus
-/// error maps to 1); `installed`/`bundled` come from the metadata files.
+/// Refine an ACTIVE status with versions. `live` comes from Shell (v1 has no
+/// GetVersion, so a D-Bus error maps to 1); the rest from metadata files.
 fn resolve_enabled_status(live: u32, installed: Option<u32>, bundled: Option<u32>) -> Status {
     let Some(bundled) = bundled else {
-        return Status::Enabled; // can't compare without the bundled files
+        return Status::Enabled; // nothing to compare against
     };
     if live >= bundled {
         return Status::Enabled;
@@ -161,11 +130,9 @@ fn resolve_enabled_status(live: u32, installed: Option<u32>, bundled: Option<u32
     }
 }
 
-/// Query GNOME for the extension's current state, then consult the
-/// filesystem to distinguish "never installed" from "installed but GNOME
-/// hasn't re-scanned yet" (the Wayland first-install case).
+/// Current state: GNOME's answer when it knows the UUID, else the filesystem
+/// (distinguishes never-installed from installed-but-not-yet-rescanned).
 pub fn status() -> Status {
-    // Ask GNOME first. If it knows the UUID, its answer is authoritative.
     if let Ok(o) = Command::new("gnome-extensions")
         .arg("list")
         .arg("--details")
@@ -182,9 +149,7 @@ pub fn status() -> Status {
             }
         }
     }
-    // GNOME doesn't know the UUID. If our files are already at the target
-    // path, install() has run — Shell just hasn't re-scanned. The user has
-    // to log out and back in.
+    // Unknown UUID but files in place: installed, awaiting Shell's rescan.
     if let Ok(dst) = target_dir() {
         if dst.join("metadata.json").exists() {
             return Status::PendingRestart;
@@ -193,15 +158,13 @@ pub fn status() -> Status {
     Status::NotInstalled
 }
 
-/// Copy the bundled extension into the user's GNOME extensions dir and
-/// enable it. Idempotent — re-running after a prior install updates the
-/// files.
+/// Copy the bundled extension into the GNOME extensions dir and enable it.
+/// Idempotent; re-running updates the files.
 pub fn install() -> Result<()> {
     let src = locate_source_dir()
         .ok_or_else(|| anyhow::anyhow!("extension source directory not found; set BEAMER_EXTENSION_DIR"))?;
     let dst = target_dir()?;
-    // Clear any stale files from a prior install so the target reflects
-    // only what's bundled with this Beamer version.
+    // Clear stale files so the target holds exactly this build's bundle.
     if dst.exists() {
         std::fs::remove_dir_all(&dst)?;
     }
@@ -218,29 +181,19 @@ pub fn install() -> Result<()> {
         .output()?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
-        // On Wayland, GNOME Shell only scans `~/.local/share/gnome-shell/
-        // extensions/` at login. The first install of a never-before-seen
-        // UUID will ALWAYS hit this: files are in place, but enable reports
-        // "Extension ... does not exist". That's not a failure — it's the
-        // architectural predicate of Wayland hot-loading. Swallow the
-        // specific error so install() returns Ok(); the caller's subsequent
-        // status() call will report PendingRestart and the UI prompts the
-        // user to log out and back in.
+        // First install on Wayland always reports "does not exist": Shell only
+        // scans at login. That means PendingRestart, not failure — swallow it
+        // so the caller's next `status()` can say so.
         let looks_like_pending_restart = err.to_ascii_lowercase().contains("does not exist");
         if !looks_like_pending_restart {
             anyhow::bail!("gnome-extensions enable failed: {}", err.trim());
         }
-        tracing::info!(
-            "install: enable reported UUID unknown — Wayland hot-load limit, user must log out and back in to activate"
-        );
+        tracing::info!("install: UUID unknown to Shell — re-login required");
     }
     Ok(())
 }
 
-/// Activate an already-installed extension that GNOME has scanned but not
-/// yet enabled (`Status::Disabled` — typically the INITIALIZED state right
-/// after the first post-install login). Kept separate from `install()` to
-/// avoid redundant file-copy work when the files are already in place.
+/// Enable an installed-but-disabled extension (no file copy).
 pub fn enable_installed() -> Result<()> {
     let out = Command::new("gnome-extensions")
         .arg("enable")
@@ -359,8 +312,7 @@ beamer-focus@beamer.app
 
     #[test]
     fn parse_status_ignores_description_text_before_state() {
-        // Regression: target extension's own Description continuation must not
-        // cause an early exit before we reach its State: line.
+        // Own Description continuation lines must not end the block early.
         let out = "\
 beamer-focus@beamer.app
   Name: Beamer Focus Helper

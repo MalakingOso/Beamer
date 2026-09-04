@@ -11,12 +11,8 @@ use crate::hotkey::{
     Modifiers, VK_LWIN, MAX_BINDINGS,
 };
 
-/// How often to rescan `/dev/input` for keyboards that appeared after startup.
-///
-/// Devices used to be enumerated exactly once, so a keyboard plugged in later —
-/// or one that re-enumerates after a suspend/resume or a Bluetooth reconnect —
-/// never got a listener and the hotkey silently did nothing on it until Beamer
-/// was restarted. Rescanning is a cheap directory walk plus an ioctl per node.
+/// Rescan `/dev/input` this often so keyboards plugged in after startup
+/// (or re-enumerated after suspend/Bluetooth reconnect) get listeners.
 const DEVICE_RESCAN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
 struct HookState {
@@ -128,7 +124,7 @@ fn evdev_key_to_vk(key: KeyCode) -> Option<u32> {
 }
 
 fn handle_key_event(key: KeyCode, value: i32, state: &mut HookState) {
-    // value: 0=release, 1=press, 2=repeat (ignore repeat)
+    // evdev value: 0=release, 1=press, 2=repeat (ignored).
     let is_press = value == 1;
     let is_release = value == 0;
     if !is_press && !is_release {
@@ -136,11 +132,10 @@ fn handle_key_event(key: KeyCode, value: i32, state: &mut HookState) {
     }
 
     if state.reset_flag.swap(false, Ordering::Relaxed) {
-        // Clear every binding, not just one — a config edit resets both.
+        // A config edit resets both bindings, not just one.
         state.binding_state = [BindingState::default(); MAX_BINDINGS];
     }
 
-    // Update modifier tracking
     match key {
         KeyCode::KEY_LEFTCTRL | KeyCode::KEY_RIGHTCTRL => state.ctrl_held = is_press,
         KeyCode::KEY_LEFTALT | KeyCode::KEY_RIGHTALT => state.alt_held = is_press,
@@ -156,8 +151,7 @@ fn handle_key_event(key: KeyCode, value: i32, state: &mut HookState) {
 
     let bindings = state.bindings.lock().unwrap().clone();
 
-    // The Win-key trigger is matched by keycode rather than VK because evdev
-    // reports left/right meta separately.
+    // Match Win by keycode: evdev reports left/right meta separately.
     let vk = if matches!(key, KeyCode::KEY_LEFTMETA | KeyCode::KEY_RIGHTMETA) {
         Some(VK_LWIN)
     } else {
@@ -165,9 +159,8 @@ fn handle_key_event(key: KeyCode, value: i32, state: &mut HookState) {
     };
     let Some(vk) = vk else { return };
 
-    // On release we must find the binding that is actually held: the modifiers
-    // may already be up by the time the trigger key is released, so matching on
-    // the chord again would find nothing and strand the binding in `armed`.
+    // On release match the held binding, not the chord: modifiers may
+    // already be up, which would find nothing and strand `armed`.
     let idx = if is_press {
         matching_binding(&bindings, vk, mods)
     } else {
@@ -224,9 +217,8 @@ impl HotkeyHandle {
     }
 }
 
-/// Start a global keyboard listener on dedicated threads (one per keyboard device).
-/// Uses evdev to read directly from /dev/input — works on both X11 and Wayland.
-/// Requires the user to be in the `input` group (or root).
+/// Global keyboard listener on dedicated threads (one per device) via evdev.
+/// Works on X11 and Wayland; requires the `input` group (or root).
 pub fn start_ll_hook(
     inject: HotkeyConfig,
     note: Option<HotkeyConfig>,
@@ -263,9 +255,7 @@ pub fn start_ll_hook(
 
     tracing::info!("Monitoring {} keyboard device(s) via evdev", keyboards.len());
 
-    // A device's path is dropped from `known` when its listener exits, so a
-    // keyboard that disconnects and reconnects is picked up by the next rescan
-    // rather than being remembered as "already watched" forever.
+    // Listener exit drops the path from `known` so reconnects are re-attached.
     let known = Arc::new(Mutex::new(known));
     for (path, device) in keyboards {
         spawn_device_listener(path, device, state.clone(), known.clone());
@@ -293,8 +283,7 @@ pub fn start_ll_hook(
     HotkeyHandle { bindings, reset_flag }
 }
 
-/// Read events from one keyboard until it errors out or disappears, then drop
-/// its path from `known` so a reconnect can be re-attached.
+/// Read one keyboard until it disappears; then drop its path from `known`.
 fn spawn_device_listener(
     path: PathBuf,
     mut device: Device,
@@ -322,8 +311,7 @@ fn spawn_device_listener(
                         if e.kind() == std::io::ErrorKind::WouldBlock {
                             std::thread::sleep(std::time::Duration::from_millis(10));
                         } else {
-                            // Unplugged (ENODEV) or a genuine read error —
-                            // either way this device is done.
+                            // Unplugged or unreadable — this device is done.
                             tracing::info!("evdev listener for {} exiting: {}", name, e);
                             break;
                         }

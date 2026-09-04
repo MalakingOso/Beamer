@@ -44,16 +44,10 @@ pub fn App() -> Element {
 
     let window = use_window();
 
-    // Center the window on the primary monitor (runs once on first render)
     app_setup::setup_window_centering(window.clone());
 
-    // Cold-start warmup splash. Runs once on first render: opens a small
-    // centered window, walks `warm_all` through keyring/audio/(mpris)/network,
-    // then closes itself. Pays the one-time costs that would otherwise stall
-    // the first recording.
-    //
-    // `app_ready` flips true when the splash closes; sticky notes restored
-    // from disk wait on it so they don't pop up over the loading screen.
+    // Cold-start warmup splash. `app_ready` flips true when it closes; restored
+    // stickies wait on it so they don't pop over the loading screen.
     let app_ready = use_signal(|| false);
     app_setup::setup_splash(window.clone(), app_ready);
 
@@ -62,46 +56,32 @@ pub fn App() -> Element {
     let last_injection = use_signal(|| "No injection yet".to_string());
     let history = use_signal(TranscriptionHistory::load);
     let mut notes = use_signal(NoteStore::load);
-    // Loaded after the notes, and from the same automerge document: the note
-    // store opens it and owns the handle.
+    // After the notes, from the same automerge document (the note store owns the handle).
     let tasks = use_signal(|| TaskStore::load_beside(&notes.peek()));
     let config = use_signal(|| Config::load().unwrap_or_default());
-    // Record whether a sync server is configured, once, before anything can
-    // delete an attachment: `notes::edit::release_attachment_bytes` reads
-    // this to decide whether it is still safe to remove a file nothing local
-    // references any more. Same `should_start` check `sync_client` uses to
-    // decide whether to connect at all, reused rather than duplicated.
     // `use_hook`, not a plain call: `Signal::write` notifies every subscriber
-    // whether or not the value changed, so doing this on every render would
-    // churn the whole app for a flag that is fixed for the life of the process.
+    // even when the value is unchanged, and this flag is fixed for the process.
+    // Must run before anything can delete an attachment (`release_attachment_bytes`
+    // reads it). Same `should_start` check `sync_client` uses.
     use_hook(move || {
         notes.write().set_sync_enabled(sync_client::should_start(&config.peek().sync.url));
     });
     let status_log = use_signal(StatusLog::new);
-    // A corpus that failed to load used to be replaced by an empty store in
-    // silence. Say so instead, once, on the first render.
     app_setup::report_load_errors(notes, tasks, status_log);
     let update_status = use_signal(UpdateStatus::default);
     // Which hotkey started the current recording, so the pill can say so.
     let active_mode = use_signal(CaptureMode::default);
 
-    // Recording pill window — small, transparent, click-through, always-on-top.
-    // Linux: the pill is replaced by an AppIndicator tray-icon swap (see
-    // `linux_integration`). GNOME Shell doesn't accept in-tray GTK widgets
-    // from standalone apps, and the floating-pill approach has
-    // compositor/transparency quirks under Wayland.
+    // Linux replaces the pill with an AppIndicator tray-icon swap (see
+    // `linux_integration`): no in-tray GTK widgets or floating pill under Wayland.
     #[cfg(not(target_os = "linux"))]
     app_setup::setup_recording_pill(window.clone(), rec_state, active_mode, config);
 
-    // Linux: swap the tray icon to reflect recording state and pump levels
-    // into the shell pill (mirrors Handy's behavior).
     #[cfg(target_os = "linux")]
     linux_integration::setup_linux_integration(rec_state, active_mode, config);
 
-    // The model passes live here rather than in the window that asked for
-    // them: `App()`'s scope outlives every sticky, so closing a note mid-pass
-    // cannot cancel it. Created before the orchestrator so its handle can be
-    // threaded into the capture path.
+    // Model passes live here, not in the requesting window: `App()`'s scope
+    // outlives every sticky, so closing a note mid-pass cannot cancel it.
     let note_passes = pipeline::use_pipeline(config, notes, tasks, status_log);
 
     let coroutine = use_coroutine(move |rx: UnboundedReceiver<HotkeyEvent>| {
@@ -126,13 +106,8 @@ pub fn App() -> Element {
         let cfg = config.peek();
         let initial = HotkeyConfig::parse(&cfg.recording.hotkey, cfg.recording.mode == "toggle")
             .unwrap_or_else(|| {
-                // Unlike `note_hotkey_config()`, a `None` here does not mean
-                // "unbound": the dictation hotkey always falls back to a
-                // working default (Ctrl+Space) rather than leaving recording
-                // unreachable. That fallback is silent unless logged: a
-                // hand-edited config like "Ctrl+Super+Space" now fails to
-                // parse (Super paired with another key is rejected) and
-                // quietly rebinds to Ctrl+Space instead.
+                // Unlike the note hotkey, the dictation hotkey falls back to
+                // Ctrl+Space rather than "unbound", so recording stays reachable.
                 tracing::warn!(
                     hotkey = %cfg.recording.hotkey,
                     "dictation hotkey failed to parse; falling back to the default Ctrl+Space"
@@ -144,7 +119,6 @@ pub fn App() -> Element {
 
         let handle = Rc::new(start_ll_hook(initial, note_binding, hook_tx));
 
-        // Bridge hook events to the orchestrator coroutine
         spawn(async move {
             while let Some(event) = hook_rx.recv().await {
                 coroutine.send(event);
@@ -154,17 +128,12 @@ pub fn App() -> Element {
         handle
     });
 
-    // Re-configure hotkey when config changes
     use_effect(move || {
         let cfg = config.read();
         let new_config = HotkeyConfig::parse(&cfg.recording.hotkey, cfg.recording.mode == "toggle")
             .unwrap_or_else(|| {
-                // Match the use_hook fallback above: a dictation hotkey that
-                // fails to parse must not stall the note binding too. Without
-                // this fallback, a hand-edited config carrying a rejected
-                // dictation string (e.g. "Ctrl+Super+Space") would silently
-                // stop every subsequent note-hotkey edit from ever reaching
-                // `update_configs`.
+                // Same fallback as above: a bad dictation string must not stall
+                // the note binding from reaching `update_configs`.
                 tracing::warn!(
                     hotkey = %cfg.recording.hotkey,
                     "dictation hotkey failed to parse; falling back to the default Ctrl+Space"
@@ -174,39 +143,27 @@ pub fn App() -> Element {
         hotkey_handle.update_configs(new_config, cfg.recording.note_hotkey_config());
     });
 
-    // Sticky note windows: one effect keeps the set of open windows matching
-    // the set of notes that should be showing. Covers both a note dictated just
-    // now and notes restored from disk at startup.
+    // Keeps open windows matching notes that should be showing (fresh and restored).
     let sticky_registry = sticky_windows::setup_sticky_windows(window.clone(), notes, tasks, note_passes, config, app_ready);
 
-    // Coalesce per-keystroke note edits into one write. `do_note_capture`
-    // flushes a newly captured transcript immediately — that one must never be
-    // lost — so this tick only ever carries body/colour/geometry edits.
+    // Coalesce per-keystroke edits into one write. Captured transcripts flush
+    // immediately in `do_note_capture`; this tick only carries body/colour/geometry.
     app_setup::setup_notes_flush(notes, tasks);
 
-    // Live sync against `sync_server`, off unless `config.sync.url` names a
-    // server. A no-op call when it is empty, see `sync_client::should_start`.
-    // The returned handle is what `SyncCard` in Settings reads to show the
-    // connection's live state without opening a second one of its own.
+    // Live sync, off unless `config.sync.url` names a server. The handle feeds
+    // `SyncCard`'s live state without a second connection.
     //
-    // `sync_doc` has to be its own statement, not inlined as an argument
-    // below: `use_sync_client` itself writes `notes` (see its doc), and a
-    // `notes.peek()` used inline as a call argument does not drop its borrow
-    // until the whole statement finishes, which is after that write already
-    // ran. Splitting it here is what lets the borrow end first.
+    // `sync_doc` is its own statement, not an inline argument: `use_sync_client`
+    // writes `notes`, and an inline `peek()` would hold its borrow past that write.
     let sync_doc = notes.peek().sync_doc();
     let sync_client_handle = sync_client::use_sync_client(config, sync_doc, notes, tasks);
 
-    // Background update check on startup (3s delay to keep launch snappy)
     app_setup::setup_update_check(config, update_status);
 
-    // Register the AUMID's Start Menu shortcut so toast notifications show
-    // under Beamer's own name. See `ui::windows_shortcut` for why this is
-    // needed at all.
+    // Start Menu shortcut so toasts show under Beamer's own name (see `windows_shortcut`).
     #[cfg(target_os = "windows")]
     app_setup::setup_windows_aumid_shortcut();
 
-    // Tray menu clicks + tray icon left-click (toggle window visibility).
     app_setup::setup_menu_handlers(&items, window.clone(), current_page, last_injection, config, update_status, notes, tasks);
     app_setup::setup_tray_click_handler(window.clone());
 
@@ -217,7 +174,6 @@ pub fn App() -> Element {
             link { rel: "stylesheet", href: asset!("/assets/styles.css") }
         }
         div { class: "app-container",
-            // Left column: badge + sidebar stacked vertically
             div { class: "left-column",
                 div { class: "corner-badge",
                     img {
@@ -244,9 +200,6 @@ pub fn App() -> Element {
                             IconNote {}
                         }
                         button {
-                            // Directly after Notes: a task is only ever reached
-                            // through the note that produced it, so the two
-                            // read as one pair.
                             class: if page == Page::Tasks { "sidebar-icon active" } else { "sidebar-icon" },
                             onclick: move |_| current_page.set(Page::Tasks),
                             IconListChecks {}
@@ -266,12 +219,10 @@ pub fn App() -> Element {
                     }
                 }
             }
-            // Right column: titlebar + content stacked vertically
             div { class: "right-column",
                 div {
                     class: "titlebar",
-                    // -webkit-app-region:drag works on Windows (Chromium webview)
-                    // but not on Linux (WebKitGTK). Use onmousedown to drag on all platforms.
+                    // `-webkit-app-region:drag` fails on Linux (WebKitGTK): drag via onmousedown.
                     onmousedown: {
                         let window = window.clone();
                         move |_| { let _ = window.drag_window(); }
@@ -279,8 +230,7 @@ pub fn App() -> Element {
                     div { class: "titlebar-controls",
                         button {
                             class: "titlebar-btn minimize",
-                            // Prevent the titlebar's onmousedown from starting a window drag,
-                            // which would grab the pointer and swallow the click (Linux/WebKitGTK).
+                            // Else the titlebar drag grabs the pointer and swallows the click.
                             onmousedown: move |e| e.stop_propagation(),
                             onclick: {
                                 let window = window.clone();

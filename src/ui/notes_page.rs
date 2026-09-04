@@ -1,14 +1,8 @@
-//! The notes board — every note in one place, searchable.
+//! The notes board — every note in one place, searchable. Clicking a card is
+//! the way back to a closed note's window.
 //!
-//! Sticky windows are how you *use* a note; this is how you find one again once
-//! there are more than a handful, and how you get back a note whose window you
-//! closed. Clicking a card is the only way back to a closed note, which is why
-//! `sticky_windows::reopen_note` prunes stale registry slots at this gesture
-//! rather than in the reconciler.
-//!
-//! The store and the window registry arrive as **props**. Nothing in `src/`
-//! calls `provide_context`, so `use_context` here would panic rather than
-//! resolve; pages in this app take props.
+//! Store and registry arrive as props: nothing in `src/` calls
+//! `provide_context`, so `use_context` here would panic rather than resolve.
 
 use dioxus::prelude::*;
 
@@ -30,11 +24,8 @@ pub struct NotesPageProps {
 /// How much of a note's body a card shows before trimming.
 const PREVIEW_CHARS: usize = 180;
 
-/// A card's text, with attachment tokens stripped.
-///
-/// Without `plain_text` a card for a note holding a photo would read
-/// "[[beamer:18f2a…]]", which is both meaningless and the only thing a
-/// picture-only note would show.
+/// Card text with attachment tokens stripped — otherwise a picture-only note
+/// would show only "[[beamer:18f2a…]]".
 fn preview(note: &Note) -> String {
     let body = blocks::plain_text(&note.body);
     let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -63,14 +54,10 @@ pub fn NotesPage(props: NotesPageProps) -> Element {
 
     let mut query = use_signal(String::new);
     let mut show_archived = use_signal(|| false);
-    // Which archived note has been asked about but not yet confirmed. A
-    // two-step button rather than a modal: deletion is permanent and needs a
-    // deliberate second act, and this app has no dialog primitive to borrow.
+    // Two-step delete (no dialog primitive): which archived note awaits confirmation.
     let mut pending_delete: Signal<Option<String>> = use_signal(|| None);
 
-    // Cloned into owned `Note`s rather than held as borrows: the rows below
-    // capture their ids in click handlers, which cannot outlive a `read()`
-    // guard on the store.
+    // Cloned to owned `Note`s: row click handlers cannot outlive a `read()` guard.
     let visible = use_memo(move || {
         let store = notes.read();
         let rows: Vec<&Note> = if *show_archived.read() {
@@ -110,31 +97,17 @@ pub fn NotesPage(props: NotesPageProps) -> Element {
                         class: "notes-new-btn",
                         title: "New note",
                         onclick: move |_| {
-                            // No pipeline request, deliberately. The automatic
-                            // trigger lives at exactly one site —
-                            // `do_note_capture`, reachable only from dictation
-                            // — which is what makes "a typed note is never
-                            // rewritten unasked" structural rather than a check
-                            // somebody could forget. S1-mini normalizes
-                            // *transcripts*; typed prose is outside its
-                            // training distribution, quite apart from it being
-                            // presumptuous to rewrite what someone deliberately
-                            // wrote. A typed note reaches a model only when the
-                            // user presses the note's own footer affordance.
-                            //
-                            // No `new_window` call either: `create` sets
-                            // `open: true`, and the reconciler opens a window
-                            // for any note that is open and not archived.
+                            // No pipeline request: typed notes reach a model only
+                            // via the note's own footer affordance, never unasked.
+                            // No `new_window` call: `create` sets `open: true`,
+                            // which is what the reconciler opens.
                             notes.write().create(
                                 String::new(),
                                 NoteColor::random(),
                                 NoteOrigin::Typed,
                             );
-                            // Flushed inline, like `do_note_capture`, and
-                            // through `flush_stores` because that is the only
-                            // thing that writes the document. `flush_if_dirty`
-                            // would write the JSON mirror alone, which nothing
-                            // reads back.
+                            // Inline through `flush_stores` (the only document
+                            // writer), like `do_note_capture`.
                             crate::notes::flush_stores(
                                 &mut notes.write(),
                                 &mut tasks.write(),
@@ -231,11 +204,8 @@ pub fn NotesPage(props: NotesPageProps) -> Element {
                                             },
                                             "Restore"
                                         }
-                                        // Delete is offered only on an archived
-                                        // note, and only in two steps. Archive
-                                        // stays the everyday gesture; this is
-                                        // the one that cannot be undone, and it
-                                        // takes the note's task rows with it.
+                                        // Archived notes only, two steps: permanent,
+                                        // and takes the note's task rows with it.
                                         button {
                                             class: if confirming {
                                                 "note-action-btn note-action-danger"
@@ -256,12 +226,8 @@ pub fn NotesPage(props: NotesPageProps) -> Element {
                                                         return;
                                                     }
                                                     pending_delete.set(None);
-                                                    // Rows first: a crash
-                                                    // between the two would
-                                                    // otherwise strand tasks
-                                                    // whose note is gone,
-                                                    // rather than a note whose
-                                                    // rows are.
+                                                    // Rows first, so a crash can't strand
+                                                    // tasks whose note is gone.
                                                     tasks.write().delete_for_note(&id);
                                                     notes.write().delete(&id);
                                                     crate::notes::flush_stores(
@@ -278,9 +244,7 @@ pub fn NotesPage(props: NotesPageProps) -> Element {
                                             onclick: {
                                                 let id = id.clone();
                                                 move |e: Event<MouseData>| {
-                                                    // Without this the card's own
-                                                    // handler also fires and reopens
-                                                    // the note we just archived.
+                                                    // Else the card reopens the note just archived.
                                                     e.stop_propagation();
                                                     notes.write().archive(&id);
                                                 }

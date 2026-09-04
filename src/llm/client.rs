@@ -1,9 +1,6 @@
-//! HTTP client for the standalone llama.cpp server.
-//!
-//! Plain async `reqwest`, not `spawn_blocking`: `reqwest::Client` is already
-//! async and its futures are driven by the tokio runtime dioxus-desktop owns.
-//! Wrapping an async call in `spawn_blocking` would move a future onto a
-//! blocking thread that never polls it.
+//! HTTP client for the standalone llama.cpp server: plain async `reqwest` on
+//! the dioxus-desktop runtime. Never wrap in `spawn_blocking` — that moves a
+//! future onto a thread that never polls it.
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -13,22 +10,12 @@ use serde::Deserialize;
 
 static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
-/// Build the shared client with the configured connect timeout, baking it in
-/// for the process's whole lifetime. Call once, at startup, before anything
-/// reaches [`http_client`]. A `OnceLock` keeps only whichever value gets
-/// there first.
-///
-/// Takes a plain [`Duration`] rather than `crate::config::Config`: no file
-/// under `src/llm/` may use a crate-rooted path, because `src/bin/task_eval.rs`
-/// `#[path]`-includes this module directly and there is no `src/lib.rs` to
-/// give one. The caller (`main.rs`, where the config is already loaded) reads
-/// `cfg.llm.connect_timeout_ms` and passes the `Duration` in.
-///
-/// A second call is a harmless no-op: `OnceLock::get_or_init` only ever runs
-/// the closure once. That is also why this deliberately does *not* re-plumb
-/// the client through config on every request. A live-reloading connect
-/// timeout would need a client rebuilt per change, and the Local AI settings
-/// card says plainly that this setting takes effect on restart instead.
+/// Build the shared client with the configured connect timeout, baked in for
+/// the process lifetime. Call once at startup before [`http_client`]; the
+/// `OnceLock` keeps the first value and a second call is a no-op. Takes a
+/// `Duration`, not the app config: this module is also path-included by
+/// `task_eval`, where that type does not exist. No live reload — the setting
+/// takes effect on restart.
 pub fn init_http_client(connect_timeout: Duration) {
     let _ = CLIENT.get_or_init(|| {
         reqwest::Client::builder()
@@ -41,18 +28,9 @@ pub fn init_http_client(connect_timeout: Duration) {
     });
 }
 
-/// Shared client, mirroring `transcription::http_client()`: one connection pool
-/// for the process rather than a fresh one per probe.
-///
-/// Visible to `chat.rs` so completions reuse this pool rather than opening a
-/// second one — a per-request `Client` would discard the kept-alive connection
-/// between the cleanup and extraction passes of the same note.
-///
-/// Falls back to `reqwest::Client::new()` (no explicit connect timeout) if
-/// [`init_http_client`] was never called first. That only happens in tests and
-/// in the `task_eval` binary, neither of which reaches the network here; the
-/// ordinary process path always calls `init_http_client` from `main.rs`,
-/// once, before the Dioxus app starts.
+/// Shared client: one connection pool for the process, reused by `chat.rs`.
+/// Falls back to a default client if [`init_http_client`] never ran (tests and
+/// `task_eval` only; the app always calls it at startup).
 pub(super) fn http_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(reqwest::Client::new)
 }
@@ -60,17 +38,13 @@ pub(super) fn http_client() -> &'static reqwest::Client {
 /// One model the server is serving.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelInfo {
-    /// The GGUF filename stem. This is what a request's `model` field must say.
+    /// GGUF filename stem; what a request's `model` field must say.
     pub id: String,
-    /// `loaded`, `sleeping` or `unloaded`, verbatim from the server. Passed
-    /// through rather than parsed into an enum: it is displayed, not branched
-    /// on, and a server that grows a fourth state should show it rather than
-    /// collapse it into "unknown".
+    /// Verbatim server status, displayed not branched on — a new server-side
+    /// state should show rather than collapse into "unknown".
     pub status: String,
 }
 
-/// `GET {base_url}/v1/models`, tolerating a trailing slash on the configured
-/// URL — users paste URLs, and `http://host:8080//v1/models` is a 404.
 pub fn models_url(base_url: &str) -> String {
     format!("{}/v1/models", base_url.trim_end_matches('/'))
 }
@@ -109,10 +83,8 @@ pub fn parse_models(body: &str) -> Result<Vec<ModelInfo>> {
         .collect())
 }
 
-/// Turn a failed probe into something worth showing a user.
-///
-/// Split from the request itself because a `reqwest::Error` cannot be
-/// constructed in a test, and the classification is the part that can be wrong.
+/// Turn a failed probe into user-facing text. Split from the request because
+/// `reqwest::Error` cannot be built in tests.
 pub fn failure_message(timed_out: bool, connect_failed: bool, status: Option<u16>) -> String {
     if let Some(code) = status {
         return format!("Server returned HTTP {code}");
@@ -126,14 +98,9 @@ pub fn failure_message(timed_out: bool, connect_failed: bool, status: Option<u16
     "Could not reach the server".to_string()
 }
 
-/// Ask the server what it is serving.
-///
-/// ⚠️ **Never call this on a timer, and never as a background health check.**
-/// A status read resets the server's per-model idle clock, so a periodic probe
-/// pins the ~3 GB extraction model in VRAM permanently — with no error, no log
-/// line and no user-visible symptom until something else needs the memory. On
-/// button press and once when the settings page opens, nowhere else. This is a
-/// correctness constraint, not a performance preference.
+/// Ask the server what it is serving. Never on a timer or as a background
+/// check: a status read resets the per-model idle clock and would pin the
+/// extraction model in VRAM silently. Button press and settings-page open only.
 pub async fn probe(base_url: &str, timeout: Duration) -> Result<Vec<ModelInfo>, String> {
     let url = models_url(base_url);
     let response = http_client()
@@ -159,9 +126,7 @@ pub async fn probe(base_url: &str, timeout: Duration) -> Result<Vec<ModelInfo>, 
 mod tests {
     use super::*;
 
-    /// Trimmed from a real response of the running server (2026-08-21). The
-    /// server sends far more per entry — args, presets, architecture — and the
-    /// parser must ignore all of it rather than fail on an unknown field.
+    /// Trimmed real server response; the parser must ignore unknown fields.
     const REAL_RESPONSE: &str = r#"{
       "data": [
         {"id":"gemma-4-E2B_q4_0-it","object":"model","owned_by":"llamacpp",
@@ -188,8 +153,7 @@ mod tests {
 
     #[test]
     fn a_model_without_a_status_is_still_listed() {
-        // The picker is populated from this list. Dropping an entry because its
-        // status was missing would hide a model the server is actually serving.
+        // Dropping this entry would hide a served model from the picker.
         let models = parse_models(r#"{"data":[{"id":"solo"}]}"#).unwrap();
         assert_eq!(models, vec![ModelInfo { id: "solo".into(), status: "unknown".into() }]);
     }
@@ -214,11 +178,8 @@ mod tests {
 
     #[test]
     fn init_http_client_is_idempotent() {
-        // The OnceLock this backs is process-global, so this only proves the
-        // call itself never panics on a second attempt, not which value won.
-        // Which value wins is exactly the "first caller wins" behaviour the
-        // task brief ruled out for config, and is why `main.rs`, not any
-        // caller inside `src/llm/`, is the one place this gets called.
+        // The backing OnceLock is process-global: this proves a second call
+        // never panics, not which value won.
         init_http_client(Duration::from_millis(1_234));
         init_http_client(Duration::from_millis(9_999));
         let _ = http_client();

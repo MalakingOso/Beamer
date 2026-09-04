@@ -16,8 +16,7 @@ pub struct StatusEntry {
 
 const MAX_ENTRIES: usize = 50;
 
-/// Ring-buffer-style log shown in the Debug card. Oldest entries are evicted
-/// when the buffer exceeds `MAX_ENTRIES`.
+/// Debug-card log. Oldest entries evicted past `MAX_ENTRIES`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StatusLog {
     pub entries: Vec<StatusEntry>,
@@ -43,7 +42,7 @@ impl StatusLog {
     }
 }
 
-/// Helper to push a status entry into a signal from async code.
+/// Push a status entry into a signal from async code.
 pub fn log_status(log: &mut Signal<StatusLog>, level: LogLevel, message: impl Into<String>) {
     log.write().push(level, message);
 }

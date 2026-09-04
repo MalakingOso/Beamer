@@ -1,21 +1,7 @@
-//! Machine-local note state.
-//!
-//! `pos`, `size` and `open` describe a window on one desktop, not a note's
-//! content, and belong here rather than on `Note`. `open` used to be the
-//! trap: `NoteStore::set_open` called `touch()`, which rewrote `modified`, so
-//! under any last-write-wins merge closing a sticky on one machine made that
-//! note look newer than a real edit made on another and won a merge it had
-//! no business winning. `size` had the milder version of the same problem:
-//! resizing a window generated sync churn with no content change.
-//!
-//! This store also carries `machine_id`, the short per-install suffix
-//! `notes::next_note_id` appends to every note id it mints. Two machines
-//! creating their first note in the same millisecond would otherwise produce
-//! the same id, and `Task.note_id` is a foreign key into that namespace, so a
-//! collision would silently reparent tasks onto the wrong note.
-//!
-//! Persisted at `<config_dir>/machine.json`, right beside `notes.json`, and
-//! **never synced**. That is the entire point of splitting it out.
+//! Machine-local note state (`pos`/`size`/`open`): window geometry, not content.
+//! Persisted at `<config_dir>/machine.json` and **never synced** — syncing it let a
+//! window close win a merge over a real edit. Also carries `machine_id`, the
+//! per-install suffix keeping note ids unique across machines.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -24,11 +10,8 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasher, Hasher};
 use std::path::PathBuf;
 
-/// One note's window: where it was, how big, and whether it is showing.
-///
-/// `Default` gives `open: false`, which is correct for an id nothing has
-/// touched yet (`NoteStore::create` sets it explicitly, and nothing else
-/// should default a note to visible).
+/// One note's window: where it was, how big, whether it is showing.
+/// `Default` is `open: false` (`create` sets it explicitly).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct WindowState {
     #[serde(default)]
@@ -48,23 +31,12 @@ pub struct MachineStore {
     path: PathBuf,
     #[serde(skip)]
     dirty: bool,
-    /// Set when `load_from` could not even tell whether the file exists
-    /// (`try_exists` erroring rather than answering `false`), rather than
-    /// when the file is missing outright. A fresh, empty store is still
-    /// built in memory so the rest of the session has somewhere to put
-    /// window state, but it must never be allowed to overwrite whatever is
-    /// really on disk. Same reasoning as `SyncDoc::read_only`, applied here
-    /// because a stat failure used to read as "the file is not there yet",
-    /// which set `dirty` and let the very next flush save a fresh machine id
-    /// and an empty window map over a real one.
+    /// Set when `load_from` could not even stat the file (not merely missing).
+    /// The in-memory store must then never reach disk over whatever is really there.
     #[serde(skip)]
     read_only: bool,
 }
 
-/// Used only as a transient placeholder while `serde_json` fills in the
-/// non-skipped fields during deserialization; every real caller overwrites
-/// `path` immediately after. No disk I/O, so it is safe as a `#[serde(skip)]`
-/// default source.
 impl Default for MachineStore {
     fn default() -> Self {
         Self {
@@ -78,11 +50,8 @@ impl Default for MachineStore {
 }
 
 impl MachineStore {
-    /// Four hex digits, good enough to make two installs' first note tell
-    /// apart. Not a uuid, on purpose (see `notes::next_note_id`):
-    /// `RandomState` is already randomly seeded per instance for
-    /// hash-flooding resistance, and salting its hasher with the wall clock
-    /// and this process's id costs nothing and adds real entropy on top.
+    /// Four hex digits distinguishing installs. Not a uuid on purpose: `RandomState`
+    /// is already per-instance seeded, salted here with wall clock + pid.
     fn generate_machine_id() -> String {
         let mut hasher = RandomState::new().build_hasher();
         hasher.write_i64(chrono::Local::now().timestamp_nanos_opt().unwrap_or_default());
@@ -90,8 +59,7 @@ impl MachineStore {
         format!("{:04x}", (hasher.finish() & 0xffff) as u16)
     }
 
-    /// A fresh, in-memory store at `path`, seeded with a new machine id. No
-    /// disk I/O. The caller decides when (or whether) to persist it.
+    /// A fresh in-memory store at `path`. No disk I/O; the caller decides when to persist.
     pub fn new(path: PathBuf) -> Self {
         Self {
             machine_id: Self::generate_machine_id(),
@@ -102,20 +70,9 @@ impl MachineStore {
         }
     }
 
-    /// Load from `path` (always `NoteStore::machine_storage_path()` in
-    /// production, an injectable temp path in tests, per `NoteStore::load_from`).
-    /// Generates a fresh machine id (and marks the store dirty, so the id
-    /// survives the next flush) when the file is missing, unreadable, or
-    /// corrupt. A corrupt file is quarantined rather than overwritten,
-    /// matching `NoteStore::load`.
-    ///
-    /// A path that cannot even be *stat*ed is not the same as one that is
-    /// missing: `try_exists()` tells them apart where `exists()` cannot (it
-    /// answers `false` for both, per its own docs), and only the genuinely
-    /// missing case is safe to treat as "nothing here yet, mint one and save
-    /// it". The stat-failure case latches `read_only` instead, so the fresh
-    /// in-memory store this session gets never reaches disk over whatever
-    /// the real file holds.
+    /// Missing/unreadable/corrupt files mint a fresh id (dirty, so it persists);
+    /// corrupt ones are quarantined. A path that cannot even be stat-ed latches
+    /// `read_only` instead — it is not the same as missing.
     pub fn load_from(path: PathBuf) -> Self {
         match path.try_exists() {
             Ok(false) => return Self { dirty: true, ..Self::new(path) },
@@ -170,9 +127,7 @@ impl MachineStore {
 
     pub fn flush_if_dirty(&mut self) -> bool {
         if self.read_only {
-            // See the field: this store could not even confirm the real
-            // file's absence, so nothing it holds in memory may reach disk,
-            // dirty or not.
+            // The real file's absence was never confirmed: nothing in memory may reach disk.
             self.dirty = false;
             return false;
         }
@@ -191,9 +146,7 @@ impl MachineStore {
         self.dirty
     }
 
-    /// No production caller yet. Reachable through `NoteStore::pos`, which
-    /// carries the full explanation. Exercised directly in this module's
-    /// tests.
+    /// No production caller yet; see `NoteStore::pos`.
     #[allow(dead_code)]
     pub fn pos(&self, id: &str) -> Option<(i32, i32)> {
         self.windows.get(id).and_then(|w| w.pos)
@@ -207,7 +160,7 @@ impl MachineStore {
         self.windows.get(id).is_some_and(|w| w.open)
     }
 
-    /// No production caller yet. See `pos`'s doc comment.
+    /// No production caller yet; see `pos`.
     #[allow(dead_code)]
     pub fn set_pos(&mut self, id: &str, pos: (i32, i32)) {
         let w = self.windows.entry(id.to_string()).or_default();
@@ -236,19 +189,14 @@ impl MachineStore {
         self.dirty = true;
     }
 
-    /// Drop the window entry for a note that was deleted outright, so
-    /// `machine.json` does not keep growing for a note that no longer
-    /// exists. The general safety net is `gc`, run on every load; this is
-    /// the immediate version for `NoteStore::delete`.
+    /// Drop a deleted note's window entry now (`gc` on load is the safety net).
     pub fn remove(&mut self, id: &str) {
         if self.windows.remove(id).is_some() {
             self.dirty = true;
         }
     }
 
-    /// Drop entries for ids not in `valid`. Run on every `NoteStore::load` so
-    /// a note deleted (on this machine, or synced as a deletion from another)
-    /// does not leave its window state behind forever.
+    /// Drop entries for ids not in `valid`. Run on every `NoteStore::load`.
     pub fn gc(&mut self, valid: &HashSet<&str>) {
         let before = self.windows.len();
         self.windows.retain(|id, _| valid.contains(id.as_str()));
@@ -257,17 +205,9 @@ impl MachineStore {
         }
     }
 
-    /// Lift a legacy note's `pos`/`size`/`open` into this store, for the
-    /// `notes.json` migration in `NoteStore::load`. Returns whether anything
-    /// was actually inserted, so the caller knows to also rewrite
-    /// `notes.json` and drop the stale keys there.
-    ///
-    /// Only fills a window with no entry yet. After the first migration,
-    /// `Note` no longer serializes these fields, so a legacy notes.json is
-    /// naturally read only once in practice, but the guard also means a
-    /// second load before the first save (say, a crash in between) cannot
-    /// clobber real window state that arrived in the meantime with stale
-    /// `None`s and `false`s reconstructed from the same old file.
+    /// Lift a legacy note's `pos`/`size`/`open` into this store. Only fills an empty
+    /// entry, so a second load before the first save cannot clobber newer state.
+    /// Returns whether anything was inserted (caller then rewrites `notes.json`).
     pub fn migrate_legacy(&mut self, id: &str, pos: Option<(i32, i32)>, size: Option<(u32, u32)>, open: bool) -> bool {
         if self.windows.contains_key(id) {
             return false;
@@ -366,9 +306,6 @@ mod tests {
         assert_eq!(store.size("n1"), Some((300, 200)));
         assert!(store.is_open("n1"));
 
-        // The user has since resized the window; a second migration pass
-        // (say, from a load before the first save landed) must not overwrite
-        // that with the old file's numbers.
         store.set_size("n1", (400, 300));
         assert!(
             !store.migrate_legacy("n1", Some((10, 20)), Some((300, 200)), true),
@@ -379,8 +316,6 @@ mod tests {
 
     #[test]
     fn two_machine_ids_are_never_the_same_by_construction() {
-        // Not a statistical claim about the generator, just a sanity check that
-        // `new` actually calls it rather than returning a constant.
         let a = MachineStore::new(temp_path("id_a")).machine_id;
         let b = MachineStore::new(temp_path("id_b")).machine_id;
         assert_ne!(a, b, "two fresh installs must not draw the same id in practice");

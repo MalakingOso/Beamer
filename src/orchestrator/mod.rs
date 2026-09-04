@@ -50,10 +50,8 @@ pub async fn run(
     while let Some(event) = hotkey_rx.next().await {
         match event {
             HotkeyEvent::RecordStart(capture_mode) => {
-                // Published BEFORE `handle_recording` sets `Recording`, so the
-                // indicator effect reads state and mode together on the same
-                // render. Set after, the pill would flash the dictation style
-                // for one frame before correcting itself.
+                // Set before `handle_recording` sets `Recording`, or the pill
+                // flashes the wrong style for one frame.
                 active_mode.set(capture_mode);
                 if let Err(e) = handle_recording(
                     &config,
@@ -100,10 +98,8 @@ async fn handle_recording(
     let backends = cfg.injection.backends.clone();
     let paste_shortcut = cfg.injection.paste_shortcut.clone();
 
-    // Matched exhaustively on purpose, mirroring `warmup.rs`. A `_ =>` here
-    // meant that any unrecognised backend string — a typo in config.toml, a
-    // name from a newer build — silently became ElevenLabs realtime, which is
-    // both a surprising destination and the one that used to freeze the app.
+    // Exhaustive on purpose: an unknown backend must error, never silently
+    // become ElevenLabs realtime.
     let (key_name, display_name) = match backend.as_str() {
         "voxtral" | "voxtral_batch" => ("mistral_api_key", "Voxtral"),
         "elevenlabs" | "elevenlabs_batch" => ("elevenlabs_api_key", "ElevenLabs"),
@@ -138,8 +134,7 @@ async fn handle_recording(
     }
 
     log_status(status_log, LogLevel::Info, format!("Connecting to {} realtime...", display_name));
-    // Loaded here rather than inside the backend so a missing/unreadable
-    // vocabulary file costs keyterms, never the recording.
+    // A missing vocabulary file costs keyterms, never the recording.
     let vocab = crate::config::vocabulary::Vocabulary::load()
         .map(|v| v.list().to_vec())
         .unwrap_or_else(|e| {
@@ -157,11 +152,8 @@ async fn handle_recording(
             )
             .await
         }
-        // Unreachable today — the match above rejects unknown names and the
-        // batch backends were routed away. Spelled out rather than `_ =>` so
-        // that adding a backend fails here instead of quietly becoming
-        // ElevenLabs, and returned rather than panicked so a mistake costs a
-        // recording rather than the process.
+        // Spelled out rather than `_ =>` so a new backend fails here
+        // instead of quietly becoming ElevenLabs.
         other => Err(anyhow::anyhow!("'{other}' is not a realtime backend")),
     };
     let mut session = match session_result {
@@ -190,8 +182,7 @@ async fn handle_recording(
 
     rec_state.set(RecordingState::Recording);
     log_status(status_log, LogLevel::Info, "Recording started");
-    // Guard resumes on drop, so playback is restored on every exit path below
-    // — including the audio-lost one, which used to leave media paused.
+    // Guard resumes playback on drop, on every exit path below.
     let media_pause = if cfg.recording.pause_media {
         crate::media::pause_media_if_playing()
     } else {
@@ -199,9 +190,7 @@ async fn handle_recording(
     };
     crate::sounds::play_start_sound();
 
-    // Tracks whether the backend ever really transcribed, so a stream that
-    // closes having delivered nothing can be named as the rejected connection
-    // it almost certainly is. See `ClosedStream`.
+    // Whether the backend ever really transcribed (see `ClosedStream`).
     let mut saw_live_event = false;
     let mut stop_reason = StopReason::UserStop;
     loop {
@@ -219,8 +208,7 @@ async fn handle_recording(
                         match try_send_reserving(&session.audio_tx, transcription::AUDIO_SENTINEL_RESERVE, bytes) {
                             SendOutcome::Sent => {}
                             SendOutcome::Full => warn_channel_full(&mut audio_drop_count, "Realtime audio_tx"),
-                            // WebSocket reader task exited — nobody left to
-                            // receive; normal teardown, not backpressure.
+                            // Reader task exited: normal teardown, not backpressure.
                             SendOutcome::Closed => {}
                         }
                     }
@@ -233,31 +221,16 @@ async fn handle_recording(
             }
 
             event = session.transcript_rx.recv() => {
-                // ⚠️ The `None` arm is load-bearing, not defensive. `recv()` on
-                // a closed channel returns `Ready(None)` immediately and
-                // forever, so falling through here leaves this `select!` with
-                // no await point at all: it completes instantly every
-                // iteration and spins the loop hot.
-                //
-                // That is worse here than anywhere else the same hazard
-                // appears (see the audio arm above and `stream_tail_audio`),
-                // because this loop has no deadline to escape by. `run` is a
-                // `use_coroutine` polled on the main thread, so the spin
-                // starves the Dioxus scheduler — including the task that
-                // bridges hotkey events in, which is the only thing that could
-                // have stopped it. The result is a frozen app that has to be
-                // killed. Any backend whose socket dies mid-recording lands
-                // here; ElevenLabs simply reaches it far more often, because
-                // it accepts the WebSocket upgrade before validating the key.
+                // ⚠️ The `None` arm must break: `recv()` on a closed channel
+                // returns `None` forever, so falling through spins this loop
+                // hot and starves the Dioxus scheduler — a frozen app.
                 let Some(ev) = event else {
                     let closed = ClosedStream::classify(saw_live_event);
                     let message = closed.message(display_name);
                     tracing::warn!("{}", message);
                     log_status(status_log, closed.level(), message.clone());
                     if closed == ClosedStream::NeverStarted {
-                        // The connection was refused in all but name. Without
-                        // a notification this reads as a recording that just
-                        // produced nothing.
+                        // Otherwise a refused connection looks like an empty recording.
                         show_notification("Beamer", &message);
                     }
                     stop_reason = StopReason::TranscriptLost;
@@ -296,19 +269,13 @@ async fn handle_recording(
         }
     }
 
-    // ─── Shared teardown ──────────────────────────────────────────────────
-    // Runs for BOTH exit reasons. All of this used to live only inside the
-    // `RecordStop` arm, so losing the mic mid-recording skipped the stop
-    // sound, left the pill stuck on "Recording", never resumed the media the
-    // session had paused, and discarded audio the backend had already
-    // received instead of committing it and injecting the transcript.
+    // Shared teardown for both exit reasons.
     crate::sounds::play_stop_sound();
     rec_state.set(RecordingState::Processing);
     drop(media_pause);
 
-    // Keep capturing briefly so the last word isn't clipped. Pointless when
-    // the audio channel is what died, and `recv()` on a closed channel returns
-    // immediately, which would spin this loop hot for the full 400ms.
+    // Skip tail capture when the audio channel died: `recv()` on a closed
+    // channel returns immediately and would spin hot until the deadline.
     if stop_reason == StopReason::UserStop {
         stream_tail_audio(&mut audio_rx, &session.audio_tx, &mut audio_drop_count).await;
     }
@@ -365,7 +332,7 @@ async fn drain_final_transcripts(
     }
 }
 
-/// Drive one batch recording session: capture mic → buffer all PCM → POST to ElevenLabs batch API.
+/// Drive one batch recording session: capture mic → buffer all PCM → POST to the batch API.
 async fn handle_batch_recording(
     backend: &str,
     api_key: &str,
@@ -395,7 +362,7 @@ async fn handle_batch_recording(
 
     rec_state.set(RecordingState::Recording);
     log_status(status_log, LogLevel::Info, "Recording started (batch mode)");
-    // Guard resumes on drop — see the realtime path for why this isn't a bool.
+    // Guard resumes playback on drop, on every exit path below.
     let media_pause = if cfg.recording.pause_media {
         crate::media::pause_media_if_playing()
     } else {
@@ -403,7 +370,6 @@ async fn handle_batch_recording(
     };
     crate::sounds::play_start_sound();
 
-    // Collect all PCM audio into a buffer
     let mut pcm_buffer: Vec<u8> = Vec::new();
     let mut stop_reason = StopReason::UserStop;
     loop {
@@ -429,13 +395,12 @@ async fn handle_batch_recording(
         }
     }
 
-    // Shared teardown — runs for both exit reasons (see the realtime path).
+    // Shared teardown for both exit reasons.
     crate::sounds::play_stop_sound();
     rec_state.set(RecordingState::Processing);
     drop(media_pause);
 
-    // Capture tail audio so the last word isn't clipped. Skipped when the
-    // audio channel is what died — `recv()` would return immediately and spin.
+    // Skip tail capture when the audio channel died (see the realtime path).
     if stop_reason == StopReason::UserStop {
         buffer_tail_audio(&mut audio_rx, &mut pcm_buffer).await;
     }
@@ -445,8 +410,7 @@ async fn handle_batch_recording(
         return Ok(());
     }
 
-    // Check audio levels — if the buffer is all silence, the mic may not be
-    // capturing or the wrong device is selected
+    // Warn if the buffer is all silence (wrong device or muted mic).
     let (max_amplitude, rms) = {
         let mut peak: u16 = 0;
         let mut sum_sq: f64 = 0.0;

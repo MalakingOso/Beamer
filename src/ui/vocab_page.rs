@@ -11,7 +11,6 @@ pub fn VocabPage() -> Element {
     });
     let mut new_term = use_signal(|| String::new());
     let mut filter = use_signal(|| String::new());
-    // Which term index is being edited (None = not editing)
     let mut editing: Signal<Option<usize>> = use_signal(|| None);
     let mut edit_value = use_signal(|| String::new());
 
@@ -68,9 +67,7 @@ pub fn VocabPage() -> Element {
         if idx < terms.len() {
             let old = terms[idx].clone();
             if old != new_val {
-                // `rename` edits in place, so the on-disk order matches what
-                // the list shows here. (remove + add would append instead,
-                // making the term jump to the bottom after a restart.)
+                // `rename` edits in place; remove + add would move the term to the bottom.
                 if let Ok(mut vocab) = crate::config::vocabulary::Vocabulary::load() {
                     if let Err(e) = vocab.rename(&old, &new_val) {
                         tracing::error!("Failed to rename vocabulary term: {}", e);
@@ -103,7 +100,6 @@ pub fn VocabPage() -> Element {
                 "Custom terms help the transcription engine recognise names, acronyms, and jargon it wouldn't otherwise get right."
             }
 
-            // Add new term
             div { class: "vocab-add-row",
                 input {
                     class: "input input-mono vocab-add-input",
@@ -126,7 +122,6 @@ pub fn VocabPage() -> Element {
                 }
             }
 
-            // Filter
             if total_count > 5 {
                 input {
                     class: "input vocab-filter",
@@ -138,7 +133,6 @@ pub fn VocabPage() -> Element {
                 }
             }
 
-            // Term list
             if filtered.read().is_empty() && total_count > 0 {
                 div { class: "empty-state",
                     span { class: "empty-state-text", "No matching terms" }

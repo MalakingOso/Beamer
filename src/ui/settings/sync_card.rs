@@ -1,13 +1,6 @@
-//! Settings card for the live sync client. Aimed at someone who has never
-//! heard of a CRDT or a WebSocket: a toggle, one address field, and a plain
-//! sentence describing what the connection is actually doing right now.
-//!
-//! Dumb like every other card: plain values in, `EventHandler`s out,
-//! persisted by `settings::save_config`, except `status`, which is the
-//! `Signal<sync_client::SyncStatus>` `use_sync_client` already writes.
-//! `SyncCard` reads it; it never writes it, and it never opens a socket of
-//! its own to check. See `sync_client.rs` for why that would mean a second
-//! `sync::State` and a second peer from the server's point of view.
+//! Settings card for the sync client: a toggle, one address field, and the
+//! live connection state. Reads `status` (owned by `use_sync_client`); never
+//! opens its own socket, which would register a second peer server-side.
 
 use dioxus::prelude::*;
 
@@ -16,27 +9,21 @@ use crate::ui::components::{Card, Toggle};
 
 #[derive(Props, Clone, PartialEq)]
 pub struct SyncCardProps {
-    /// Empty means sync is off. The same convention `note_hotkey` uses.
+    /// Empty means off (same convention as `note_hotkey`).
     pub url: String,
-    /// The live connection's state, owned and written by `use_sync_client`.
+    /// Live connection state, owned by `use_sync_client`.
     pub status: Signal<SyncStatus>,
-    /// The URL the running client actually connected with, fixed at
-    /// startup. Compared against `url` so an edit that has been saved but
-    /// not yet applied (Beamer has not restarted) reads as "saved, restart
-    /// to connect" instead of describing the old connection as the new one.
+    /// URL the running client connected with at startup. Compared against
+    /// `url` so a saved-but-not-restarted edit reads as "restart to connect".
     pub started_url: String,
     pub on_url_change: EventHandler<String>,
 }
 
 #[component]
 pub fn SyncCard(props: SyncCardProps) -> Element {
-    // Whether the address field is shown at all. Seeded from whether a URL
-    // is already configured, but tracked separately from it: turning the
-    // toggle on has no default server to propose (unlike note capture's
-    // chord), so it can only reveal an empty field for the user to fill in,
-    // not write a value that would make `url` non-empty by itself. Turning
-    // it off clears the URL outright, matching `note_hotkey`'s precedent
-    // that off must genuinely mean unconfigured, not remembered-but-paused.
+    // Shown iff a URL is configured. Turning the toggle off clears `url`
+    // outright (off means unconfigured, not paused); turning it on just
+    // reveals an empty field, since there is no default server to propose.
     let mut show_field = use_signal(|| !props.url.trim().is_empty());
 
     let line = describe_status(&props.url, &props.started_url, &props.status.read());
@@ -73,13 +60,9 @@ pub fn SyncCard(props: SyncCardProps) -> Element {
                 }
             }
 
-            // Shown even after the field above is hidden by turning the
-            // toggle off: `use_sync_client` reads the address once, at
-            // startup, and does not tear the connection down on an edit (see
-            // its doc). A running connection outliving the toggle that just
-            // asked to turn it off is exactly the gap this status line exists
-            // to close, so it stays visible until the connection genuinely
-            // has nothing left to report.
+            // Stays visible while a pre-toggle connection is still running:
+            // the client reads the address once at startup, so turning the
+            // toggle off doesn't drop it until restart.
             if *show_field.read() || !props.started_url.is_empty() {
                 div { class: "card-row",
                     span { class: "sync-status {line.class}", "{line.headline}" }
@@ -96,8 +79,7 @@ pub fn SyncCard(props: SyncCardProps) -> Element {
     }
 }
 
-/// One line of plain-language status, plus an optional technical detail the
-/// card shows underneath it in a smaller, quieter line.
+/// Headline status plus an optional detail line shown underneath.
 struct StatusLine {
     headline: String,
     detail: Option<String>,
@@ -110,33 +92,17 @@ impl StatusLine {
     }
 }
 
-/// What the card should say about the connection right now.
-///
-/// Combines the live socket state with whether a saved address has actually
-/// taken effect: `use_sync_client` reads `config.sync.url` once, at mount,
-/// so an edit made through this card cannot reach the running client until
-/// the next restart (see that module's doc). Without this check the status
-/// line would keep describing the *old* address's connection, or lack of
-/// one, as though it were a verdict on the address just typed in.
-///
-/// Pure and independent of any `Signal`, so it is testable directly rather
-/// than through a Dioxus render.
+/// Status text for the current connection. Pure (no `Signal`) so tests can
+/// call it directly. Accounts for the client reading the URL once at startup:
+/// a saved edit takes effect only after restart.
 fn describe_status(url: &str, started_url: &str, live: &SyncStatus) -> StatusLine {
     let trimmed = url.trim();
     if trimmed.is_empty() {
         if started_url.is_empty() {
-            // The only way to reach this line is the toggle being on with
-            // nothing typed yet: the card hides this whole status block once
-            // the toggle is off, unless a connection from before is still
-            // running, which is the branch right below.
+            // Toggle on, nothing typed yet.
             return StatusLine::plain("Off until you enter the address above.", "off");
         }
-        // The toggle was switched off, which cleared `url`, but the
-        // connection `started_url` names is still running: `use_sync_client`
-        // only reads `config.sync.url` once, at startup, and does not tear a
-        // connection down when the config it started from changes. Saying
-        // nothing here would leave the card claiming sync is off while notes
-        // keep leaving this machine.
+        // Toggled off but the old connection still runs until restart.
         return StatusLine::plain("Sync stays on until you restart Beamer.", "connecting");
     }
     if trimmed != started_url {
@@ -149,22 +115,15 @@ fn describe_status(url: &str, started_url: &str, live: &SyncStatus) -> StatusLin
             detail: Some(detail.clone()),
             class: "bad",
         },
-        // `SyncStatus::Off` can only mean "the client has not reported its
-        // first transition yet" here, since `trimmed == started_url` and
-        // it is non-empty, which is exactly the condition `use_sync_client`
-        // checks before spawning the client at all.
+        // Here `Off` only means "no transition reported yet" (`url` matches a
+        // non-empty `started_url`, so the client did spawn).
         SyncStatus::Off | SyncStatus::Connecting => StatusLine::plain("Connecting...", "connecting"),
     }
 }
 
-/// Turn what a user actually types into the address field into the
-/// `wss://…` shape the client needs.
-///
-/// Someone typing a Tailscale hostname straight off their machine list, or
-/// pasting the `https://` link `tailscale serve` prints, should not have to
-/// know that a sync connection wants `wss://` and a `/sync` path. Anything
-/// that already names a scheme this function does not recognise is left
-/// exactly alone rather than guessed at.
+/// Normalize address-field input to the `wss://…/sync` shape the client needs.
+/// Bare hostnames gain scheme + path; `http(s)://` maps to `ws(s)://`.
+/// Unrecognised schemes are left alone.
 pub fn normalize_sync_url(input: &str) -> String {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -257,9 +216,7 @@ mod tests {
         assert_eq!(line.class, "off");
     }
 
-    /// The toggle was just switched off, clearing `url`, but the connection
-    /// it started with is still running until a restart. The card must keep
-    /// saying so rather than going quiet as though sync had already stopped.
+    /// Toggling off clears `url` but the old connection runs until restart.
     #[test]
     fn turning_the_toggle_off_does_not_claim_sync_has_already_stopped() {
         let line = describe_status("", "wss://host/sync", &SyncStatus::Connected);

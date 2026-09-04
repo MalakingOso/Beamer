@@ -1,26 +1,8 @@
-//! Turning one accepted task into a calendar entry.
-//!
-//! Hand-written RFC 5545. No new dependency: the subset needed is one `VTODO`
-//! or one `VEVENT`, and the parts that are actually easy to get wrong — folding
-//! and escaping — are the parts a crate would not save us from testing anyway.
-//!
-//! **One-way, by design.** The file is written to the temp dir and handed to
-//! whatever owns `text/calendar` (GNOME Calendar, Evolution, Thunderbird).
-//! Beamer cannot later edit or remove what the calendar imported; that is the
-//! accepted consequence of not integrating with Evolution Data Server. EDS over
-//! the existing `zbus` dependency is the documented upgrade path if live
-//! two-way entries are ever wanted.
-//!
-//! Nothing here reaches the calendar on its own. Export is a per-task button,
-//! which follows directly from the standing decision that tasks are suggestions
-//! and nothing is ever added unconfirmed.
-//!
-//! ⚠️ **Three shapes of DATE-TIME exist and only three**: floating local
-//! (`20260825T090000`), UTC (`20260825T090000Z`), and `TZID=`-qualified, which
-//! requires a whole `VTIMEZONE` block. An offset suffix — `20260825T090000+01:00`
-//! — is **not** one of them and is malformed however plausible it looks. Timed
-//! values here are emitted **floating**: "standup at nine" means nine where you
-//! are, which is exactly what floating means, and it needs no VTIMEZONE.
+//! One accepted task into a calendar entry. Hand-written RFC 5545, one-way:
+//! the file lands in the temp dir for the user's calendar app, and Beamer
+//! cannot edit or remove it afterwards.
+//! ⚠️ Timed values are emitted **floating** (no offset, no `Z`): an offset
+//! suffix like `20260825T090000+01:00` is malformed RFC 5545. Only `DTSTAMP` is UTC.
 
 use anyhow::Result;
 use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, Utc};
@@ -28,15 +10,11 @@ use std::path::PathBuf;
 
 use super::task::{Due, Task, TaskKind};
 
-/// Longest line the spec permits, in **octets**, excluding the CRLF.
+/// Longest content line the spec permits, in octets excluding CRLF.
 const FOLD_LIMIT: usize = 75;
 
-/// Escape a TEXT value: RFC 5545 §3.3.11.
-///
-/// Backslash first — escaping it after the others would double-escape the
-/// backslashes they just introduced. A note saying "Ring Sarah, then Bob"
-/// produces a malformed file without this, because an unescaped comma starts a
-/// second value.
+/// Escape a TEXT value (RFC 5545 §3.3.11). Backslash first, or the others'
+/// escapes get double-escaped.
 fn escape(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
@@ -45,9 +23,7 @@ fn escape(value: &str) -> String {
             ';' => out.push_str("\\;"),
             ',' => out.push_str("\\,"),
             '\n' => out.push_str("\\n"),
-            // A bare CR would end the line mid-value. Dropped rather than
-            // escaped: it carries no meaning of its own here.
-            '\r' => {}
+            '\r' => {} // bare CR carries no meaning here; dropping keeps the line intact
             _ => out.push(ch),
         }
     }
@@ -55,12 +31,8 @@ fn escape(value: &str) -> String {
 }
 
 /// Fold a content line to 75 octets, continuing with CRLF + one space.
-///
-/// ⚠️ Counts octets but breaks on **character** boundaries. Splitting at
-/// `line[..75]` panics on a multi-byte sequence and, worse, would emit half a
-/// codepoint if done over bytes — the same trap `ui::components::truncate_chars`
-/// documents, arriving here through task text that routinely carries the smart
-/// punctuation the STT backends emit.
+/// Counts octets but breaks on character boundaries: a byte-wise split would
+/// panic on or corrupt multi-byte text.
 fn fold(line: &str) -> String {
     let mut out = String::with_capacity(line.len() + line.len() / FOLD_LIMIT * 3);
     let mut octets = 0usize;
@@ -81,7 +53,7 @@ fn date(d: NaiveDate) -> String {
     d.format("%Y%m%d").to_string()
 }
 
-/// Floating local — no offset, no `Z`. See the module warning.
+/// Floating local datetime: no offset, no `Z`.
 fn date_time(dt: NaiveDateTime) -> String {
     dt.format("%Y%m%dT%H%M%S").to_string()
 }
@@ -89,45 +61,31 @@ fn date_time(dt: NaiveDateTime) -> String {
 /// How long an event with no stated end runs for.
 const DEFAULT_EVENT_HOURS: i64 = 1;
 
-/// Build a complete `.ics` for one task.
-///
-/// `now` is a parameter rather than a clock read so the output is reproducible
-/// in a test. `DTSTAMP` is the one value that genuinely must be UTC.
-///
-/// An undated task still exports: a `VTODO` with no `DUE` is valid and lands in
-/// the calendar's task list undated, which is more useful than refusing.
+/// Build a complete `.ics` for one task. `now` is a parameter so tests are
+/// reproducible. An undated task still exports as a `VTODO` with no `DUE`.
 pub fn calendar(task: &Task, now: DateTime<Utc>) -> String {
     let mut lines = vec![
         "BEGIN:VCALENDAR".to_string(),
         "VERSION:2.0".to_string(),
         "PRODID:-//Beamer//Notes//EN".to_string(),
         "CALSCALE:GREGORIAN".to_string(),
-        // PUBLISH, not REQUEST: this is a file handed to the user's own
-        // calendar, not an invitation sent to anybody.
-        "METHOD:PUBLISH".to_string(),
+        "METHOD:PUBLISH".to_string(), // a file for the user's own calendar, not an invitation
     ];
 
     let due = task.due_parsed();
     let component = match task.kind {
-        // An event needs a start. A task the model called an appointment but
-        // gave no date to has nothing to start at, so it degrades to a VTODO
-        // rather than emitting an invalid VEVENT.
+        // A dateless "event" has nothing to start at; degrade to VTODO, not an invalid VEVENT.
         TaskKind::Event if due.is_some() => "VEVENT",
         _ => "VTODO",
     };
 
     lines.push(format!("BEGIN:{component}"));
-    // Stable, so re-exporting the same task updates the calendar's copy rather
-    // than adding a duplicate. Prefixed because a bare `next_id` value is not
-    // distinctive enough to be globally unique, which UID is required to be.
+    // Stable UID so re-exporting updates the calendar's copy instead of duplicating it.
     lines.push(format!("UID:beamer-{}@beamer.app", task.id));
     lines.push(format!("DTSTAMP:{}Z", now.naive_utc().format("%Y%m%dT%H%M%S")));
     lines.push(format!("SUMMARY:{}", escape(&task.text)));
 
     if !task.evidence.trim().is_empty() {
-        // The span of the note that produced this task. Carried through so the
-        // entry can still be checked against what was actually said, which is
-        // the whole reason `evidence` exists.
         lines.push(format!("DESCRIPTION:{}", escape(&task.evidence)));
     }
 
@@ -141,9 +99,7 @@ pub fn calendar(task: &Task, now: DateTime<Utc>) -> String {
         }
         ("VEVENT", Some(Due::AllDay(day))) => {
             lines.push(format!("DTSTART;VALUE=DATE:{}", date(day)));
-            // DTEND is **exclusive** for an all-day event: a one-day event ends
-            // on the following date. Emitting the same date gives a zero-length
-            // event that several calendars simply do not draw.
+            // DTEND is exclusive: same-date would be a zero-length event most calendars hide.
             lines.push(format!("DTEND;VALUE=DATE:{}", date(day + Duration::days(1))));
         }
         (_, Some(Due::At(at))) => lines.push(format!("DUE:{}", date_time(at))),
@@ -170,10 +126,7 @@ pub fn calendar(task: &Task, now: DateTime<Utc>) -> String {
     out
 }
 
-/// A file name that says what it is when it lands in the temp dir.
-///
-/// Restricted to characters no shell or filesystem will argue about — task text
-/// is arbitrary user prose and can hold slashes, quotes and newlines.
+/// A file name from task text, restricted to shell- and filesystem-safe characters.
 pub fn file_name(task: &Task) -> String {
     let slug: String = task
         .text
@@ -193,10 +146,6 @@ pub fn file_name(task: &Task) -> String {
 }
 
 /// Write the task's `.ics` to the temp dir and return the path.
-///
-/// Separated from [`calendar`] so everything with a right answer stays pure and
-/// tested, and only the file write is untested. The caller opens the result —
-/// see `ui::open_external`.
 pub fn write_temp(task: &Task) -> Result<PathBuf> {
     let path = std::env::temp_dir().join(file_name(task));
     std::fs::write(&path, calendar(task, Utc::now()))?;
@@ -230,8 +179,7 @@ mod tests {
         }
     }
 
-    /// Unfold a rendered calendar back into logical lines, which is what a
-    /// parser sees and therefore what the assertions should read.
+    /// Unfold back into logical lines, which is what assertions should read.
     fn unfolded(ics: &str) -> Vec<String> {
         ics.replace("\r\n ", "").lines().map(str::to_string).collect()
     }
@@ -268,9 +216,7 @@ mod tests {
 
     #[test]
     fn a_timed_value_carries_no_offset_and_no_z() {
-        // The trap this test exists for: RFC 5545 DATE-TIME is floating, UTC
-        // with Z, or TZID= with a VTIMEZONE block. `20260825T090000+01:00` is
-        // none of those and is malformed however plausible it looks.
+        // An offset suffix is not a valid DATE-TIME, however plausible it looks.
         let ics = calendar(
             &task("Standup", Some("2026-08-25T09:00:00"), false, TaskKind::Event),
             stamp(),
@@ -290,8 +236,7 @@ mod tests {
 
     #[test]
     fn an_all_day_event_ends_on_the_following_date() {
-        // DTEND is exclusive. Emitting the same date gives a zero-length event
-        // that several calendars do not draw at all.
+        // DTEND is exclusive; same-date is a zero-length event.
         let ics = calendar(&task("Off", Some("2026-08-25"), true, TaskKind::Event), stamp());
         let lines = unfolded(&ics);
         assert!(lines.contains(&"DTSTART;VALUE=DATE:20260825".to_string()));
@@ -314,8 +259,7 @@ mod tests {
 
     #[test]
     fn a_summary_with_separators_in_it_is_escaped() {
-        // "Ring Sarah, then Bob" produces a malformed file without this: an
-        // unescaped comma starts a second value.
+        // An unescaped comma starts a second value and malforms the file.
         let ics = calendar(
             &task("Ring Sarah, then Bob; re: C:\\deck\nand the notes", None, false, TaskKind::Todo),
             stamp(),
@@ -337,7 +281,6 @@ mod tests {
 
     #[test]
     fn a_backslash_is_escaped_before_the_characters_that_introduce_backslashes() {
-        // Escaping `\` last would double-escape the ones `,` and `;` just added.
         let ics = calendar(&task("a\\b,c", None, false, TaskKind::Todo), stamp());
         assert!(ics.contains("SUMMARY:a\\\\b\\,c"), "{ics}");
     }
@@ -353,16 +296,13 @@ mod tests {
 
     #[test]
     fn folding_never_splits_a_multi_byte_character() {
-        // The same failure `truncate_chars` was fixed for, arriving here
-        // through the smart punctuation the STT backends emit. A byte-wise fold
-        // would emit half a codepoint and the file would not even be UTF-8.
+        // A byte-wise fold would emit half a codepoint and break UTF-8.
         for text in [
             format!("{} \u{2014} thanks", "Please send the quarterly numbers to accounting"),
             "\u{2014}".repeat(90),
             "你好世界".repeat(30),
         ] {
             let ics = calendar(&task(&text, None, false, TaskKind::Todo), stamp());
-            // Reconstructing the value proves nothing was lost or corrupted.
             let summary = unfolded(&ics)
                 .into_iter()
                 .find(|l| l.starts_with("SUMMARY:"))

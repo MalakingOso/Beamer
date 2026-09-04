@@ -1,13 +1,8 @@
-//! The two row-level components of the Tasks page.
+//! Row-level components of the Tasks page: everything here renders one task,
+//! while the parent owns grouping, ordering and disclosure state.
 //!
-//! Split out of `tasks_page.rs` when the completed-task disclosure pushed that
-//! file to 487 of its 500 allowed lines. The seam is presentational: everything
-//! here renders one task, while the parent owns grouping, ordering and which
-//! groups have their completed section open.
-//!
-//! `due_label` and `picked_due` stay in the parent deliberately. They are pure
-//! and directly tested, and moving them here would drag the date suite along
-//! with them for no gain.
+//! `due_label` and `picked_due` stay in the parent: they are pure and directly
+//! tested, and moving them would drag the date suite along for no gain.
 
 use dioxus::prelude::*;
 
@@ -19,20 +14,9 @@ use crate::notes::task::Task;
 use crate::notes::task_store::TaskStore;
 use crate::ui::icons::IconCheck;
 
-/// The dated half of a task row: a chip, or the phrase the model could not
-/// resolve beside a picker.
-///
-/// Three states, and the middle one is the whole reason `due_phrase` exists:
-///
-/// | State | Shown |
-/// |---|---|
-/// | Resolved | A date chip, red when overdue, and **Add to calendar** |
-/// | Unresolved phrase | The words the model saw, and a date input |
-/// | No timing mentioned | Nothing |
-///
-/// Nothing here reaches a calendar on its own. Export is a click, per task,
-/// which follows from the standing decision that tasks are suggestions and
-/// nothing is ever added unconfirmed.
+/// The dated half of a task row: a chip when resolved, the model's raw phrase
+/// beside a picker when not, nothing when no timing was mentioned. Calendar
+/// export is always an explicit per-task click, never automatic.
 #[derive(Props, Clone, PartialEq)]
 pub struct DueRowProps {
     pub task: Task,
@@ -59,8 +43,7 @@ pub fn DueRow(props: DueRowProps) -> Element {
                     class: "task-due-btn",
                     title: "Write an .ics and hand it to your calendar",
                     onclick: move |_| match ics::write_temp(&export) {
-                        // One-way: the calendar imports a copy. Beamer cannot
-                        // edit or remove it afterwards — see `notes::ics`.
+                        // One-way: the calendar imports a copy Beamer cannot edit — see `notes::ics`.
                         Ok(path) => crate::ui::open_external(&path.to_string_lossy()),
                         Err(e) => tracing::warn!("Could not write a calendar file: {}", e),
                     },
@@ -76,9 +59,7 @@ pub fn DueRow(props: DueRowProps) -> Element {
 
     rsx! {
         div { class: "task-due-row",
-            // What the model saw and could not turn into a date. Shown rather
-            // than swallowed: it is the difference between a picker you know
-            // what to fill in and a blank field you have to re-read the note for.
+            // Shown rather than swallowed: says what to fill the picker in with.
             span { class: "task-due unresolved", title: "Beamer would not guess a date for this",
                 "\u{201c}{phrase}\u{201d}"
             }
@@ -95,11 +76,8 @@ pub fn DueRow(props: DueRowProps) -> Element {
     }
 }
 
-/// One task: its checkbox, its text, its date row and the words it came from.
-///
-/// A component rather than inline markup because the page renders rows in two
-/// places — outstanding, and inside the completed disclosure — and a row
-/// duplicated across both is a row that will drift between them.
+/// One task: checkbox, text, date row and the words it came from. A component
+/// because rows render in two places (outstanding and completed disclosure).
 #[derive(Props, Clone, PartialEq)]
 pub struct TaskRowProps {
     pub task: Task,
@@ -127,8 +105,7 @@ pub fn TaskRow(props: TaskRowProps) -> Element {
             div { class: "task-row-main",
                 div { class: "task-text", "{task.text}" }
                 DueRow { task: task.clone(), tasks, today }
-                // Full span on hover: it is one ellipsized line, and being able
-                // to check it is the whole point.
+                // One ellipsized line; the full span is on hover via `title`.
                 div { class: "task-evidence", title: "{task.evidence}",
                     "\u{201c}{task.evidence}\u{201d}"
                 }

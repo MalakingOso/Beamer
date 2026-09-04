@@ -1,12 +1,7 @@
-//! Terminal sinks for a finished transcript.
+//! Terminal sinks for a finished transcript: injection or sticky note.
 //!
-//! Split out of `mod.rs` to keep that file under the 500-line limit. The audio,
-//! VAD, backend and tail-capture paths are shared by both capture modes; only
-//! what happens to the final text differs — which is the whole of this module.
-//!
-//! `deliver` is the single place the inject-vs-note decision is made. All three
-//! `TranscriptKind::Final` sites in `mod.rs` funnel through it rather than
-//! repeating the branch.
+//! `deliver` is the single place the inject-vs-note decision is made; every
+//! `TranscriptKind::Final` site funnels through it.
 
 use dioxus::prelude::*;
 
@@ -31,24 +26,12 @@ pub(super) fn sink_injects(mode: CaptureMode) -> bool {
     matches!(mode, CaptureMode::Inject)
 }
 
-/// Create a sticky note from a finished transcript.
+/// Create a sticky note from a finished transcript. Returns the new note's id,
+/// or `None` when there was nothing worth keeping.
 ///
-/// Returns the new note's id so the caller can open its window, or `None` when
-/// there was nothing worth keeping.
-///
-/// The corpus is flushed to disk immediately rather than left to the ~500ms
-/// debounce tick. The debounce exists for per-keystroke body edits, which are
-/// cheap to lose and instantly retypeable; a just-captured transcript is
-/// neither, and the spec's hard constraint is that a note must never be lost
-/// because something downstream failed. This mirrors `TranscriptionHistory`,
-/// which also writes inline from the orchestrator coroutine.
-///
-/// ⚠️ It has to be `flush_stores`, not `NoteStore::flush_if_dirty`. That one
-/// writes `notes.json`, which is a derived export nothing reads back once
-/// `notes.automerge` exists, so a crash inside the tick would lose a note
-/// whose audio is already gone. `flush_stores` is the single document writer,
-/// so calling it here adds a call site and not a second writer, which is why
-/// `tasks` is threaded down to this function at all.
+/// Flushes via `flush_stores` immediately — not `flush_if_dirty`, which only
+/// writes the derived `notes.json` export — so a crash can't lose a note whose
+/// audio is already gone.
 pub(super) async fn do_note_capture(
     text: &str,
     notes: &mut Signal<NoteStore>,
@@ -73,24 +56,15 @@ pub(super) async fn do_note_capture(
         format!("Note created ({} chars)", text.trim().len()),
     );
 
-    // Ask for the model passes **after** the flush above. The note is on disk
-    // before anything else is attempted, so no failure downstream — server
-    // down, model asleep, GPU busy — can cost the user words.
-    //
-    // This is also the *only* site that triggers a pass automatically, and it
-    // is reachable only from dictation. The rule "typed notes are never
-    // rewritten unasked" is therefore structural rather than a runtime check
-    // somebody could forget: a typed note has no path to this line.
+    // Request model passes only after the flush, so no downstream failure can
+    // cost the user words. This is the only site that triggers a pass, and it
+    // is reachable only from dictation — typed notes are never rewritten unasked.
     note_passes.send(PipelineRequest::for_new_note(&id));
 
     Some(id)
 }
 
 /// Route one finished transcript to the sink its capture mode selects.
-///
-/// Every path that produced a final transcript funnels through here, so the
-/// inject-vs-note decision is made in exactly one place rather than repeated at
-/// each of the three `TranscriptKind::Final` sites.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn deliver(
     text: &str,
@@ -110,8 +84,7 @@ pub(super) async fn deliver(
     } else if let Some(id) =
         do_note_capture(text, notes, tasks, config, status_log, note_passes).await
     {
-        // Nothing here opens or places a window. The reconciler in
-        // `ui::sticky_windows` watches the store and does both.
+        // Window opening/placement belongs to the `ui::sticky_windows` reconciler.
         tracing::info!("note {} created", id);
     }
 }
@@ -134,7 +107,6 @@ async fn do_injection(
         }
         Err(e) => {
             tracing::error!("Injection failed: {}, trying clipboard-only fallback", e);
-            // Last resort: copy to clipboard and notify user to paste manually
             match clipboard_only_fallback(text).await {
                 Ok(()) => {
                     let msg = "Copied to clipboard — press Ctrl+V to paste";

@@ -1,45 +1,22 @@
-//! What the model passes are allowed to do to a note.
-//!
-//! A second `impl NoteStore` rather than more methods in `mod.rs`, which is
-//! already at 459 of the project's 500-line limit. Every method here is a
-//! *machine* write: none of them bump `modified` (that is user-facing ordering)
-//! and none of them touch `raw` (the only record of what was actually said).
+//! Machine writes from the model passes: never bump `modified`, never touch `raw`.
 
 use super::model::StageState;
 use super::{Note, NoteStore};
 
-/// What became of a stage result by the time it got back to the store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StageOutcome {
     Applied,
-    /// The note changed under the model — the result was thrown away.
+    /// The note changed under the model; the result was discarded untouched.
     Superseded,
     /// The note was deleted while the pass was in flight.
     NoteGone,
 }
 
 impl NoteStore {
-    /// Install a cleanup result, but only if the note still says what it said
-    /// when the request went out.
-    ///
-    /// A compare-and-swap on `expected` — the body captured at send time. If
-    /// the user typed into the note while the model was thinking, their edit
-    /// wins and this returns `Superseded` having changed *nothing*, not even
-    /// `clean_state`: leaving it `Pending` keeps the footer's retry affordance
-    /// available, which is right for a pass that was superseded rather than one
-    /// that failed.
-    ///
-    /// The guard is body equality, deliberately **not** the `modified`
-    /// timestamp: `set_color` bumps `modified` for something that is not an
-    /// edit at all, so a timestamp guard would reject perfectly good results.
-    /// `set_open` used to be in that list too; since Task 7 it is
-    /// machine-local and does not touch `modified` at all.
-    ///
-    /// An empty or whitespace-only `cleaned` is a **success**. A note that was
-    /// pure filler correctly cleans up to nothing, and the model saying so must
-    /// leave the body exactly as it was rather than blanking the user's note.
-    /// The intuitive `if cleaned.is_empty() { failed }` gets this backwards and
-    /// destroys content.
+    /// Compare-and-swap on the body captured at send time. A superseded result
+    /// changes nothing (stays `Pending`, keeping the retry affordance). Guard is
+    /// body equality, not `modified` (`set_color` bumps it without editing).
+    /// Empty `cleaned` is success: the body is left as-is, never blanked.
     pub fn apply_cleanup(&mut self, id: &str, expected: &str, cleaned: &str) -> StageOutcome {
         let Some(note) = Self::find_mut(&mut self.notes, id) else {
             return StageOutcome::NoteGone;
@@ -59,7 +36,7 @@ impl NoteStore {
         self.set_clean_state(id, StageState::Failed);
     }
 
-    /// Cleanup was deliberately not run — disabled in config, or a typed note.
+    /// Cleanup deliberately not run (disabled in config, or a typed note).
     pub fn mark_clean_skipped(&mut self, id: &str) {
         self.set_clean_state(id, StageState::Skipped);
     }
@@ -72,14 +49,12 @@ impl NoteStore {
         self.set_extract_state(id, StageState::Failed);
     }
 
-    /// Extraction was deliberately not run.
+    /// Extraction deliberately not run.
     pub fn mark_extract_skipped(&mut self, id: &str) {
         self.set_extract_state(id, StageState::Skipped);
     }
 
-    /// Each stage owns its own field and nothing else. A failed cleanup must
-    /// never block or overwrite a successful extraction — that pairing is the
-    /// case the old single `NoteState` could not represent.
+    /// Each stage owns its own field; a failed cleanup never touches extraction.
     fn set_clean_state(&mut self, id: &str, state: StageState) {
         if let Some(note) = Self::find_mut(&mut self.notes, id) {
             note.clean_state = state;
@@ -94,13 +69,8 @@ impl NoteStore {
         }
     }
 
-    /// Deliberately not `mod.rs`'s `touch()`: that bumps `modified`, and the
-    /// caller here is a background model pass, not the user. A missing id is a
-    /// no-op everywhere in this module and must not dirty the store, matching
-    /// `set_open`'s guard.
-    ///
-    /// `pub(super)` so `edit.rs` shares it — its window-event writes are
-    /// machine writes under the same rule.
+    /// Not `touch()`: background passes must not bump `modified`. Missing id is
+    /// a no-op that does not dirty the store. `pub(super)` so `edit.rs` shares it.
     pub(super) fn find_mut<'a>(notes: &'a mut [Note], id: &str) -> Option<&'a mut Note> {
         notes.iter_mut().find(|n| n.id == id)
     }
@@ -111,8 +81,6 @@ mod tests {
     use super::*;
     use crate::notes::{NoteColor, NoteOrigin};
 
-    /// PID-scoped temp path so concurrent test runs don't race and nothing
-    /// touches the real user config dir. Mirrors `ui::history`'s tests.
     fn temp_store(tag: &str) -> NoteStore {
         let dir = std::env::temp_dir().join(format!("beamer_notes_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -162,7 +130,6 @@ mod tests {
     fn superseded_cleanup_never_clobbers_an_edit() {
         let mut store = temp_store("cas");
         let id = store.create("call the vet".into(), NoteColor::Purple, NoteOrigin::Dictated);
-        // Body captured at send time; the user then types while the model thinks.
         let sent_with = "call the vet".to_string();
         store.set_body(&id, "call the vet about Biscuit".into());
         store.flush_if_dirty();
@@ -202,7 +169,6 @@ mod tests {
 
     #[test]
     fn old_notes_without_stage_fields_load_as_pending() {
-        // A note exactly as v1 wrote it: one linear `state`, no stage fields.
         let json = r#"{
             "id": "18f2a1b3-0001",
             "created": "2026-08-01T09:15:00+01:00",

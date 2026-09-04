@@ -1,46 +1,23 @@
-//! `task_eval` — measure the extraction prompt against the user's own notes.
+//! Measure the extraction prompt against the user's own accept/dismiss history
+//! in `tasks.json` — the corpus is real notes, labelled by the user. Precision
+//! is the headline metric (a fabricated task poisons the list); recall is also
+//! reported.
 //!
-//! There is no synthetic benchmark here and there never will be. Every chip the
-//! user accepts or dismisses is written to `tasks.json` and **kept**, so the
-//! accumulated decisions *are* the corpus: real notes, in the user's own voice,
-//! labelled by the only person whose judgment the feature answers to.
-//!
-//! Extraction is a **precision** problem. A fabricated task poisons a list
-//! nobody can un-poison, while a missed one costs a re-read. Recall is reported
-//! because it is cheap to report, but precision is the headline and the number
-//! to tune against.
-//!
-//! ## Why this file looks the way it does
-//!
-//! There is no `src/lib.rs`; every module lives under the `beamer` binary, so a
-//! second binary cannot `use beamer::…`. `src/llm/**` was deliberately written
-//! free of crate-rooted paths so it can be `#[path]`-included here instead —
-//! see the module note in `llm/prompts.rs`. `src/notes/mod.rs` is *not*
-//! includable (it reaches for `crate::config::Config` to find the storage
-//! path), so the two JSON files are read here with local envelope structs that
-//! match what the stores write: `{"notes": […]}` and `{"tasks": […]}`, the path
-//! and dirty fields being `#[serde(skip)]` on both sides.
-//!
-//! ## Run it
+//! No `src/lib.rs`, so this binary `#[path]`-includes `llm/` plus the note and
+//! task types. `notes/mod.rs` can't be included (it needs `crate::config`),
+//! so the JSON envelopes are re-declared locally.
 //!
 //! ```text
 //! cargo run --bin task_eval -- --limit 20
-//! cargo run --bin task_eval -- --model gemma-4-E2B_q4_0-it   # walk the ladder
 //! ```
 
-// The `#[path]`-included modules bring in the whole LLM client and both note
-// types, of which this binary calls a handful of items. That is exactly the
-// situation a file-level allow is for: the alternative is scattering `#[allow]`
-// through shared source to suit one consumer, and the tree is held at zero
-// warnings.
+// Whole-module includes pull in items this binary never calls.
 #![allow(dead_code)]
 
 #[path = "../llm/mod.rs"]
 mod llm;
-/// The placeholder-token grammar. Pure std with no crate-rooted paths, so it
-/// includes cleanly — and it has to be here, because a note holding an image
-/// carries `[[beamer:…]]` in its body and grading the model against text it is
-/// never sent would measure the wrong thing.
+/// Included so image placeholder tokens are stripped exactly as the pipeline
+/// strips them — grading against text the model is never sent is meaningless.
 #[path = "../notes/blocks.rs"]
 mod blocks;
 #[path = "../notes/model.rs"]
@@ -73,21 +50,13 @@ struct TasksFile {
     tasks: Vec<Task>,
 }
 
-/// How one proposal scored against the decided rows for its note.
+/// How one proposal scored. `Ungraded` (matched no decided row) is never a
+/// false positive: the user only judged proposals they were shown, so an
+/// unseen-but-correct proposal isn't wrong. Printed, counted, excluded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Verdict {
     TruePositive,
     FalsePositive,
-    /// The proposal matched no decided row.
-    ///
-    /// ⚠️ **Never scored as a false positive.** The user only ever judged the
-    /// proposals they were *shown*, on the run that produced them. A proposal
-    /// that appears now and did not appear then may be perfectly correct and
-    /// simply unseen. Counting it as wrong would bias the harness in the
-    /// direction that looks like rigour — reporting a worse number than the
-    /// evidence supports — and the whole point of the corpus is that it only
-    /// contains labels a human actually applied. Ungraded rows are printed,
-    /// counted, and excluded from both metrics.
     Ungraded,
 }
 
@@ -113,10 +82,8 @@ struct Totals {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // The extraction parser drops ungrounded proposals with `tracing::warn!`.
-    // For an eval run those drops are signal — a model inventing evidence is
-    // precisely what this harness exists to catch — so they must not vanish
-    // into an uninstalled subscriber.
+    // Groundedness warnings are signal here (invented evidence is what this
+    // harness catches), so install a subscriber to surface them.
     tracing_subscriber::fmt()
         .with_env_filter("beamer=warn,task_eval=info,warn")
         .with_writer(std::io::stderr)
@@ -165,21 +132,16 @@ async fn main() -> Result<()> {
         return Ok(());
     };
     let Some(tasks) = tasks else {
-        // The first person to run this lands here, and it is not an error.
         println!(
             "No tasks file at {}.\n\
-             Nothing has been proposed or decided yet, so there are no labels to \
-             measure against. Capture a few notes, let extraction run, then accept \
-             or dismiss the suggestion chips — each decision becomes one labelled \
-             example and this harness starts having something to say.",
+             Nothing proposed or decided yet, so no labels to measure against. \
+             Capture notes, accept or dismiss suggestions, then rerun.",
             tasks_path.display()
         );
         return Ok(());
     };
 
-    // A note is gradeable only if someone has actually judged a row on it.
-    // Archived notes are included: a decision does not expire when the note is
-    // filed away.
+    // Gradeable = someone judged a row on it (archived notes count).
     let mut gradeable: Vec<(&Note, Vec<&Task>)> = Vec::new();
     let mut skipped = 0usize;
     for note in &notes {
@@ -201,11 +163,8 @@ async fn main() -> Result<()> {
             .filter(|t| t.status == TaskStatus::Suggested)
             .count();
         println!(
-            "No gradeable notes.\n\
-             {} note(s) on file, {} task row(s), of which {} are still Suggested \
-             and none are Accepted or Dismissed for a note that exists.\n\
-             A note nobody has judged carries no labels, so grading it would \
-             measure nothing. Accept or dismiss some suggestions and run again.",
+            "No gradeable notes ({} notes, {} rows, {} still Suggested). \
+             Accept or dismiss some suggestions and run again.",
             notes.len(),
             tasks.len(),
             undecided
@@ -213,8 +172,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // `--limit` caps the notes actually *run*, and only gradeable notes are ever
-    // run — spending a model pass on a note with no labels tells you nothing.
+    // `--limit` caps notes run; only gradeable notes are ever run.
     let total = gradeable.len();
     let planned = limit.map(|n| n.min(total)).unwrap_or(total);
     println!(
@@ -227,16 +185,14 @@ async fn main() -> Result<()> {
     for (i, (note, decided)) in gradeable.iter().take(planned).enumerate() {
         print!("── [{}/{planned}] {} ", i + 1, note.id);
         println!("{}", "─".repeat(46usize.saturating_sub(note.id.len())));
-        // Exactly what the pipeline sends: tokens stripped, never escaped.
+        // What the pipeline sends: tokens stripped, never escaped.
         let sent = blocks::plain_text(&note.body);
         for line in sent.trim().lines() {
             println!("   │ {line}");
         }
         let _ = std::io::stdout().flush();
 
-        // The day the note was **captured**, not the day the eval runs. A note
-        // saying "before Friday" only ever meant a Friday relative to when it
-        // was spoken; grading it against today would measure nothing.
+        // Relative dates resolve against capture day, not eval day.
         let today = chrono::DateTime::parse_from_rfc3339(&note.created)
             .map(|dt| dt.with_timezone(&chrono::Local).date_naive())
             .unwrap_or_else(|_| chrono::Local::now().date_naive());
@@ -248,18 +204,13 @@ async fn main() -> Result<()> {
         let proposals = match proposals {
             Ok(p) => p,
             Err(e @ (ChatError::Unreachable(_) | ChatError::Http(_))) => {
-                // Both fail identically for every remaining note — a dead server
-                // or a model id the server does not serve. Grinding through the
-                // rest would produce a wall of the same message and a summary
-                // computed over nothing.
+                // Dead server / unserved model fails identically for all notes.
                 println!("   ✖ {e}\n");
                 println!("Aborting: this failure repeats for every note.");
                 break;
             }
             Err(e) => {
-                // Malformed output and thinking-left-on are per-note facts worth
-                // seeing individually, so the run continues; they are counted
-                // and kept out of both metrics.
+                // Per-note failures: counted, kept out of metrics, run continues.
                 println!("   ✖ {e}  ({:.2}s)\n", elapsed.as_secs_f64());
                 totals.errored_notes += 1;
                 continue;
@@ -314,22 +265,12 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Match one proposal to a decided row, consuming each row at most once.
-///
-/// Two passes. **Text first**, on a normalized form (trim, collapse whitespace,
-/// lowercase) — byte equality is useless here because the model does not
-/// reproduce its own imperative across runs; "Call the vet" and "call the  vet"
-/// are the same decision.
-///
-/// **Evidence span as a fallback**, normalized the same way. Chosen because the
-/// span is *quoted from the note* rather than composed, so it is far more stable
-/// across runs than the rewritten imperative — a model that re-words "Call the
-/// vet" to "Phone the vet about Milo" still quotes the same sentence. The risk
-/// is the mirror image: two genuinely different tasks drawn from one sentence
-/// share a span and could cross-match. That is why the pass is second and why
-/// rows are consumed — a span collision can at worst pair a proposal with a
-/// sibling row from the same sentence, never invent a match where the note said
-/// nothing. Preferring evidence first would make the collision the common case.
+/// Match one proposal to a decided row, consuming each row at most once. Text
+/// first (normalized: trim, collapse whitespace, lowercase — the model doesn't
+/// reproduce its own wording across runs), then the evidence span, which is
+/// quoted from the note and therefore stabler. Evidence is second because two
+/// tasks from one sentence share a span and could cross-match; consumed rows
+/// bound that to a sibling pairing, never an invented match.
 fn match_row(p: &ProposedTask, decided: &[&Task], taken: &[bool]) -> Option<usize> {
     let text = norm(&p.text);
     if !text.is_empty() {
@@ -392,10 +333,8 @@ fn print_summary(t: &Totals, skipped: usize, wall: Duration) {
     println!("════════════════════════════════════════════════════════");
 }
 
-/// Percentages, with "n/a" rather than a fabricated 0% when the denominator is
-/// zero. A run with no judged proposals has not measured 0% precision; it has
-/// not measured precision. Both branches are six columns wide so the two rates
-/// line up under each other.
+/// Percentage, or "n/a" when the denominator is zero (no measurement, not 0%).
+/// Both branches are six columns wide so the rates align.
 fn ratio(num: usize, den: usize) -> String {
     if den == 0 {
         "   n/a".to_string()
@@ -404,10 +343,9 @@ fn ratio(num: usize, den: usize) -> String {
     }
 }
 
-/// `Ok(None)` when the file is simply absent — the ordinary state before the
-/// first decision, and a message rather than an error. A file that exists and
-/// does not parse *is* an error: silently treating it as empty would report a
-/// clean "no labels yet" over a corpus that is sitting right there.
+/// `Ok(None)` for a missing file (ordinary pre-first-decision state). An
+/// existing-but-unparseable file is an error: treating it as empty would
+/// report "no labels yet" over a corpus that's sitting right there.
 fn read_json<T: for<'de> Deserialize<'de>>(path: &PathBuf) -> Result<Option<T>> {
     if !path.exists() {
         return Ok(None);
@@ -419,8 +357,7 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &PathBuf) -> Result<Option<T>> 
     Ok(Some(parsed))
 }
 
-/// `dirs` directly rather than `Config::config_dir()`, which lives in a module
-/// this binary cannot include. Kept identical to it on purpose.
+/// Mirrors `Config::config_dir()`, which lives in an un-includable module.
 fn config_dir() -> Result<PathBuf> {
     Ok(dirs::config_dir()
         .context("Could not determine the config directory")?

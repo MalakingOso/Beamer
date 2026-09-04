@@ -1,15 +1,7 @@
-//! Stage 1 — transcript cleanup with S1-mini.
-//!
-//! The model removes fillers, resolves false starts to whatever the speaker
-//! landed on, applies punctuation and capitalization, and renders spoken
-//! numbers, dates, times and currency in written form. It is a *normalizer*,
-//! not a chat model: it cannot be asked to do anything else, which is exactly
-//! why it cannot wander off and "improve" a note.
-//!
-//! Everything about the request shape that could be wrong lives in
-//! `prompts.rs`, behind types. What is left here is the decision of what a
-//! response *means*, which is the part with a genuine trap in it — see
-//! [`resolve`].
+//! Stage 1 — transcript cleanup with S1-mini: a normalizer (fillers, false
+//! starts, punctuation, spoken numbers/dates), not a chat model. The request
+//! shape lives in `prompts.rs` behind types; what is left here is what a
+//! response *means* — see [`resolve`].
 
 use std::time::Duration;
 
@@ -20,28 +12,16 @@ use super::CleanupConfig;
 /// What a completed cleanup pass actually asks the store to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Cleaned {
-    /// The model produced different text. This is the text to display.
     Rewritten(String),
-    /// The model read the transcript and had nothing to change.
-    ///
-    /// A **successful** outcome, and a common one. Two different responses
-    /// arrive here: an empty string, which is what filler-only speech
-    /// correctly normalizes to, and a response identical to the input, which
-    /// is what already-clean speech produces.
+    /// Success, and common: filler-only speech normalizes to empty, and
+    /// already-clean speech comes back identical.
     NothingToChange,
 }
 
-/// Decide what a raw completion means for the note.
-///
-/// ⚠️ **An empty response is success, not failure.** Say "um, uh, so" into a
-/// note and S1-mini correctly returns nothing at all — there was no content to
-/// normalize. Treating that as an error would be merely wrong; treating it as
-/// a rewrite would be destructive, because it would blank the only record of
-/// what was said. The intuitive implementation does one or the other, so the
-/// guard is written deliberately and pinned by a test.
-///
-/// `sent` is the text the request carried, so an unchanged response is
-/// recognised rather than written back over itself and marked as a rewrite.
+/// Decide what a raw completion means. Empty or unchanged is success, not
+/// failure: filler-only speech normalizes to nothing, and writing that back
+/// would blank the only record. `sent` is the request text, so unchanged input
+/// is recognised, not rewritten.
 pub fn resolve(response: &str, sent: &str) -> Cleaned {
     let cleaned = response.trim();
     if cleaned.is_empty() || cleaned == sent.trim() {
@@ -50,10 +30,8 @@ pub fn resolve(response: &str, sent: &str) -> Cleaned {
     Cleaned::Rewritten(cleaned.to_string())
 }
 
-/// Build the request for one transcript.
-///
-/// No `response_format`: the model answers in plain text, and constraining it
-/// to JSON would be constraining it away from what it was trained to emit.
+/// Build the request for one transcript. No `response_format`: the model
+/// answers in plain text, not JSON.
 pub fn build_request(cfg: &CleanupConfig, transcript: &str) -> ChatRequest {
     let styling = Styling::from_config_name(&cfg.styling);
     let structure = Structure::from_config_name(&cfg.structure);
@@ -71,11 +49,9 @@ pub fn build_request(cfg: &CleanupConfig, transcript: &str) -> ChatRequest {
     }
 }
 
-/// Run one cleanup pass.
-///
-/// The caller keeps hold of the `transcript` it passed: applying the result
-/// back to the note is a compare-and-swap against that exact text, because the
-/// user may have typed into the note while the model was thinking.
+/// Run one cleanup pass. The caller applies the result as a compare-and-swap
+/// against `transcript`, which it retains: the user may type while the model
+/// is thinking.
 pub async fn clean(
     base_url: &str,
     cfg: &CleanupConfig,
@@ -99,8 +75,7 @@ mod tests {
 
     #[test]
     fn a_response_identical_to_the_input_is_not_a_rewrite() {
-        // Already-clean speech. Reporting this as a rewrite would mark the
-        // note modified and dirty the store for a change that did not happen.
+        // A rewrite here would dirty the store for a change that never happened.
         assert_eq!(
             resolve("Call the vet.\n", "Call the vet."),
             Cleaned::NothingToChange
@@ -135,18 +110,14 @@ mod tests {
 
     #[test]
     fn cleanup_asks_for_plain_text_not_json() {
-        // s1-mini emits normalized prose. A json_object grammar constraint
-        // would force it away from the only output it was trained to produce.
         let req = build_request(&CleanupConfig::default(), "hello");
         assert!(req.response_format.is_none());
     }
 
     #[test]
     fn a_garbage_config_value_still_sends_a_trained_control_line() {
-        // Hand-edited config is the realistic source of this. Falling back to
-        // the trained default is the only safe answer: sending
-        // "[Styling: shakespearean]" is documented to garble the output, and
-        // the server would answer 200 with the garbage.
+        // An out-of-set control line garbles output at HTTP 200, so unknown
+        // values fall back to the trained default.
         let cfg = CleanupConfig {
             styling: "shakespearean".into(),
             structure: "haiku".into(),

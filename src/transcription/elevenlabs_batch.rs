@@ -5,22 +5,12 @@ use super::keyterms;
 use super::{http_client, wav::pcm_to_wav};
 use bytes::Bytes;
 
-/// Transcribe audio using the ElevenLabs Scribe v2 batch (REST) API.
+/// Transcribe raw 16-bit LE, 16 kHz, mono PCM via the ElevenLabs Scribe v2 batch API.
+/// Wraps the PCM in a WAV container before uploading.
 ///
-/// `audio_pcm` must be raw 16-bit LE, 16 kHz, mono PCM. This function wraps it
-/// in a WAV container before uploading.
-///
-/// Vocabulary terms go up as repeated `keyterms` multipart fields, sanitised by
-/// `keyterms::sanitize` against the batch budget. ⚠️ The field name is
-/// `keyterms`, **not** `keyterms[]`. Beamer sent the bracketed form until
-/// 2026-08-23, and the server silently ignored it: a 60-character term (well
-/// over the documented 50) came back `200 OK` under `keyterms[]` and
-/// `400 "All keywords must be less than 50 characters"` under `keyterms`. The
-/// bracketed spelling costs nothing and does nothing, so it looks like it
-/// works. Verify with a deliberately invalid term, never with a plausible one.
-///
-/// `no_verbatim` asks the model to drop filler words, false starts and
-/// disfluencies. Off unless the user turns it on.
+/// Vocabulary goes up as repeated `keyterms` multipart fields. ⚠️ The field is
+/// `keyterms`, not `keyterms[]` — the bracketed spelling is silently ignored.
+/// `no_verbatim` drops filler words and false starts.
 pub async fn transcribe_batch(
     api_key: &str,
     audio_pcm: Vec<u8>,
@@ -55,9 +45,7 @@ pub async fn transcribe_batch(
         let resp = client
             .post("https://api.elevenlabs.io/v1/speech-to-text")
             .header("xi-api-key", api_key)
-            // Without this the request is unbounded, and a stalled upload
-            // strands the orchestrator's recording loop — which owns the
-            // hotkey receiver, so dictation stops working entirely.
+            // A stalled upload would strand the recording loop (hotkey owner).
             .timeout(super::BATCH_REQUEST_TIMEOUT)
             .multipart(form)
             .send()

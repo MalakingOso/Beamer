@@ -1,19 +1,9 @@
-//! The automerge document behind the note and task corpus.
-//!
-//! One document holds both roots, at `<config_dir>/sync/notes.automerge`.
-//! `NoteStore` and `TaskStore` keep their own `Vec`s as the in-memory source
-//! of truth; this file is where those vecs are persisted, and where a copy of
-//! the same document arriving from another machine gets merged in.
-//!
-//! Why automerge rather than the JSON the stores used to write: `merge()` is
-//! deterministic however the bytes arrived, and an `ObjType::Text` field
-//! merges edits character by character, so two machines that both edited the
-//! same note offline keep both edits instead of one silently winning.
-//!
-//! ⚠️ **The document is written from one place, `notes::flush::flush_stores`.**
-//! Both stores reconcile into it before any merge happens, because a merge
-//! that lands while one store's vec is still stale would be reverted by that
-//! store's next reconcile. Adding a second writer reintroduces that race.
+//! The automerge document behind the note and task corpus (`notes.automerge`).
+//! The stores' `Vec`s stay the in-memory source of truth; this is where they
+//! persist and where another machine's copy merges in. Character-level merge
+//! keeps both machines' concurrent edits to one note.
+//! ⚠️ Written from one place, `notes::flush::flush_stores`: both stores
+//! reconcile before any merge, or a stale vec reverts the merge on next tick.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -30,57 +20,27 @@ pub const NOTES_KEY: &str = "notes";
 /// Root key holding the task corpus.
 pub const TASKS_KEY: &str = "tasks";
 
-/// The first change of every Beamer document, byte for byte the same on every
-/// machine.
-///
-/// ⚠️ **Without this, two machines lose one machine's entire corpus on their
-/// first merge, better than half the time.** A document that creates its own
-/// root maps does so with its own random actor, so two independently created
-/// documents hold two different `Map` objects at `ROOT["notes"]`. Merging them
-/// leaves both objects there as a conflict; `ReadDoc::get` returns one winner
-/// whole, everything inside the loser becomes unreachable, and `reconcile`
-/// then prunes against the winner alone. The winner is deterministic, so the
-/// same side loses on both machines and its board and its mirror both go
-/// empty. Measured against the test as it now stands:
-/// `a_fresh_install_that_has_already_saved_still_sees_an_incoming_corpus`
-/// failed 50 of 50 runs with this constant taken out of `new_document`. An
-/// earlier draft of that test asserted only the incoming corpus, not the
-/// laptop's own note, and failed 24 of 40, which is the coin flip you would
-/// expect when either side losing shows up half the time.
-///
-/// Starting every document from one shared change gives both root maps the
-/// same object id everywhere, so independent documents write into the *same*
-/// map and merge per note. Regenerate with the ignored
-/// `regenerate_the_genesis_document` test in `sync_tests.rs`;
-/// `the_genesis_document_still_has_the_object_ids_everything_depends_on` fails
-/// loudly if an automerge upgrade changes the encoding.
+/// The first change of every Beamer document, byte-identical on every machine.
+/// Without it, two fresh documents hold different `Map` objects at one root key;
+/// the merge leaves a conflict, one side wins whole, and the loser's corpus is
+/// pruned. Shared genesis gives both root maps the same object id, so documents
+/// merge per note. Regenerate via the ignored test in `sync_tests.rs`.
 const GENESIS: &[u8] = include_bytes!("genesis.automerge");
 
-/// The actor that authored [`GENESIS`]. Sixteen zero bytes, and no machine
-/// ever writes as this actor: every document is re-actored to a random id the
-/// moment it is loaded. Only [`build_genesis`] needs it, so it lives under
-/// the same `cfg`.
+/// The actor that authored [`GENESIS`]. No machine ever writes as it; every
+/// document is re-actored on load.
 #[cfg(test)]
 pub const GENESIS_ACTOR: [u8; 16] = [0; 16];
 
-/// A document holding nothing but the genesis change, with a fresh random
-/// actor of its own.
-///
-/// Used for every new document and by the test that regenerates the bytes.
-/// `AutoCommit::load` mints a random actor already, and the explicit
-/// `set_actor` here is what keeps the genesis actor from ever writing again.
+/// A document holding nothing but the genesis change, with a fresh random actor.
 pub fn new_document() -> AutoCommit {
     let mut doc = AutoCommit::load(GENESIS).expect("the genesis document is built into the binary");
     doc.set_actor(ActorId::random());
     doc
 }
 
-/// Build the genesis change from scratch. Deterministic: a fixed actor, a
-/// fixed timestamp, and two `put_object` calls in a fixed order.
-///
-/// Only the regeneration test and the test that guards the encoding call
-/// this. Everything else loads [`GENESIS`], because two machines calling this
-/// would still be two separate authorships if the bytes were not shared.
+/// Build the genesis change from scratch (fixed actor, timestamp, call order).
+/// Only the regeneration/encoding tests call this; everything else loads [`GENESIS`].
 #[cfg(test)]
 pub fn build_genesis() -> Vec<u8> {
     use automerge::transaction::CommitOptions;
@@ -93,69 +53,29 @@ pub fn build_genesis() -> Vec<u8> {
     doc.save()
 }
 
-/// The document, plus what is needed to tell our own last write apart from
-/// somebody else's.
+/// The document, plus what tells our own last write apart from someone else's.
 #[derive(Debug)]
 pub struct SyncDoc {
     doc: AutoCommit,
     path: PathBuf,
-    /// The document file's mtime as of our own last write. A file whose mtime
-    /// has moved past this carries changes we have not seen.
+    /// The file's mtime as of our last write; a newer mtime means unseen changes.
     last_write: Option<SystemTime>,
-    /// Whether the file was already on disk when this document was opened.
-    /// Drives the one-time seed from the legacy JSON: a machine that received
-    /// the document through sync must never re-seed from its own stale JSON.
+    /// Whether the file was on disk at open. Only a fresh machine seeds from legacy JSON.
     existed: bool,
-    /// A file that is there but could not be read, and could not be
-    /// quarantined either, latches this and no write ever goes out.
-    ///
-    /// Without it, an `fs::read` that fails on an existing file (a permission
-    /// change, an I/O error, a race on the synced mount Task 10 puts this on)
-    /// would leave an empty in-memory document that the very next flush
-    /// writes over the intact bytes. The corpus would be gone, with no
-    /// `.corrupt` copy, because nothing failed to *parse*. The parse arm has
-    /// always quarantined first; this is the arm that cannot.
+    /// Latched when the file exists but could not be read or quarantined: no
+    /// write ever goes out, or the next flush would overwrite the intact bytes.
     read_only: bool,
-    /// A mutation landed on this document from somewhere other than
-    /// `flush::run_document_pass`'s own reconcile-and-merge, and still owes a
-    /// save.
-    ///
-    /// Task 10's live-sync coroutine calls `receive_sync_message` directly on
-    /// the shared document, outside any flush tick. `run_document_pass`
-    /// decides whether a tick has anything to save by comparing heads before
-    /// and after its own reconcile/merge, a comparison that is blind to a
-    /// mutation that happened *before* that tick even started, because the
-    /// "before" snapshot is taken fresh each call and already includes it.
-    /// Without this flag, a change applied between two ticks would sit in
-    /// memory, correctly reflected in the note/task signals, and never reach
-    /// disk. See `SyncDoc::mark_pending_save` and `has_pending_save`.
+    /// A mutation from outside the flush tick's own reconcile/merge still owes
+    /// a save (the tick's heads comparison is blind to it). See `mark_pending_save`.
     pending_save: bool,
-    /// The last `save()` call returned `Err`, and no later call has
-    /// succeeded since.
-    ///
-    /// `reconcile` mutates the in-memory document whether or not the save
-    /// that follows lands on disk, so once a save fails, every tick after it
-    /// with no new edit reconciles to a no-op: the heads already moved on the
-    /// failed tick, not on this one. A before/after heads comparison alone
-    /// cannot see that miss a second time. `run_document_pass` folds this
-    /// flag in alongside `has_pending_save` so a failed save is retried on
-    /// the very next tick regardless. Set and cleared inside `save` itself,
-    /// so no return path can forget it.
+    /// The last `save()` failed and nothing has succeeded since. Set/cleared
+    /// inside `save` so a failed write is retried on the very next tick.
     save_failed: bool,
-    /// Where this machine's `vocabulary.txt` is, or `None` for a document that
-    /// has no vocabulary to keep in step.
-    ///
-    /// `None` is the default, and it is what keeps `sync_server` — which opens
-    /// a document exactly the way a client does — from inventing a vocabulary
-    /// it has no business holding. Only `NoteStore::load_from` opts in.
+    /// Where this machine's `vocabulary.txt` is. `None` by default, which keeps
+    /// `sync_server` from inventing a vocabulary; only `NoteStore::load_from` opts in.
     vocab_path: Option<PathBuf>,
-    /// What the file and the document last agreed on, held for the three-way
-    /// comparison in [`super::doc_vocab::decide`].
-    ///
-    /// In memory only, and deliberately: persisting it would make a stale
-    /// baseline outlive the process that earned it. `None` at the start of
-    /// every run means "no baseline yet", which the first pass resolves by
-    /// letting a populated document win over this machine's file.
+    /// What file and document last agreed on, for `doc_vocab::decide`. In memory
+    /// only: a persisted baseline would outlive the process that earned it.
     last_vocab: Option<String>,
 }
 
@@ -175,18 +95,13 @@ impl Default for SyncDoc {
     }
 }
 
-/// A shared handle on the document.
-///
-/// Both stores hold a clone of the same handle so one document can carry both
-/// roots while the stores stay separate signals with separate lifetimes.
-/// Cloning shares; it never copies the document.
+/// A shared handle on the document. Both stores clone it so one document
+/// carries both roots. Cloning shares; it never copies the document.
 #[derive(Debug, Clone, Default)]
 pub struct SyncHandle(Arc<Mutex<SyncDoc>>);
 
 impl PartialEq for SyncHandle {
-    /// Identity, not content. Two stores sharing one document are equal here;
-    /// comparing document bytes on every `PartialEq` would be absurd, and the
-    /// derived `PartialEq` on the stores only exists to compare their vecs.
+    /// Identity, not content.
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
@@ -197,46 +112,27 @@ impl SyncHandle {
         Self(Arc::new(Mutex::new(doc)))
     }
 
-    /// A poisoned lock means another thread panicked mid-edit. The document
-    /// is still structurally valid automerge, and refusing to write notes for
-    /// the rest of the session would be worse than carrying on, so the guard
-    /// is taken either way.
+    /// A poisoned lock still yields its guard: the document stays valid
+    /// automerge, and losing the session's notes would be worse.
     pub fn lock(&self) -> MutexGuard<'_, SyncDoc> {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
 impl SyncDoc {
-    /// Open the document at `path`, creating an empty one if there is nothing
-    /// there yet.
-    ///
-    /// The actor id is left to automerge, which mints a fresh random 16-byte
-    /// one on every `new` and every `load`. Deriving it from `machine_id`
-    /// instead would be weaker: that is 16 bits, and it travels inside
-    /// `machine.json`, so copying a config directory to set up the second
-    /// machine would hand both installs the same actor. Two histories written
-    /// under one actor is the corrupted-merge case, not a conflict.
-    ///
-    /// Returns the document alongside a message when the file existed but
-    /// could not be read as automerge. The caller surfaces that to the status
-    /// log: a corrupt corpus replaced by an empty one, silently, is the
-    /// failure this whole path exists to stop.
+    /// Open the document at `path`, creating an empty one if absent. The actor
+    /// id stays automerge-minted: a `machine_id`-derived actor would collide
+    /// across machines when a config dir is copied. Returns an error message
+    /// for the status log when the file existed but could not be read.
     pub fn open(path: PathBuf) -> (Self, Option<String>) {
         let mut error = None;
         let mut existed = false;
         let mut read_only = false;
         let mut doc = new_document();
 
-        // `Path::exists()` is `fs::metadata(...).is_ok()`, so it answers
-        // `false` for a path that is there but whose stat call errored (a
-        // permission problem, a transient I/O error), the same as for a path
-        // that genuinely is not there. std's own docs say to use
-        // `try_exists` when that distinction matters. Answering `false` here
-        // sends this machine down `existed = false`, which downstream means
-        // "seed a brand-new genesis-rooted document", minted over whatever
-        // the real bytes at `path` actually hold. A stat failure is treated
-        // as "it's there and we could not read it", the same latch as the
-        // arms below, rather than as absence.
+        // `try_exists`, not `exists`: `exists` answers `false` for a stat
+        // failure too, which would seed a fresh document over real bytes. A
+        // stat failure latches read-only instead.
         match path.try_exists() {
             Ok(true) => {
                 existed = true;
@@ -244,9 +140,8 @@ impl SyncDoc {
                     Ok(bytes) => match load_or_salvage(&bytes) {
                         Ok(loaded) => doc = loaded,
                         Err(e) => {
-                            // Quarantine before anything can write over it. The
-                            // same reasoning as the JSON stores: an unreadable
-                            // corpus is recoverable, an overwritten one is not.
+                            // Quarantine before anything writes over it: unreadable is
+                            // recoverable, overwritten is not.
                             let backup = path.with_extension("automerge.corrupt");
                             let message = format!(
                                 "Notes document at {} could not be read ({e}); preserved as {}",
@@ -256,9 +151,7 @@ impl SyncDoc {
                             tracing::error!("{message}");
                             if let Err(e) = std::fs::rename(&path, &backup) {
                                 tracing::error!("Could not preserve the corrupt document: {e}");
-                                // The bytes are still sitting at `path` and we
-                                // could not move them aside, so writing is off.
-                                read_only = true;
+                                read_only = true; // bytes still at `path`; writing is off
                             } else {
                                 existed = false;
                             }
@@ -308,17 +201,15 @@ impl SyncDoc {
         )
     }
 
-    /// Opt this document into keeping `vocabulary.txt` in step. See the field.
+    /// Opt this document into keeping `vocabulary.txt` in step.
     pub fn set_vocab_path(&mut self, path: PathBuf) {
         self.vocab_path = Some(path);
     }
 
-    /// Where the vocabulary file is, or `None` when this document has none.
     pub fn vocab_path(&self) -> Option<&Path> {
         self.vocab_path.as_deref()
     }
 
-    /// The baseline both sides last agreed on. See the field.
     pub fn last_vocab(&self) -> Option<&str> {
         self.last_vocab.as_deref()
     }
@@ -328,21 +219,12 @@ impl SyncDoc {
         self.last_vocab = Some(content);
     }
 
-    /// Whether writing is off for this session. See the field.
     pub fn is_read_only(&self) -> bool {
         self.read_only
     }
 
-    /// Move an incoming document we could not parse out of the way, so the
-    /// save that follows does not overwrite it.
-    ///
-    /// `merge_incoming` leaves an unparseable file alone on the theory that a
-    /// sync client is mid-write and the next tick will find it whole. That
-    /// only holds if nothing writes over it in between, and the same flush
-    /// goes on to save our own document to the same path. The quarantine name
-    /// carries a timestamp so a second bad delivery cannot overwrite the
-    /// first, and a sync client that really was mid-write simply delivers it
-    /// again.
+    /// Move an unparseable incoming file aside (timestamped, so a second bad
+    /// delivery can't overwrite the first) before the save that would overwrite it.
     pub fn quarantine_incoming(&mut self) {
         let stamp = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -356,8 +238,7 @@ impl SyncDoc {
                     self.path.display(),
                     backup.display()
                 );
-                // The file is gone from `path`, so `file_moved` goes quiet
-                // rather than asking for the same failed merge every tick.
+                // Gone from `path`, so `file_moved` goes quiet instead of retrying the merge every tick.
                 self.last_write = None;
             }
             Err(e) => tracing::error!("Could not move the unreadable sync document aside: {e}"),
@@ -372,8 +253,7 @@ impl SyncDoc {
         &mut self.doc
     }
 
-    /// Whether the file was on disk when this document was opened. The seed
-    /// from legacy JSON runs only when it was not.
+    /// Whether the file was on disk at open. The legacy-JSON seed runs only when it was not.
     pub fn existed(&self) -> bool {
         self.existed
     }
@@ -382,47 +262,29 @@ impl SyncDoc {
         self.doc.get_heads()
     }
 
-    /// Record that a change landed on this document from outside the flush
-    /// tick's own reconcile/merge, and still owes a save. See the field.
-    ///
-    /// Called by the live-sync coroutine right after `receive_sync_message`
-    /// applies a peer's changes, never by `flush::run_document_pass` itself,
-    /// that path already detects its own changes by comparing heads.
+    /// Record a change from outside the flush tick that still owes a save.
+    /// Called by the live-sync coroutine, never by `flush::run_document_pass`.
     pub fn mark_pending_save(&mut self) {
         self.pending_save = true;
     }
 
-    /// Peek the flag `mark_pending_save` sets, without clearing it.
-    /// `run_document_pass` folds this into its own changed-or-not decision so
-    /// a save it could not otherwise see still happens on the next tick.
-    ///
-    /// Deliberately not consuming: a `save()` right after can still fail, and
-    /// a version that cleared the flag unconditionally would then have
-    /// nothing left to notice the miss on the *next* tick, since that tick's
-    /// own heads comparison sees no change either, since the mutation predates it.
-    /// `clear_pending_save` is the only thing allowed to turn this back off,
-    /// and only the caller who just saved successfully may call it.
+    /// Peek the flag without clearing it. Cleared only by `clear_pending_save`
+    /// after a save that reached disk, so a failed save stays visible.
     pub fn has_pending_save(&self) -> bool {
         self.pending_save
     }
 
-    /// Clear the flag after a save that actually reached disk. See
-    /// `has_pending_save` for why this is a separate step from reading it.
+    /// Clear the flag after a save that actually reached disk.
     pub fn clear_pending_save(&mut self) {
         self.pending_save = false;
     }
 
-    /// Whether the last `save()` call failed and nothing has succeeded
-    /// since. See the field.
     pub fn has_save_failed(&self) -> bool {
         self.save_failed
     }
 
-    /// Whether the file on disk has been written since we last wrote it.
-    ///
-    /// A stat, so it is cheap enough for the 500 ms tick. A file that has
-    /// appeared since we opened counts as moved, which is how a first sync
-    /// into a fresh install gets picked up.
+    /// Whether the file on disk moved since our last write. A newly appeared
+    /// file counts, which is how a first sync into a fresh install is picked up.
     pub fn file_moved(&self) -> bool {
         if self.path.as_os_str().is_empty() {
             return false;
@@ -434,11 +296,8 @@ impl SyncDoc {
         }
     }
 
-    /// Read the file and merge it in. Returns whether anything new arrived.
-    ///
-    /// A file we cannot parse is left alone rather than quarantined: it may
-    /// be a half-written copy from a sync client, and the next tick will find
-    /// it whole.
+    /// Read the file and merge it in. An unparseable file is left alone: it may
+    /// be a half-written copy, and the next tick will find it whole.
     pub fn merge_incoming(&mut self) -> Result<bool> {
         let bytes = std::fs::read(&self.path)?;
         let mut incoming = AutoCommit::load(&bytes)?;
@@ -446,53 +305,19 @@ impl SyncDoc {
         Ok(!added.is_empty())
     }
 
-    /// Record the file on disk as seen, without merging it.
-    ///
-    /// Used after a merge that turned out to bring nothing new. Without it a
-    /// sync client rewriting the file with content we already have would keep
-    /// `file_moved` true for the rest of the session.
-    ///
-    /// ⚠️ There is a window here that mtime detection cannot close. A sync
-    /// client that rewrites the file between `merge_incoming`'s read and this
-    /// stat leaves us recording the newer mtime against the older content,
-    /// and the next save then overwrites a delivery we never merged. Task
-    /// 11's live sync is what removes the guesswork; until then the exposure
-    /// is one flush interval wide and the delivery is re-sent by any client
-    /// that notices the file changed under it.
+    /// Record the file on disk as seen, without merging it. Used after a merge
+    /// that brought nothing new, or `file_moved` would stay true forever.
+    /// ⚠️ Racy by nature: a rewrite between `merge_incoming`'s read and this
+    /// stat records a newer mtime against older content. Live sync (not mtime)
+    /// is the real fix; until then the window is one flush interval wide.
     pub fn mark_seen(&mut self) {
         self.last_write = mtime(&self.path);
     }
 
-    /// Write the document out, replacing the file atomically.
-    ///
-    /// Temp file plus rename, matching the JSON stores: a crash mid-write
-    /// leaves the previous corpus intact rather than a truncated file the
-    /// next launch would quarantine.
-    ///
-    /// A no-op on a read-only document. The bytes at `path` are the user's
-    /// only copy of the corpus and we could not read them; writing what we
-    /// have instead would destroy them. `NoteStore::flush_if_dirty` holds
-    /// back the JSON mirror for the same reason, so a session that starts
-    /// this way persists nothing at all beyond machine-local window state.
-    ///
-    /// ⚠️ **The temp name carries this process's pid.** Task 10 put a second
-    /// process, `sync_server`, on this same document format, and the
-    /// documented default deployment can run it on the same machine as
-    /// Beamer, sharing this file. Two processes racing a plain
-    /// `notes.automerge.tmp` can rename over each other's temp file, or
-    /// `rename` can fail outright because the other process already moved
-    /// the same path away. Pid-scoping the temp name, the same fix
-    /// `edit::adopt_into` already applies to attachment temp files, gives
-    /// each process its own name so the two writers cannot collide, even
-    /// though they still race on the final `rename` destination itself (one
-    /// wins, one's write is superseded, and that is fine: both write the
-    /// same document format, and neither can lose changes the other reads
-    /// back, since the loser's changes are already reflected in its own
-    /// in-memory `AutoCommit` and get reconciled again on its next tick).
-    ///
-    /// Sets or clears `save_failed` around the actual write, in
-    /// `write_and_rename`, so every return path (the early `?`s included)
-    /// updates it and a caller cannot forget to.
+    /// Write the document out atomically (temp file plus rename). A no-op on a
+    /// read-only document: the unreadable bytes at `path` are the only copy.
+    /// ⚠️ The temp name carries this process's pid, since `sync_server` may
+    /// share this file on the same machine. Sets/clears `save_failed` itself.
     pub fn save(&mut self) -> Result<()> {
         if self.path.as_os_str().is_empty() || self.read_only {
             return Ok(());
@@ -513,18 +338,13 @@ impl SyncDoc {
             let _ = std::fs::remove_file(&tmp);
             return Err(e.into());
         }
-        // Read back after the rename, not before: the mtime that matters is
-        // the one the file ended up with.
+        // The mtime that matters is the one the file ended up with.
         self.last_write = mtime(&self.path);
         Ok(())
     }
 
-    /// The map at a root key.
-    ///
-    /// Normally already there, from [`GENESIS`]. The `put_object` fallback is
-    /// for a document written before genesis existed, and it is the thing
-    /// genesis exists to stop happening twice: a map created here carries this
-    /// machine's actor, and two of them at one key conflict rather than merge.
+    /// The map at a root key. The fallback creates it, but a map created here
+    /// carries this machine's actor and won't merge — the thing genesis prevents.
     pub fn root_map(&mut self, key: &str) -> Result<ObjId> {
         if let Some((_, id)) = self.doc.get(ROOT, key)? {
             return Ok(id);
@@ -534,7 +354,7 @@ impl SyncDoc {
         Ok(self.doc.put_object(ROOT, key, ObjType::Map)?)
     }
 
-    /// The map at a root key, or `None` when nothing has ever written it.
+    /// The map at a root key, or `None` when nothing ever wrote it.
     pub fn root_map_if_present(&self, key: &str) -> Option<ObjId> {
         match self.doc.get(ROOT, key) {
             Ok(Some((_, id))) => Some(id),
@@ -543,15 +363,9 @@ impl SyncDoc {
     }
 }
 
-/// Load a document, falling back to `load_unverified_heads` when the strict
-/// load rejects it.
-///
-/// The strict load verifies each change's hash. A file that fails only that
-/// check still holds every operation, with its original object ids, so
-/// accepting it keeps the character-level merge with the other machine
-/// working. Rebuilding from `notes.json` instead would mint fresh object ids
-/// for every note, and a merge against a peer that still holds the originals
-/// then resolves each field by conflict rather than by splice.
+/// Load a document, salvaging via `load_unverified_heads` when hash
+/// verification fails. The operations (and their object ids) survive, so the
+/// character-level merge with the peer keeps working.
 fn load_or_salvage(bytes: &[u8]) -> Result<AutoCommit, automerge::AutomergeError> {
     match AutoCommit::load(bytes) {
         Ok(doc) => Ok(doc),
@@ -572,19 +386,9 @@ fn mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).ok()?.modified().ok()
 }
 
-/// Rename `from` to `to`, retrying up to three times, about 50ms apart.
-///
-/// On Windows, replacing an existing file needs `DELETE` access on the
-/// destination, so any process holding it open without `FILE_SHARE_DELETE`
-/// (a backup agent, an on-access scanner, an editor with the file open)
-/// fails the rename transiently even though nothing about our own write was
-/// wrong. On Linux `rename` is atomic against this class of failure and the
-/// loop never runs a second time in practice.
-///
-/// Shared by every store's `save`, `SyncDoc`'s included: `NoteStore`,
-/// `TaskStore`, `MachineStore`, `TranscriptionHistory` and `Config` all
-/// finish their own atomic write the same way, and all of them are exposed
-/// to the same sharing violation.
+/// Rename `from` to `to`, retrying 3x ~50ms apart. On Windows a process
+/// holding the destination open without `FILE_SHARE_DELETE` fails the rename
+/// transiently; shared by every store's atomic `save`.
 pub(crate) fn rename_with_retry(from: &Path, to: &Path) -> std::io::Result<()> {
     const ATTEMPTS: u32 = 3;
     const DELAY: std::time::Duration = std::time::Duration::from_millis(50);
@@ -601,7 +405,6 @@ pub(crate) fn rename_with_retry(from: &Path, to: &Path) -> std::io::Result<()> {
     Err(last_err.expect("the loop above always runs at least once"))
 }
 
-/// Read a string property off a map.
 pub fn get_str(doc: &AutoCommit, obj: &ObjId, key: &str) -> Option<String> {
     match doc.get(obj, key) {
         Ok(Some((value, _))) => value.into_string().ok(),
@@ -609,7 +412,6 @@ pub fn get_str(doc: &AutoCommit, obj: &ObjId, key: &str) -> Option<String> {
     }
 }
 
-/// Read a boolean property off a map.
 pub fn get_bool(doc: &AutoCommit, obj: &ObjId, key: &str) -> Option<bool> {
     match doc.get(obj, key) {
         Ok(Some((value, _))) => value.to_bool(),
@@ -617,9 +419,8 @@ pub fn get_bool(doc: &AutoCommit, obj: &ObjId, key: &str) -> Option<bool> {
     }
 }
 
-/// Read an f64 property off a map. Confidence is the only float in the
-/// corpus, and it is stored as one rather than as a formatted string so a
-/// value outside 0.0-1.0 survives the round trip exactly as the model gave it.
+/// Read an f64 property. Stored as a float (not a string) so an out-of-range
+/// confidence survives the round trip exactly as the model gave it.
 pub fn get_f64(doc: &AutoCommit, obj: &ObjId, key: &str) -> Option<f64> {
     match doc.get(obj, key) {
         Ok(Some((value, _))) => value.to_scalar().and_then(|s| s.to_f64()),
@@ -627,7 +428,6 @@ pub fn get_f64(doc: &AutoCommit, obj: &ObjId, key: &str) -> Option<f64> {
     }
 }
 
-/// The text at a property, if that property holds a text object.
 pub fn get_text(doc: &AutoCommit, obj: &ObjId, key: &str) -> Option<String> {
     match doc.get(obj, key) {
         Ok(Some((_, id))) => doc.text(&id).ok(),
@@ -635,11 +435,8 @@ pub fn get_text(doc: &AutoCommit, obj: &ObjId, key: &str) -> Option<String> {
     }
 }
 
-/// Write a string property, skipping the write when the value already matches.
-///
-/// Skipping matters for more than speed. An unconditional `put` on every
-/// field of every note, twice a second, would grow the document's history
-/// without end and make every tick a write.
+/// Write a string property, skipping when the value matches. An unconditional
+/// `put` on every field every tick would grow history without end.
 pub fn put_str(doc: &mut AutoCommit, obj: &ObjId, key: &str, value: &str) -> Result<()> {
     if get_str(doc, obj, key).as_deref() == Some(value) {
         return Ok(());
@@ -664,7 +461,7 @@ pub fn put_f64(doc: &mut AutoCommit, obj: &ObjId, key: &str, value: f64) -> Resu
     Ok(())
 }
 
-/// Write an optional string property, deleting the key when the value is gone.
+/// Write an optional string property, deleting the key when gone.
 pub fn put_opt_str(
     doc: &mut AutoCommit,
     obj: &ObjId,
@@ -682,14 +479,9 @@ pub fn put_opt_str(
     }
 }
 
-/// Update a text property in place, so an edit becomes a splice.
-///
-/// ⚠️ **This is what makes the whole document worth having.** `update_text`
-/// diffs the stored text against `value` and turns the difference into splice
-/// operations, which merge character by character with a concurrent edit from
-/// another machine. Replacing the object, or storing the body as a plain
-/// string property, would make it a last-write-wins register and one of the
-/// two machines' typing would vanish on merge.
+/// Update a text property in place so an edit becomes a splice. ⚠️ This is the
+/// document's whole point: char-by-char merge. A plain string (or replacing
+/// the object) would be last-write-wins and eat one machine's typing.
 pub fn put_text(doc: &mut AutoCommit, obj: &ObjId, key: &str, value: &str) -> Result<()> {
     let existing = match doc.get(obj, key)? {
         Some((v, id)) if v.is_object() => Some(id),
@@ -706,7 +498,6 @@ pub fn put_text(doc: &mut AutoCommit, obj: &ObjId, key: &str, value: &str) -> Re
     Ok(())
 }
 
-/// Delete every key of `map` that is not in `keep`.
 pub fn retain_keys(doc: &mut AutoCommit, map: &ObjId, keep: &[String]) -> Result<()> {
     let stale: Vec<String> =
         doc.keys(map).filter(|k| !keep.iter().any(|kept| kept == k)).collect();
@@ -716,7 +507,6 @@ pub fn retain_keys(doc: &mut AutoCommit, map: &ObjId, keep: &[String]) -> Result
     Ok(())
 }
 
-/// The child map at `key`, created if absent.
 pub fn child_map(doc: &mut AutoCommit, obj: &ObjId, key: &str) -> Result<ObjId> {
     if let Some((v, id)) = doc.get(obj, key)? {
         if v.is_object() {

@@ -1,24 +1,9 @@
-//! Suggestion chips on a sticky note.
-//!
-//! A chip is a *proposal*, never a fact. Extraction writes nothing to the
-//! Tasks page directly: it puts undecided rows here, and one click each way
-//! decides them. That confirmation step is the feature's actual precision
-//! mechanism — it makes a false positive cost one click instead of quietly
-//! polluting a task list, and it is why a 5 GB model is a reasonable default.
-//!
-//! The store arrives as a **prop**, like `notes`, for the reason documented at
-//! the top of `sticky.rs`: each sticky is its own `VirtualDom`, so
-//! `use_context` cannot see the main window's providers and a `GlobalSignal`
-//! would silently give every window its own copy.
-//!
-//! Chips render **outside `.sticky-bar`**. Every control inside the bar needs
-//! `onmousedown: e.stop_propagation()` or the bar's window drag swallows the
-//! click; out here that is not needed and its absence is not a bug.
-//!
-//! The reported confidence is deliberately **not** shown. Measured against the
-//! real model it clusters between 0.90 and 0.98 whatever the note, so a number
-//! on the chip would look like information and carry none. The evidence span is
-//! the honest signal: it is what makes a wrong suggestion obvious at a glance.
+//! Suggestion chips: extraction proposes, one click each way decides (a false
+//! positive costs one click, not a polluted task list). The store arrives as a
+//! prop — each sticky is its own `VirtualDom`, so `use_context` can't see the
+//! main window's providers. Chips render outside `.sticky-bar`, so no
+//! `stop_propagation` dance is needed. Confidence is not shown (it clusters
+//! 0.90–0.98 regardless); the evidence span is the signal.
 
 use dioxus::prelude::*;
 
@@ -36,9 +21,7 @@ pub struct StickyChipsProps {
 pub fn StickyChips(props: StickyChipsProps) -> Element {
     let StickyChipsProps { note_id, mut tasks } = props;
 
-    // Cloned into owned rows rather than held as borrows: the buttons below
-    // capture their ids in click handlers, which cannot outlive a `read()`
-    // guard on the store. Same reasoning as `notes_page`.
+    // Cloned: click handlers can't hold a `read()` guard on the store.
     let rows = {
         let note_id = note_id.clone();
         use_memo(move || {
@@ -52,9 +35,7 @@ pub fn StickyChips(props: StickyChipsProps) -> Element {
     };
 
     if rows.read().is_empty() {
-        // No strip at all rather than an empty one. Most notes contain no
-        // tasks, so an "as yet nothing" row would be the common case and would
-        // spend a note's height saying nothing.
+        // No strip at all rather than an empty placeholder row.
         return rsx! {};
     }
 
@@ -69,9 +50,7 @@ pub fn StickyChips(props: StickyChipsProps) -> Element {
                         div { key: "{id}", class: "sticky-chip",
                             div { class: "sticky-chip-main",
                                 div { class: "sticky-chip-text", "{text}" }
-                                // Full text on hover: the span is one line and
-                                // ellipsized, and the whole point of showing it
-                                // is that the user can check it.
+                                // Full text on hover; the span is ellipsized to one line.
                                 div {
                                     class: "sticky-chip-evidence",
                                     title: "{evidence}",
@@ -90,10 +69,7 @@ pub fn StickyChips(props: StickyChipsProps) -> Element {
                                 }
                                 button {
                                     class: "sticky-chip-btn sticky-chip-dismiss",
-                                    // Not "delete": the row is kept. Dismissing
-                                    // is how the model is told it was wrong, and
-                                    // that answer is the labelled negative the
-                                    // eval corpus is built from.
+                                    // Kept as a labelled negative for the eval corpus.
                                     title: "Not a task",
                                     onclick: {
                                         let id = id.clone();

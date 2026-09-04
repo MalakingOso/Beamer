@@ -14,14 +14,9 @@ impl Vocabulary {
         crate::config::Config::config_dir().join("vocabulary.txt")
     }
 
-    /// `try_exists`, not `exists`: the latter answers `false` both for a
-    /// genuinely missing file and for one whose stat call errored (a
-    /// permission problem, a transient I/O error), and treating the second
-    /// case as the first used to start this store from an empty list. The
-    /// first `add` after that would then save that empty list over the real
-    /// file. A stat failure is surfaced as an error instead, so every caller
-    /// of `load()` (all of which already handle `Err`) leaves the file alone
-    /// rather than mutating a store that was never actually confirmed empty.
+    /// `try_exists`, not `exists`: a stat failure must error, not look like a
+    /// missing file — starting from an empty list would let the next `add`
+    /// save over the real vocabulary.
     pub fn load() -> Result<Self> {
         let path = Self::path();
         let terms = match path.try_exists() {
@@ -57,14 +52,8 @@ impl Vocabulary {
         Ok(())
     }
 
-    /// Replace `old` with `new` **in place**.
-    ///
-    /// The UI used to rename by calling `remove(old)` then `add(new)`, which
-    /// appends — so on disk the term jumped to the end of the list while the
-    /// in-memory list kept it where it was, and the two disagreed until the
-    /// next restart. A no-op when `old` isn't present or `new` is blank; if
-    /// `new` already exists elsewhere in the list, `old` is simply dropped so
-    /// the rename can't introduce a duplicate.
+    /// Replace `old` with `new` in place (no-op if `old` is missing or `new`
+    /// is blank; drops `old` if `new` already exists, so no duplicates).
     pub fn rename(&mut self, old: &str, new: &str) -> Result<()> {
         let new = new.trim();
         if new.is_empty() || old == new {
@@ -96,8 +85,7 @@ impl Vocabulary {
 mod tests {
     use super::*;
 
-    /// A vocabulary rooted in a PID-scoped temp file, so tests never touch the
-    /// real `%APPDATA%`/`~/.config` vocabulary and concurrent runs don't race.
+    /// Vocabulary rooted in a PID-scoped temp file (never the real store; no races).
     fn temp_vocab(tag: &str, terms: &[&str]) -> Vocabulary {
         let dir = std::env::temp_dir().join(format!("beamer_vocab_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -113,7 +101,7 @@ mod tests {
         v.rename("beemer", "Beamer").unwrap();
         assert_eq!(v.list(), ["alpha", "Beamer", "gamma"]);
 
-        // And the file agrees — this is the half that used to drift.
+        // The file must agree with the in-memory list.
         let on_disk = std::fs::read_to_string(&v.path).unwrap();
         assert_eq!(on_disk, "alpha\nBeamer\ngamma");
         let _ = std::fs::remove_file(&v.path);

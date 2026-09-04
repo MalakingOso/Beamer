@@ -1,7 +1,5 @@
-/// Which sink a recording session's final transcript should reach.
-///
-/// Beamer has two dictation hotkeys that share the entire audio and ASR
-/// pipeline and differ only in what happens to the finished text.
+/// Which sink a finished transcript reaches. Both hotkeys share the
+/// audio/ASR pipeline and differ only here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CaptureMode {
     /// Inject into the focused input field — the original behaviour.
@@ -18,12 +16,10 @@ pub enum HotkeyEvent {
     RecordStop,
 }
 
-// Virtual key constants (Windows VK codes used as portable key IDs)
+// Windows VK codes double as portable key IDs on all platforms.
 pub const VK_LWIN: u32 = 0x5B;
 
-/// Cross-platform hotkey configuration.
-/// Stores modifier flags and a trigger key as a Windows VK code (used on all platforms
-/// as a stable, portable integer key identifier in the config and key-name tables).
+/// Cross-platform hotkey config: modifier flags + trigger key as a VK code.
 #[derive(Clone)]
 pub struct HotkeyConfig {
     pub ctrl: bool,
@@ -63,11 +59,8 @@ impl HotkeyConfig {
             }
         }
 
-        // Super/Win/Cmd/Meta alone is representable as VK_LWIN, but paired
-        // with another key it is not: `HotkeyConfig` has no Meta modifier
-        // field, so "Super+N" would otherwise parse as a bare N trigger and
-        // fire on every N keypress. Reject rather than silently drop it,
-        // since callers already treat `None` as unbound.
+        // No Meta modifier field exists, so "Super+N" would parse as bare N
+        // and fire on every N press. Reject it (`None` = unbound) instead.
         let trigger_vk = if has_win {
             if key_str.is_empty() {
                 VK_LWIN
@@ -127,13 +120,9 @@ pub fn key_name_to_vk(name: &str) -> Option<u32> {
 }
 
 // ─── Shared binding-matching layer ─────────────────────────────────────────
-//
-// Both platform backends (`linux_hotkey.rs`, `ll_hook.rs`) drive the same two
-// hotkeys, inject and note, through this matching logic. It lives here, not
-// in either backend, so a change to how bindings are compared can't drift
-// between platforms.
+// Both platform backends match through here so comparison logic can't drift.
 
-/// Beamer has exactly two dictation hotkeys: inject and note.
+/// Exactly two dictation hotkeys: inject and note.
 pub const MAX_BINDINGS: usize = 2;
 
 /// One configured hotkey and the sink it selects.
@@ -143,10 +132,8 @@ pub struct BindingConfig {
     pub config: HotkeyConfig,
 }
 
-/// Per-binding press state. Kept separate from `BindingConfig` because the
-/// config is swapped wholesale by `update_configs` while press state must
-/// survive — a user editing the note hotkey mid-hold shouldn't strand the
-/// inject binding in `armed`.
+/// Per-binding press state. Separate from `BindingConfig` so it survives
+/// `update_configs` swaps (editing one hotkey mid-hold must not strand the other).
 #[derive(Clone, Copy, Default)]
 pub struct BindingState {
     pub armed: bool,
@@ -169,9 +156,8 @@ pub fn build_bindings(inject: HotkeyConfig, note: Option<HotkeyConfig>) -> Vec<B
     v
 }
 
-/// Index of the binding whose trigger key and modifier set both match, or
-/// `None`. Modifiers must match *exactly*, so Ctrl+Shift+Space does not fire a
-/// binding registered for plain Ctrl+Space.
+/// Index of the binding matching trigger + modifiers, or `None`.
+/// Modifiers match exactly: Ctrl+Shift+Space won't fire a Ctrl+Space binding.
 pub fn matching_binding(bindings: &[BindingConfig], vk: u32, mods: Modifiers) -> Option<usize> {
     bindings.iter().position(|b| {
         b.config.trigger_vk == vk

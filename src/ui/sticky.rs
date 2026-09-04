@@ -1,30 +1,10 @@
-//! Sticky note windows.
-//!
-//! One ordinary Dioxus window per open note — the same `new_window` pattern
-//! used for the splash and pill windows in `app_setup.rs`. Deliberately NOT
-//! always-on-top: notes sit in the normal stacking order.
-//!
-//! Wayland gives clients no control over their own position, so placement goes
-//! through Beamer's GNOME extension (`shell_window`); the window title is the
-//! handle it matches on. There is no position read-back — notes are placed by
-//! `note_layout`, never restored to where they were.
-//!
-//! **Size is different, and is remembered.** Unlike position, a window's size
-//! arrives in the compositor's configure event rather than having to be
-//! guessed, so `WindowEvent::Resized` is a fact rather than a hopeful read.
-//! That does not reopen the scatter-on-launch decision: a note still appears
-//! somewhere new each launch, now at the size you left it.
-//!
-//! The store arrives as a **prop**, not via `use_context`. Each sticky window is
-//! its own `VirtualDom` with its own scope tree, and `use_context` walks only
-//! the current dom's tree — the main window's provider is invisible from here.
-//! A `Signal` is `Copy + 'static` and its generational-box arena is thread-local
-//! (`generational-box`'s `UNSYNC_RUNTIME`), and every desktop `VirtualDom` polls
-//! on the main thread, so the handle resolves across the dom boundary even
-//! though the context does not.
+//! Sticky note windows: one ordinary (not always-on-top) Dioxus window per open
+//! note. Wayland clients can't position themselves, so placement goes through
+//! the GNOME extension (`shell_window`), matched by window title; position is
+//! never read back, but size is (`WindowEvent::Resized`) and is remembered.
+//! Each window is its own `VirtualDom`, so the store arrives as a prop —
+//! `use_context` can't see the main window's providers across that boundary.
 
-// Aliased: `dioxus::prelude::Event` is the UI event type used all through
-// the component below, and tao's is a different thing entirely.
 use dioxus::desktop::tao::event::{Event as TaoEvent, WindowEvent};
 use dioxus::desktop::tao::window::ResizeDirection;
 use dioxus::desktop::{use_window, use_wry_event_handler};
@@ -45,19 +25,12 @@ pub fn window_title(id: &str) -> String {
     format!("{TITLE_PREFIX}{id}")
 }
 
-/// Every colour a note can be, in swatch order.
 pub const PALETTE: [NoteColor; 6] = NoteColor::ALL;
 
 /// Convert a `Resized` event's physical size to the logical one the store keeps.
-///
-/// ⚠️ **`Resized` carries `PhysicalSize`; the window was built from a
-/// `LogicalSize`.** At scale 1.0 the two are identical, so getting this
-/// backwards is completely invisible on a 1x display and reopens every note at
-/// double or half size on a HiDPI one — the same trap `work_area` documents for
-/// monitor geometry.
-///
-/// A zero in either axis is a minimize on some compositors, not a resize, and
-/// storing it would reopen the note as a sliver.
+/// ⚠️ `Resized` is physical, the window was built logical — swapped, notes
+/// reopen at double/half size on HiDPI (invisible at 1x). A zero axis is a
+/// minimize, not a resize, and must not be stored.
 pub fn logical_size(physical: (u32, u32), scale: f64) -> Option<(u32, u32)> {
     if physical.0 == 0 || physical.1 == 0 || scale <= 0.0 {
         return None;
@@ -73,10 +46,8 @@ pub struct StickyNoteProps {
     pub id: String,
     pub notes: Signal<NoteStore>,
     pub tasks: Signal<TaskStore>,
-    /// Handle on the App-scoped pipeline. `Coroutine<T>` is `Copy` and its
-    /// channel is not tied to a scope, so it crosses the VirtualDom boundary
-    /// for the same reason a `Signal` does — and a pass asked for here still
-    /// completes if this window is closed while it runs.
+    /// App-scoped pipeline handle. `Coroutine` is `Copy` and crosses the
+    /// VirtualDom boundary like a `Signal`; a requested pass outlives this window.
     pub passes: Coroutine<PipelineRequest>,
 }
 
@@ -84,19 +55,11 @@ pub struct StickyNoteProps {
 pub fn StickyNote(props: StickyNoteProps) -> Element {
     let StickyNoteProps { id, mut notes, mut tasks, passes } = props;
 
-    // Wayland gives a client no way to set its own position, but it may ask the
-    // compositor to take over an interactive move — `drag()` wraps tao's
-    // `drag_window()`, which is `xdg_toplevel.move` under Mutter. That is the
-    // only way an undecorated note can be moved, since `with_decorations(false)`
-    // means there is no compositor titlebar to grab.
-    //
-    // `use_window()` resolves to *this* sticky's own context, for the same
-    // reason the close handler below does: each sticky is its own VirtualDom.
+    // `drag()` (compositor interactive move) is the only way to move an
+    // undecorated note. `use_window()` resolves to this sticky's own VirtualDom.
     let window = use_window();
 
-    // Serve this note's images to this note's webview. Registered here rather
-    // than in `App()` for the same per-window reason as the event handler
-    // below — see `sticky_blocks`.
+    // Per-window asset handler — must register here, not in `App()` (see `sticky_blocks`).
     sticky_blocks::use_note_media(id.clone(), notes);
 
     let note = {
@@ -105,28 +68,14 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
     };
 
     let mut drop_target = use_signal(|| false);
-    // Set when a paste carried an image and no text. See `clipboard_paste`:
-    // there is nothing on disk for a screenshot to reference, so the note says
-    // so rather than swallowing the paste in silence.
+    // Set when a paste carried image bytes and no text (nothing on disk to attach).
     let mut paste_hint = use_signal(|| false);
 
-    // Record that the user closed this window, and how big they made it.
-    // Registered here, above the early return below — a hook after a
-    // conditional return breaks the fixed-hook-order rule the moment the note
-    // is archived.
-    //
-    // **Registered inside `StickyNote`, deliberately not in `App()`.**
-    // `create_wry_event_handler` keys the handler to the window that registers
-    // it, and `apply_event` skips any `WindowEvent` whose `window_id` differs.
-    // A handler registered in `App()` would therefore only ever see the *main*
-    // window's events — a silent no-op that looks entirely correct. Here,
-    // `window()` resolves to this sticky's own context, so it sees its own
-    // events and nothing else, and no `WindowId` map is needed.
-    //
-    // The close arm fires only for user and compositor closes. A programmatic
-    // `ctx.close()` sends `UserEvent(CloseWindow)` straight to
-    // `handle_close_requested` and never produces a `WindowEvent`, so the
-    // archive path cannot double-fire through here and needs no guard flag.
+    // Hooks stay above the early return below (fixed hook order). The event
+    // handler must register here, not in `App()`: handlers are keyed to the
+    // registering window, so `App()` would only ever see the main window's events.
+    // No double-fire guard needed — programmatic `close()` never produces a
+    // `WindowEvent`, only user/compositor closes do.
     {
         let id = id.clone();
         let window = window.clone();
@@ -139,13 +88,8 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
                 else {
                     return;
                 };
-                // ⚠️ Guarded with `peek`, before any `write()`. `Resized` fires
-                // once per frame of a grip drag *and* again when the window
-                // maps, and `Signal::write` notifies every subscriber whether
-                // or not the value changed — so an unguarded call would
-                // re-render this note and the whole board for a size that is
-                // already recorded. `set_size`'s own guard is not enough: by
-                // then the write lock has already been taken.
+                // `Resized` fires per frame of a drag; `peek` first so an
+                // unchanged size doesn't re-render the note and the board.
                 if notes.peek().size(&id) == Some(logical) {
                     return;
                 }
@@ -155,34 +99,11 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
         });
     }
 
-    // ⚠️ Windows/macOS only, and it is working around dioxus-desktop, not tao.
-    //
-    // A note window is built visible (tao's default), but dioxus hides it
-    // again the moment its webview finishes loading: `handle_initialize_msg`
-    // ends with `window.set_visible(self.is_visible_before_start)`, under
-    // that same `#[cfg(not(target_os = "linux"))]`. `is_visible_before_start`
-    // is one app-wide field captured from the *first* window's config
-    // (`handle_start_cause_init`), and Beamer's main window is deliberately
-    // built `.with_visible(false)` so the splash owns the launch moment — so
-    // every window opened afterwards inherits `false` and is hidden on
-    // arrival. That is why notes appear on Linux (the block is compiled out
-    // there) and had to be reopened by hand from the board on Windows:
-    // `sticky_windows::reopen_note`'s Focus arm calls `set_visible(true)`,
-    // which is exactly the manual step this removes.
-    //
-    // In an effect, not straight after `new_window().await`: that await
-    // resolves in `create_window`, before the webview has loaded, so anything
-    // set there is overwritten by the initialize handler later. Effects run
-    // off the `Poll` event that handler sends *after* hiding the window, so
-    // this lands last and sticks.
-    //
-    // Visible only — deliberately no `set_focus()`. Linux does not focus a
-    // new note either, so this matches it; and tao's Windows `set_focus`
-    // falls back to `force_window_active`, which fakes an Alt keypress
-    // through `SendInput` to bypass the foreground lock. Synthesising Alt
-    // inside a dictation app that is itself injecting keystrokes risks both
-    // a stray ribbon/menu activation in the app being dictated into and
-    // interleaving with an injection already in flight.
+    // Windows/macOS only: dioxus hides every non-first window when its webview
+    // loads (it inherits the hidden main window's `is_visible_before_start`), so
+    // re-show here in an effect, which runs after that handler. Visible only —
+    // no `set_focus()`: tao's Windows focus fakes an Alt keypress, which risks
+    // interfering with an injection in flight.
     #[cfg(not(target_os = "linux"))]
     {
         let window = window.clone();
@@ -190,8 +111,7 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
     }
 
     let Some(note) = note() else {
-        // The note was archived or deleted from another window while this one
-        // was open.
+        // Archived or deleted from another window while this one was open.
         return rsx! { div { class: "sticky-gone", "This note was deleted." } };
     };
 
@@ -207,16 +127,13 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
     let pick_id = id.clone();
     let paste_id = id.clone();
 
-    // Keyed to the stage fields, not to how the note was created. A dictated
-    // note whose cleanup was superseded by an edit has spent its automatic
-    // trigger; reading the stages is what leaves it a way back.
+    // Keyed to the stage fields, not the note's origin, so a superseded pass stays retryable.
     let footer = sticky_footer::footer(note.clean_state, note.extract_state);
 
     rsx! {
         div {
             class: "{color_class}",
-            // Without a `prevent_default` on dragover the browser refuses the
-            // drop outright and `ondrop` never fires at all.
+            // Without this, the browser refuses the drop and `ondrop` never fires.
             ondragover: move |e| e.prevent_default(),
             ondragenter: move |_| drop_target.set(true),
             ondragleave: move |_| drop_target.set(false),
@@ -233,19 +150,12 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
                         store.add_attachment(&drop_id, attachment);
                     }
                 }
-                // Inline, like `do_note_capture`, and through `flush_stores`
-                // for the same reason: `flush_if_dirty` writes only the JSON
-                // mirror, which nothing reads back, so a photo you just
-                // dropped would still be lost to a crash before the tick.
+                // Flush both stores so a crash before the tick can't lose the drop.
                 crate::notes::flush_stores(&mut notes.write(), &mut tasks.write());
             },
             onpaste: move |e: Event<ClipboardData>| {
-                // ⚠️ `ClipboardData` carries **nothing** on desktop —
-                // `SerializedClipboardData` is an empty struct — so the
-                // clipboard is read directly, the same way `home.rs` and
-                // `history_page.rs` already do. Synchronously, because
-                // `prevent_default` rides the event's own IPC response and a
-                // spawned read would answer too late to suppress the insert.
+                // `ClipboardData` is empty on desktop, so read the clipboard
+                // directly — synchronously, or `prevent_default` lands too late.
                 match clipboard_paste() {
                     Pasted::Url(url) => {
                         e.prevent_default();
@@ -260,15 +170,12 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
                         e.prevent_default();
                         paste_hint.set(true);
                     }
-                    // Ordinary text. Falls through and inserts as it always has.
                     Pasted::Nothing => paste_hint.set(false),
                 }
             },
             div {
                 class: "sticky-bar",
-                // The bar is the title bar: press and the compositor moves the
-                // window. Positions are deliberately not persisted — see
-                // agent_docs/sticky_notes.md — so a drag lasts the session.
+                // The bar is the title bar; positions are not persisted.
                 onmousedown: {
                     let window = window.clone();
                     move |_| window.drag()
@@ -279,9 +186,7 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
                             key: "{c.css_class()}",
                             class: "sticky-dot sticky-dot-{c.css_class()}",
                             title: "{c.css_class()}",
-                            // Without this the bar's mousedown starts a window
-                            // drag and the compositor swallows the click, so
-                            // the swatch would never fire.
+                            // Without this the bar's drag swallows the click.
                             onmousedown: move |e| e.stop_propagation(),
                             onclick: {
                                 let id = id.clone();
@@ -308,9 +213,7 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
                         },
                         IconPlus { size: 13 }
                     }
-                    // The fallback for every drop, and the only path on
-                    // Windows. dioxus-desktop turns this into a native dialog
-                    // returning real paths — no new dependency.
+                    // Native file dialog (the only attach path on Windows).
                     label {
                         class: "sticky-attach",
                         title: "Attach a file",
@@ -380,18 +283,12 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
                 if let Some(message) = footer.error {
                     span { class: "sticky-pass-error", "{message}" }
                 } else if paste_hint() {
-                    // Said out loud rather than left to be discovered. An
-                    // attachment is a reference to a file, and a screenshot on
-                    // the clipboard is not a file anywhere yet.
                     span { class: "sticky-paste-hint",
                         "Save the image first, then attach it with \u{1F4CE}"
                     }
                 }
-                // The grip. `with_decorations(false)` means the compositor
-                // offers no edge to grab, so the window asks for the resize
-                // itself — `xdg_toplevel.resize`, which unlike positioning is
-                // client-initiated and needs no extension method. Exactly how
-                // `.sticky-bar` already calls `drag()`.
+                // No decorations means no edge to grab; resize is client-initiated
+                // (unlike positioning) so no extension method is needed.
                 div {
                     class: "sticky-grip",
                     title: "Resize",
@@ -408,13 +305,9 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
     }
 }
 
-/// What a drop is carrying, in the order the plan settled on: real files first,
-/// then a URL from the drag's data transfer.
-///
-/// On every platform but Windows, wry's native drag-drop handler merges real
-/// filesystem paths into the HTML event, so `files()` is authoritative when it
-/// is non-empty. A drag from a browser carries no files and arrives as
-/// `text/uri-list` or a bare `text/plain` URL instead.
+/// What a drop carries: real files first, else a URL from the data transfer.
+/// Off Windows, `files()` is authoritative when non-empty; a browser drag
+/// arrives as `text/uri-list` or bare `text/plain` instead.
 fn attachments_from_drop(e: &Event<DragData>) -> Vec<Attachment> {
     let files = e.files();
     if !files.is_empty() {
@@ -439,20 +332,14 @@ fn attachments_from_drop(e: &Event<DragData>) -> Vec<Attachment> {
 pub enum Pasted {
     /// A bare URL, and nothing else. Becomes a link chip.
     Url(String),
-    /// Image bytes with no text beside them — a screenshot, or a copy out of an
-    /// image editor.
+    /// Image bytes with no text. Detected so the note can say so — a silent
+    /// drop would look like a bug. (Attachments reference files on disk.)
     ImageBytes,
-    /// Anything else, including ordinary prose that merely mentions a link.
-    /// The paste falls through and inserts text as it always has.
+    /// Anything else; the paste falls through and inserts text as normal.
     Nothing,
 }
 
 /// Read the system clipboard and decide what the paste means.
-///
-/// **Pasted image bytes are out of scope**, and deliberately: an attachment is a
-/// reference to a file on disk, and a screenshot on the clipboard is not a file
-/// anywhere. Detected rather than ignored, so the note can say so — silently
-/// dropping a paste is the one outcome that would look like a bug.
 fn clipboard_paste() -> Pasted {
     let Ok(mut clipboard) = arboard::Clipboard::new() else {
         return Pasted::Nothing;

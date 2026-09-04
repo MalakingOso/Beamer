@@ -3,9 +3,8 @@ use anyhow::Result;
 use arboard::Clipboard;
 
 pub struct ClipboardBackend {
-    /// Configured paste shortcut ("auto" | "ctrl_v" | "ctrl_shift_v"), passed
-    /// in when backends are constructed so the paste-time hot path never
-    /// touches disk. Unused on Windows (which always sends plain Ctrl+V).
+    /// Configured paste shortcut, threaded in at construction so pastes
+    /// never re-read disk. Unused on Windows (always plain Ctrl+V).
     #[cfg(not(target_os = "windows"))]
     pub paste_shortcut: String,
 }
@@ -20,7 +19,6 @@ impl InjectionBackend for ClipboardBackend {
     }
 
     fn available(&self) -> Result<(), String> {
-        // Quick check: can we create a clipboard handle?
         Clipboard::new().map(|_| ()).map_err(|e| format!("Clipboard unavailable: {}", e))
     }
 
@@ -46,9 +44,7 @@ impl InjectionBackend for ClipboardBackend {
     }
 }
 
-/// Sets clipboard text and pastes it with Ctrl+V via SendInput. The previous
-/// clipboard is restored after the paste. Returns `true` (kept for signature
-/// symmetry with the Linux version, which reports which chord mechanism won).
+/// Set clipboard text and paste with Ctrl+V; restores the previous clipboard after.
 #[cfg(target_os = "windows")]
 fn inject_via_clipboard(text: &str) -> Result<bool> {
     let mut clipboard = Clipboard::new()?;
@@ -69,12 +65,9 @@ fn inject_via_clipboard(text: &str) -> Result<bool> {
     Ok(true)
 }
 
-/// Sets clipboard text and attempts to paste by sending Ctrl(+Shift)+V through
-/// the first working chord mechanism (GNOME helper extension → ydotool →
-/// wtype). Returns `Some(mechanism)` if the chord was sent, `None` if the
-/// user needs to paste manually — in which case a desktop notification says
-/// so, and the previous clipboard is deliberately NOT restored (that would
-/// clobber the transcript before the user could paste it).
+/// Paste via the first working chord (GNOME helper → ydotool → wtype).
+/// `None` means manual paste: text stays on the clipboard and a
+/// notification says so (previous clipboard deliberately not restored).
 #[cfg(not(target_os = "windows"))]
 fn inject_via_clipboard(text: &str, paste_shortcut: &str) -> Result<Option<&'static str>> {
     let mut clipboard = Clipboard::new()?;
@@ -83,15 +76,12 @@ fn inject_via_clipboard(text: &str, paste_shortcut: &str) -> Result<Option<&'sta
     tracing::info!("Clipboard: setting {} bytes of text", text.len());
     set_clipboard_linux(text, &mut clipboard)?;
 
-    // Let the compositor advertise the new clipboard offer before the paste
-    // keystroke fires. Battle-tested values range from voquill's 40 ms to
-    // espanso's 300 ms; Handy's 60 ms is known-flaky under load.
+    // Let the compositor advertise the new clipboard offer before pasting.
     std::thread::sleep(std::time::Duration::from_millis(150));
 
     if let Some(mechanism) = try_paste_chord(paste_shortcut) {
         std::thread::sleep(std::time::Duration::from_millis(500));
-        // Only restore the previous clipboard once the target app has had
-        // time to read the offer — restoring too early pastes the OLD content.
+        // Restore only after the target has read the offer — too early pastes OLD content.
         if let Some(saved_text) = saved {
             let _ = clipboard.set_text(saved_text);
         }
@@ -106,8 +96,7 @@ fn inject_via_clipboard(text: &str, paste_shortcut: &str) -> Result<Option<&'sta
     }
 }
 
-/// Tell the user the transcript is waiting on the clipboard. This degradation
-/// used to be log-only, which read as "dictation silently did nothing".
+/// Tell the user the transcript is waiting on the clipboard for manual paste.
 #[cfg(not(target_os = "windows"))]
 fn notify_manual_paste() {
     #[cfg(target_os = "linux")]
@@ -128,14 +117,13 @@ fn notify_manual_paste() {
 fn set_clipboard_linux(text: &str, clipboard: &mut Clipboard) -> Result<()> {
     let is_wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
 
-    // Try arboard first
     let arboard_ok = clipboard.set_text(text).is_ok();
     if arboard_ok {
         tracing::debug!("Clipboard: arboard set_text succeeded");
     }
 
     if is_wayland {
-        // On Wayland, verify the clipboard was actually set
+        // On Wayland verify the set actually landed.
         std::thread::sleep(std::time::Duration::from_millis(80));
         if !verify_clipboard_contains(text) {
             tracing::warn!("Clipboard: arboard reported success but verification failed, trying wl-copy");
@@ -155,10 +143,8 @@ fn set_clipboard_linux(text: &str, clipboard: &mut Clipboard) -> Result<()> {
     Ok(())
 }
 
-/// Run a command with a hard timeout, killing it if it exceeds the budget.
-/// Needed because on GNOME (no data-control protocol) wl-paste falls back to
-/// a transient-surface focus hack that can hang indefinitely on some
-/// compositor states — and this runs in the middle of every injection.
+/// Run a command with a hard timeout. Needed because wl-paste can hang
+/// indefinitely on some GNOME compositor states, mid-injection.
 #[cfg(not(target_os = "windows"))]
 fn run_with_timeout(
     cmd: &mut std::process::Command,
@@ -230,15 +216,9 @@ fn verify_clipboard_contains(expected: &str) -> bool {
     }
 }
 
-/// Reap a `wl-copy` child that has daemonized.
-///
-/// `wl-copy` forks a background process to serve clipboard requests and the
-/// process we spawned exits immediately — but only once someone waits on it.
-/// Never waiting left one zombie per clipboard fallback for the lifetime of
-/// the app. This polls briefly rather than calling `wait()` outright, so an
-/// unexpectedly foregrounded `wl-copy` (e.g. `--foreground` in a wrapper
-/// script) can't block the injection path; giving up just restores the old
-/// leak-one-zombie behavior for that rare case.
+/// Reap a daemonized `wl-copy` child (it forks to serve the selection;
+/// the spawned process exits once waited on — never waiting leaks a zombie).
+/// Polls briefly instead of `wait()` so a foregrounded wl-copy can't block injection.
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn reap_daemonized(mut child: std::process::Child, what: &str) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
@@ -269,10 +249,7 @@ fn set_clipboard_wl_copy(text: &str) -> Result<()> {
     if let Some(mut stdin) = child.stdin.take() {
         use std::io::Write;
         stdin.write_all(text.as_bytes())?;
-        // Dropping stdin closes the pipe so wl-copy stops reading and forks.
     }
-    // The forked background process keeps serving the selection; the process
-    // we spawned exits now, and reaping it keeps it from lingering as a zombie.
     reap_daemonized(child, "wl-copy");
     tracing::debug!("Clipboard: wl-copy process spawned");
     Ok(())
@@ -326,16 +303,8 @@ fn make_key_input(
     }
 }
 
-/// Attempt the paste chord through each available mechanism, best first:
-///
-/// 1. GNOME helper extension (`Clutter.VirtualInputDevice` — no permissions,
-///    works on GNOME Wayland where nothing else does)
-/// 2. ydotool (kernel uinput — any compositor, needs ydotoold)
-/// 3. wtype (`zwp_virtual_keyboard_v1` — wlroots compositors, zero setup)
-///
-/// Picks Ctrl+V or Ctrl+Shift+V via `resolve_use_shift_v` (config /
-/// `BEAMER_PASTE_SHORTCUT` env var / focus-helper auto-detection). Returns
-/// the name of the mechanism that sent the chord, or `None` if all failed.
+/// Paste chord via the first working mechanism: GNOME helper → ydotool → wtype.
+/// Chord variant comes from `resolve_use_shift_v`. Returns the winner, or `None`.
 #[cfg(not(target_os = "windows"))]
 fn try_paste_chord(paste_shortcut: &str) -> Option<&'static str> {
     let use_shift = resolve_use_shift_v(paste_shortcut);
@@ -353,11 +322,7 @@ fn try_paste_chord(paste_shortcut: &str) -> Option<&'static str> {
     None
 }
 
-/// Send the paste chord via ydotool (kernel uinput — no portal prompt).
-///
-/// Linux evdev keycodes used:
-///   29 = KEY_LEFTCTRL, 42 = KEY_LEFTSHIFT, 47 = KEY_V
-/// Suffix: `:1` = key down, `:0` = key up.
+/// Paste chord via ydotool. Keycodes: 29 = Ctrl, 42 = Shift, 47 = V (`:1` down, `:0` up).
 #[cfg(not(target_os = "windows"))]
 fn try_ydotool_paste(use_shift: bool) -> bool {
     let (combo, args): (&str, Vec<&str>) = if use_shift {
@@ -432,10 +397,7 @@ mod tests {
     }
 }
 
-/// Pure decision function: given the configured setting and the currently
-/// focused app id (or None if unknown), return true for Ctrl+Shift+V, false
-/// for Ctrl+V. Extracted for testability — the side-effectful
-/// `resolve_use_shift_v` is a thin wrapper that fetches the inputs.
+/// Pure Ctrl+Shift+V decision from setting + focused app id. True = Shift+V.
 #[cfg(not(target_os = "windows"))]
 fn choose_use_shift_v(setting: &str, focused: Option<&str>) -> bool {
     match setting.to_ascii_lowercase().as_str() {
@@ -449,17 +411,9 @@ fn choose_use_shift_v(setting: &str, focused: Option<&str>) -> bool {
     }
 }
 
-/// Decide which paste keystroke to send. Precedence:
-///   1. BEAMER_PASTE_SHORTCUT env var ("ctrl_v" | "ctrl_shift_v" | "auto")
-///   2. `configured` — the caller's already-loaded `injection.paste_shortcut`
-///      (the orchestrator reads config once per session and passes it down;
-///      this function no longer touches disk on every paste)
-///   3. Default: "auto" — queries the Beamer GNOME focus helper extension
-///      (if installed and enabled) to pick per-app. Falls back to Ctrl+Shift+V
-///      when the extension is absent or the call fails.
-///
-/// Note: because `configured` is loaded once at session start, hand-editing
-/// config.toml's `paste_shortcut` mid-session has no effect until restart.
+/// Paste chord precedence: `BEAMER_PASTE_SHORTCUT` env > `configured`
+/// (loaded once at session start; mid-session config edits need a restart).
+/// "auto" picks per-app via the focus helper, defaulting to Ctrl+Shift+V.
 #[cfg(not(target_os = "windows"))]
 fn resolve_use_shift_v(configured: &str) -> bool {
     let setting = std::env::var("BEAMER_PASTE_SHORTCUT")

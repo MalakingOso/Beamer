@@ -110,8 +110,7 @@ pub fn IconBook(props: IconProps) -> Element {
     }
 }
 
-/// Phosphor "note" — a page with a folded corner. Sidebar entry for the notes
-/// board, matching the 256x256 currentColor convention of every icon here.
+/// Phosphor "note" (page, folded corner). Notes-board sidebar entry.
 #[component]
 pub fn IconNote(props: IconProps) -> Element {
     let size = props.size.to_string();
@@ -197,13 +196,8 @@ pub fn IconCheck(props: IconProps) -> Element {
     }
 }
 
-/// Phosphor "asterisk" — the note footer's model-pass affordance.
-///
-/// Deliberately not a wand, a robot or the word "Enhance". The cleanup pass is
-/// ambient: it has already run by the time you look at the note, and this is
-/// the quiet way to ask for it again or to run it on a note that never got it.
-/// A named button would advertise a machine the feature is trying not to put
-/// in front of you.
+/// Phosphor "asterisk". Note-footer's quiet re-run affordance (not a wand/robot:
+/// the pass is ambient, already run by the time you look at the note).
 #[component]
 pub fn IconAsterisk(props: IconProps) -> Element {
     let size = props.size.to_string();
@@ -221,7 +215,7 @@ pub fn IconAsterisk(props: IconProps) -> Element {
     }
 }
 
-/// Phosphor "list-checks" — sidebar entry for the Tasks page.
+/// Phosphor "list-checks". Tasks-page sidebar entry.
 #[component]
 pub fn IconListChecks(props: IconProps) -> Element {
     let size = props.size.to_string();
@@ -239,7 +233,7 @@ pub fn IconListChecks(props: IconProps) -> Element {
     }
 }
 
-/// Phosphor "plus" — the notes board's new-typed-note affordance.
+/// Phosphor "plus". Notes-board new-note affordance.
 #[component]
 pub fn IconPlus(props: IconProps) -> Element {
     let size = props.size.to_string();
