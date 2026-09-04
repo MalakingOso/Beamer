@@ -5,7 +5,7 @@ Windows system-tray dictation app. Captures mic audio, transcribes via cloud API
 ## Project Structure
 
 - `src/main.rs` — Entry point, tray icon, Dioxus launch
-- `src/audio/` — Mic capture (cpal) + voice activity detection (webrtc-vad)
+- `src/audio/` — Mic capture (cpal) with inline downmix/resample + chunker thread (no VAD)
 - `src/transcription/` — Backend trait + 4 implementations (ElevenLabs/Mistral, batch/realtime)
 - `src/injection/` — Text injection fallback chain (UIA → SendInput → clipboard)
 - `src/hotkey/` — Global hotkey registration (hold-to-talk + toggle modes)
