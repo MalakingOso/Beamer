@@ -216,6 +216,36 @@ pub fn strip_fences(body: &str) -> &str {
     rest.trim_end().strip_suffix("```").unwrap_or(rest).trim()
 }
 
+/// Strip a leaked reasoning block, if the model's `content` still carries one.
+///
+/// Some servers never split a thinking model's `reasoning_content` out of
+/// `content` — hit in practice against a llama.cpp fork whose reasoning-tag
+/// detection only recognised one of several tag variants a model can open
+/// with, so `content` arrived as the whole trace: reasoning prose, a closing
+/// tag, then the JSON, e.g. `"...we need to check the note...</think>\n
+/// {\"tasks\": [...]}"`. Same shape as `strip_fences`: find the **last**
+/// `</...think...>`-shaped closing tag and take everything after it. A body
+/// with no such tag is returned unchanged, so a server that already splits
+/// reasoning out costs nothing here.
+pub fn strip_think_tags(body: &str) -> &str {
+    let lower = body.to_ascii_lowercase();
+    let mut last_end = None;
+    let mut search_from = 0;
+    while let Some(open_rel) = lower[search_from..].find("</") {
+        let open = search_from + open_rel;
+        let Some(close_rel) = lower[open..].find('>') else { break };
+        let close = open + close_rel;
+        if lower[open..close].contains("think") {
+            last_end = Some(close + 1);
+        }
+        search_from = close + 1;
+    }
+    match last_end {
+        Some(end) => body[end..].trim_start(),
+        None => body,
+    }
+}
+
 /// Case- and whitespace-insensitive containment.
 ///
 /// Not a raw `contains`. A transcript carries newlines and doubled spaces that
@@ -253,7 +283,7 @@ pub fn parse_tasks(
     min_confidence: f32,
     today: NaiveDate,
 ) -> Result<Vec<ProposedTask>, ChatError> {
-    let json = strip_fences(body);
+    let json = strip_fences(strip_think_tags(body));
     let envelope: TaskEnvelope =
         serde_json::from_str(json).map_err(|e| ChatError::Malformed(e.to_string()))?;
 

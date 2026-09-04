@@ -222,6 +222,27 @@ fn the_extraction_prompt_demands_verbatim_evidence() {
 }
 
 #[test]
+fn the_extraction_prompt_tells_the_model_not_to_tidy_up_the_quote() {
+    // "Verbatim" alone was not enough in practice: a model will still
+    // silently capitalize a name or drop a filler word while "quoting" it,
+    // which is exactly the kind of edit that fails the grounding check.
+    // This bullet and exemplar name the failure directly instead of trusting
+    // "verbatim" to rule it out on its own.
+    let prompt = extract_prompt();
+    assert!(prompt.contains("copy-paste, not a transcription"));
+    assert!(prompt.contains(r#"Preserve filler words ("um", "uh")"#));
+    assert!(
+        prompt.contains("um so i guess we should call the vet about milo at some point"),
+        "the exemplar note demonstrating filler-preserving evidence is missing"
+    );
+    assert!(
+        prompt.contains(r#""evidence": "we should call the vet about milo at some point""#),
+        "the exemplar's evidence must keep \"milo\" lowercase and drop no words, or it stops \
+         demonstrating the rule it follows"
+    );
+}
+
+#[test]
 fn the_prompt_states_the_day_by_name_as_well_as_by_number() {
     // "Before Friday" is not resolvable from an ISO date alone, and asking a
     // language model to compute a weekday is asking it to be wrong.

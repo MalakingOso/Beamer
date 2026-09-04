@@ -65,6 +65,36 @@ fn an_empty_task_list_is_a_successful_answer_not_an_error() {
 }
 
 #[test]
+fn a_leaked_reasoning_block_is_stripped_before_the_json() {
+    let inner = one_task("I need to call the vet about Milo tomorrow", 0.9);
+    for wrapped in [
+        format!("we need to check the note for tasks...</think>\n{inner}"),
+        format!("reasoning here</ifm|think_fast>\n{inner}"),
+        format!("more reasoning</ifm|think_faster>{inner}"),
+        format!("<THINK>reasoning</THINK>\n{inner}"),
+    ] {
+        let got = parse(&wrapped, NOTE, 0.5).unwrap();
+        assert_eq!(got.len(), 1, "failed on: {wrapped}");
+    }
+}
+
+#[test]
+fn a_body_with_no_think_tag_is_left_alone() {
+    // The common case, and the one that must cost nothing: a server that
+    // already split reasoning out sends `content` with no tag in it at all.
+    assert_eq!(strip_think_tags("plain text, no tags"), "plain text, no tags");
+}
+
+#[test]
+fn only_the_last_closing_think_tag_is_honoured() {
+    // A response can legitimately contain the word "think" more than once
+    // before the real answer starts; stripping at the first match would cut
+    // into the model's own reasoning instead of past all of it.
+    let body = "first pass</think>more thinking</think>\n{\"tasks\":[]}";
+    assert_eq!(strip_think_tags(body), "{\"tasks\":[]}");
+}
+
+#[test]
 fn fenced_json_is_tolerated() {
     let inner = one_task("I need to call the vet about Milo tomorrow", 0.9);
     for wrapped in [

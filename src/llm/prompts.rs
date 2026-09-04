@@ -200,6 +200,7 @@ Reply with JSON only, in this exact shape:
 
 - "text" is a short imperative rewrite of the commitment.
 - "evidence" MUST be copied verbatim from the note, character for character. Never paraphrase it.
+- "evidence" is a copy-paste, not a transcription. Preserve filler words ("um", "uh"), lowercase names, and typos exactly as written - do not fix grammar, spelling, or casing. A single changed character breaks the match and the whole task is discarded.
 - "confidence" is 0.0 to 1.0.
 - "due" is when it must happen, resolved against today. Use "YYYY-MM-DD" with "due_all_day": true for a day with no time of day. Use a full "YYYY-MM-DDTHH:MM:SS" with "due_all_day": false only when a time was actually said.
 - "due_phrase" is the words the date was read from, copied verbatim from the note, exactly like "evidence". Give it even when "due" is null.
@@ -216,7 +217,10 @@ Note: "Sarah is sending the invoice on Tuesday and the API returns 500 on empty 
 {"tasks": []}
 
 Note: "I need to call the vet about Milo, and I'll sort the garage out sometime next week."
-{"tasks": [{"text": "Call the vet about Milo", "evidence": "I need to call the vet about Milo", "confidence": 0.95, "due": null, "due_all_day": false, "due_phrase": null, "kind": "todo"}, {"text": "Sort the garage out", "evidence": "I'll sort the garage out sometime next week", "confidence": 0.72, "due": null, "due_all_day": false, "due_phrase": "sometime next week", "kind": "todo"}]}"#;
+{"tasks": [{"text": "Call the vet about Milo", "evidence": "I need to call the vet about Milo", "confidence": 0.95, "due": null, "due_all_day": false, "due_phrase": null, "kind": "todo"}, {"text": "Sort the garage out", "evidence": "I'll sort the garage out sometime next week", "confidence": 0.72, "due": null, "due_all_day": false, "due_phrase": "sometime next week", "kind": "todo"}]}
+
+Note: "um so i guess we should call the vet about milo at some point"
+{"tasks": [{"text": "Call the vet about Milo", "evidence": "we should call the vet about milo at some point", "confidence": 0.85, "due": null, "due_all_day": false, "due_phrase": "at some point", "kind": "todo"}]}"#;
 
 /// The extraction system prompt for a given day.
 ///
