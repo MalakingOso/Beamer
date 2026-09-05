@@ -22,6 +22,12 @@ impl NoteStore {
             return StageOutcome::NoteGone;
         };
         if note.body != expected {
+            // A retry recovering from `Failed` landed mid-edit: nothing is actually
+            // broken, so don't leave the footer stuck reporting a stale error.
+            if note.clean_state == StageState::Failed {
+                note.clean_state = StageState::Pending;
+                self.dirty = true;
+            }
             return StageOutcome::Superseded;
         }
         if !cleaned.trim().is_empty() {
@@ -148,6 +154,31 @@ mod tests {
             "superseded is not failed — leaving it Pending keeps the retry affordance live"
         );
         assert!(!store.is_dirty(), "a discarded result must not schedule a write");
+    }
+
+    #[test]
+    fn superseded_cleanup_clears_a_stale_failed_state() {
+        let mut store = temp_store("cas_failed");
+        let id = store.create("call the vet".into(), NoteColor::Purple, NoteOrigin::Dictated);
+        let sent_with = "call the vet".to_string();
+        store.mark_clean_failed(&id);
+        store.set_body(&id, "call the vet about Biscuit".into());
+        store.flush_if_dirty();
+
+        let outcome = store.apply_cleanup(&id, &sent_with, "Call the vet.");
+
+        let note = store.get(&id).unwrap();
+        assert_eq!(outcome, StageOutcome::Superseded);
+        assert_eq!(
+            note.clean_state,
+            StageState::Pending,
+            "a retry recovering from Failed landed mid-edit — nothing is actually broken, \
+             so the footer must not keep reporting a stale error"
+        );
+        assert!(
+            store.is_dirty(),
+            "clearing the stale Failed state is itself a change that must reach disk"
+        );
     }
 
     #[test]

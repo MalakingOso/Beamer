@@ -4,7 +4,7 @@
 //! writes only the registry — writing `notes` inside its own trigger loops.
 //! Notes are placed (`note_layout::place_next`), never restored to where they were.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use dioxus::desktop::tao::dpi::{LogicalPosition, LogicalSize};
@@ -53,6 +53,7 @@ async fn open_note_window(
     notes: Signal<NoteStore>,
     tasks: Signal<TaskStore>,
     passes: Coroutine<PipelineRequest>,
+    passes_in_flight: Signal<HashSet<String>>,
     note: Note,
     pos: (i32, i32),
     all_workspaces: bool,
@@ -96,7 +97,7 @@ async fn open_note_window(
 
     let dom = VirtualDom::new_with_props(
         StickyNote,
-        StickyNoteProps { id: note.id.clone(), notes, tasks, passes },
+        StickyNoteProps { id: note.id.clone(), notes, tasks, passes, passes_in_flight },
     );
 
     let ctx: DesktopContext = window.new_window(dom, cfg).await;
@@ -212,11 +213,13 @@ pub fn reopen_note(mut registry: StickyRegistry, mut notes: Signal<NoteStore>, i
 
 /// Watch the note store and keep open windows matching it. Call once from
 /// `App()`; returns the registry for the notes board.
+#[allow(clippy::too_many_arguments)]
 pub fn setup_sticky_windows(
     window: DesktopContext,
     notes: Signal<NoteStore>,
     tasks: Signal<TaskStore>,
     passes: Coroutine<PipelineRequest>,
+    passes_in_flight: Signal<HashSet<String>>,
     config: Signal<Config>,
     app_ready: Signal<bool>,
 ) -> StickyRegistry {
@@ -303,6 +306,7 @@ pub fn setup_sticky_windows(
                     notes,
                     tasks,
                     passes,
+                    passes_in_flight,
                     note,
                     pos,
                     all_workspaces,

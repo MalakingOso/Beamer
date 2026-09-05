@@ -17,6 +17,9 @@ pub const STICKY_CSS: &str = r#"
   --radius:4px;
   --radius-lg:8px;
   --success:#16A34A;
+  /* A pass in flight. Distinct from NoteColor::Amber's #E4A421 dot/fill so a
+     running note never reads as "the user colored this note amber". */
+  --running:#F97316;
   --duration-fast:150ms;
   --ease:cubic-bezier(0.25,1,0.5,1);
 }
@@ -206,6 +209,12 @@ body { font-family:"Recursive","Segoe UI Variable","Segoe UI",system-ui,sans-ser
              background var(--duration-fast) var(--ease); }
 .sticky-pass:hover { opacity:1; color:var(--accent); background:rgba(75,0,130,0.08); }
 .sticky-pass-done { color:var(--success); }
+.sticky-pass-running { color:var(--running); animation:pulse 1.5s ease-in-out infinite; }
+
+@keyframes pulse {
+  0%, 100% { opacity:1; }
+  50% { opacity:0.4; }
+}
 
 /* Footer words (failures only). */
 .sticky-pass-error { font-size:11px; color:var(--danger); }

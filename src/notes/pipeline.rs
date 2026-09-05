@@ -58,16 +58,24 @@ impl PipelineRequest {
     }
 }
 
-/// Start the pipeline. Call once, from `App()`.
+/// Start the pipeline. Call once, from `App()`. Returns the request channel
+/// and a reactive mirror of which notes are in flight, for the footer's
+/// running indicator.
 pub fn use_pipeline(
     config: Signal<Config>,
     notes: Signal<NoteStore>,
     tasks: Signal<TaskStore>,
     status_log: Signal<StatusLog>,
-) -> Coroutine<PipelineRequest> {
-    use_coroutine(move |mut rx: UnboundedReceiver<PipelineRequest>| async move {
-        // Not a `Signal`: nothing renders from this, and the UI reads the note's own stage fields.
+) -> (Coroutine<PipelineRequest>, Signal<HashSet<String>>) {
+    // Read by the UI, so its membership must be a `Signal`; written at the
+    // same call sites as `in_flight` below, which stays the coroutine's own
+    // synchronous dedup guard (a `Signal` write is not visible to itself
+    // until the next poll, so the guard couldn't rely on it alone).
+    let in_flight_signal: Signal<HashSet<String>> = use_signal(HashSet::new);
+
+    let coroutine = use_coroutine(move |mut rx: UnboundedReceiver<PipelineRequest>| async move {
         let in_flight: Rc<RefCell<HashSet<String>>> = Rc::new(RefCell::new(HashSet::new()));
+        let mut in_flight_signal = in_flight_signal;
         let mut running = FuturesUnordered::new();
 
         loop {
@@ -81,10 +89,12 @@ pub fn use_pipeline(
                         );
                         continue;
                     }
+                    in_flight_signal.write().insert(request.note_id.clone());
                     running.push(run_request(request, config, notes, tasks, status_log));
                 }
                 Some(finished) = running.next(), if !running.is_empty() => {
                     in_flight.borrow_mut().remove(&finished.note_id);
+                    in_flight_signal.write().remove(&finished.note_id);
 
                     // A succeeded request is itself the evidence the server is
                     // reachable; have it carry the failed backlog. Never a timer.
@@ -93,6 +103,7 @@ pub fn use_pipeline(
                         for request in backlog {
                             // `in_flight` still guards here: a mid-retry note is left alone.
                             if in_flight.borrow_mut().insert(request.note_id.clone()) {
+                                in_flight_signal.write().insert(request.note_id.clone());
                                 running.push(run_request(request, config, notes, tasks, status_log));
                             }
                         }
@@ -100,7 +111,9 @@ pub fn use_pipeline(
                 }
             }
         }
-    })
+    });
+
+    (coroutine, in_flight_signal)
 }
 
 /// What one finished pass reports back to the coroutine loop.
@@ -122,11 +135,12 @@ async fn run_request(
     let swept = request.swept;
 
     // One snapshot up front. `peek`, not `read`: no reactive scope here.
-    let (enabled, base_url, timeout, cleanup_cfg, extract_cfg) = {
+    let (enabled, cleanup_base_url, extract_base_url, timeout, cleanup_cfg, extract_cfg) = {
         let cfg = config.peek();
         (
             cfg.llm.enabled,
-            cfg.llm.base_url.clone(),
+            cfg.llm.cleanup_base_url().to_string(),
+            cfg.llm.extract_base_url().to_string(),
             Duration::from_millis(cfg.llm.request_timeout_ms),
             cfg.llm.cleanup.clone(),
             cfg.llm.extract.clone(),
@@ -153,8 +167,10 @@ async fn run_request(
 
     if matches!(request.stages, Stages::Both | Stages::CleanOnly) {
         if cleanup_cfg.enabled {
-            outcomes
-                .push(run_cleanup(&id, &base_url, &cleanup_cfg, timeout, &mut notes, &mut status_log).await);
+            outcomes.push(
+                run_cleanup(&id, &cleanup_base_url, &cleanup_cfg, timeout, &mut notes, &mut status_log)
+                    .await,
+            );
         } else {
             let mut store = notes.write();
             if stage_is_pending(&store, &id, Stage::Clean) {
@@ -168,7 +184,8 @@ async fn run_request(
         if extract_cfg.enabled {
             outcomes.push(
                 run_extraction(
-                    &id, &base_url, &extract_cfg, timeout, &mut notes, &mut tasks, &mut status_log,
+                    &id, &extract_base_url, &extract_cfg, timeout, &mut notes, &mut tasks,
+                    &mut status_log,
                 )
                 .await,
             );

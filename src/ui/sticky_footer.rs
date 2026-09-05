@@ -10,6 +10,8 @@ use crate::notes::StageState;
 pub enum FooterIcon {
     /// Outstanding work, or a re-run.
     Asterisk,
+    /// A pass for this note is in flight right now.
+    Running,
     /// Both passes have had their turn.
     Check,
 }
@@ -25,10 +27,21 @@ pub struct Footer {
     pub stages: Stages,
 }
 
-/// Decide the footer from the two stage fields. A failure outranks outstanding work.
-pub fn footer(clean: StageState, extract: StageState) -> Footer {
+/// Decide the footer from the two stage fields and whether a pass for this
+/// note is in flight right now. In flight outranks everything else — even a
+/// stale `Failed` from a prior attempt reads as "working on it" while a retry
+/// is actually running.
+pub fn footer(clean: StageState, extract: StageState, in_flight: bool) -> Footer {
     use StageState::{Failed, Pending};
 
+    if in_flight {
+        return Footer {
+            icon: FooterIcon::Running,
+            tooltip: "Working on it\u{2026}",
+            error: None,
+            stages: Stages::Both,
+        };
+    }
     if clean == Failed {
         // One gesture: extraction runs against `raw` after a failed cleanup.
         return Footer {
@@ -82,7 +95,7 @@ mod tests {
 
     #[test]
     fn an_untouched_note_offers_both_passes_without_words() {
-        let f = footer(Pending, Pending);
+        let f = footer(Pending, Pending, false);
         assert_eq!(f.icon, FooterIcon::Asterisk);
         assert_eq!(f.stages, Stages::Both);
         assert!(
@@ -93,14 +106,14 @@ mod tests {
 
     #[test]
     fn a_cleaned_note_that_was_never_analysed_offers_only_extraction() {
-        let f = footer(Done, Pending);
+        let f = footer(Done, Pending, false);
         assert_eq!(f.stages, Stages::ExtractOnly);
         assert_eq!(f.tooltip, "Find tasks");
     }
 
     #[test]
     fn a_failed_cleanup_is_the_one_place_the_footer_uses_words() {
-        let f = footer(Failed, Pending);
+        let f = footer(Failed, Pending, false);
         assert_eq!(f.error, Some("Cleanup failed"));
         assert_eq!(
             f.stages,
@@ -111,19 +124,19 @@ mod tests {
 
     #[test]
     fn a_cleanup_failure_outranks_an_extraction_failure() {
-        assert_eq!(footer(Failed, Failed).error, Some("Cleanup failed"));
+        assert_eq!(footer(Failed, Failed, false).error, Some("Cleanup failed"));
     }
 
     #[test]
     fn a_superseded_cleanup_can_still_be_retried() {
-        let f = footer(Pending, Done);
+        let f = footer(Pending, Done, false);
         assert_eq!(f.icon, FooterIcon::Asterisk);
         assert_eq!(f.stages, Stages::CleanOnly);
     }
 
     #[test]
     fn a_finished_note_is_quiet_but_not_inert() {
-        let f = footer(Done, Done);
+        let f = footer(Done, Done, false);
         assert_eq!(f.icon, FooterIcon::Check);
         assert!(f.error.is_none());
         assert_eq!(f.tooltip, "Run again");
@@ -131,7 +144,17 @@ mod tests {
 
     #[test]
     fn a_skipped_stage_offers_nothing_to_retry() {
-        assert_eq!(footer(Skipped, Skipped).icon, FooterIcon::Check);
-        assert_eq!(footer(Skipped, Done).icon, FooterIcon::Check);
+        assert_eq!(footer(Skipped, Skipped, false).icon, FooterIcon::Check);
+        assert_eq!(footer(Skipped, Done, false).icon, FooterIcon::Check);
+    }
+
+    #[test]
+    fn in_flight_outranks_even_a_stale_failed_state() {
+        let f = footer(Failed, Failed, true);
+        assert_eq!(f.icon, FooterIcon::Running);
+        assert!(
+            f.error.is_none(),
+            "a retry actually running must not still show the previous attempt's failure text"
+        );
     }
 }

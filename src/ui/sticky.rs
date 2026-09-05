@@ -5,6 +5,9 @@
 //! Each window is its own `VirtualDom`, so the store arrives as a prop —
 //! `use_context` can't see the main window's providers across that boundary.
 
+use std::collections::HashSet;
+use std::time::Duration;
+
 use dioxus::desktop::tao::event::{Event as TaoEvent, WindowEvent};
 use dioxus::desktop::tao::window::ResizeDirection;
 use dioxus::desktop::{use_window, use_wry_event_handler};
@@ -13,7 +16,7 @@ use dioxus::prelude::*;
 
 use crate::notes::pipeline::PipelineRequest;
 use crate::notes::task_store::TaskStore;
-use crate::notes::{next_id, Attachment, NoteColor, NoteOrigin, NoteStore};
+use crate::notes::{next_id, Attachment, NoteColor, NoteOrigin, NoteStore, StageState};
 use crate::ui::icons::{IconAsterisk, IconCheck, IconPlus};
 use crate::ui::sticky_blocks::{self, StickyBody};
 use crate::ui::sticky_chips::StickyChips;
@@ -49,11 +52,20 @@ pub struct StickyNoteProps {
     /// App-scoped pipeline handle. `Coroutine` is `Copy` and crosses the
     /// VirtualDom boundary like a `Signal`; a requested pass outlives this window.
     pub passes: Coroutine<PipelineRequest>,
+    /// Note ids the pipeline coroutine currently has in flight. A reactive
+    /// mirror of its own non-`Signal` dedup set, threaded down purely so this
+    /// window can show a running indicator.
+    pub passes_in_flight: Signal<HashSet<String>>,
 }
+
+/// How long the footer keeps showing red failure text before going quiet.
+/// Middle of the 5-10s range the user asked for — the sweep is still the
+/// real recovery mechanism, this only calms the visible alarm.
+const FAILURE_TEXT_TIMEOUT: Duration = Duration::from_secs(7);
 
 #[component]
 pub fn StickyNote(props: StickyNoteProps) -> Element {
-    let StickyNoteProps { id, mut notes, mut tasks, passes } = props;
+    let StickyNoteProps { id, mut notes, mut tasks, passes, passes_in_flight } = props;
 
     // `drag()` (compositor interactive move) is the only way to move an
     // undecorated note. `use_window()` resolves to this sticky's own VirtualDom.
@@ -70,6 +82,47 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
     let mut drop_target = use_signal(|| false);
     // Set when a paste carried image bytes and no text (nothing on disk to attach).
     let mut paste_hint = use_signal(|| false);
+
+    // Whether the footer's red failure text is currently shown. Starts true
+    // so a note opened already-Failed still shows it once; the effect below
+    // hides it ~7s after each fresh entry into Failed and shows it again on
+    // the next one (e.g. a retry that fails again).
+    let mut show_error_text = use_signal(|| true);
+    {
+        let id = id.clone();
+        // Detected via the in-flight signal, not the note's own fields: a
+        // retry that fails the same way it failed before leaves `clean_state`
+        // unchanged (`Failed` -> `Failed`), so the note itself carries no
+        // detectable transition. Passing through `in_flight` on every retry
+        // does.
+        let mut was_running = use_signal(|| false);
+        let mut generation = use_signal(|| 0u64);
+        use_effect(move || {
+            let running = passes_in_flight.read().contains(&id);
+            let just_finished = was_running.peek().to_owned() && !running;
+            was_running.set(running);
+            if !just_finished {
+                return;
+            }
+            let failed = notes.peek().get(&id).is_some_and(|n| {
+                n.clean_state == StageState::Failed || n.extract_state == StageState::Failed
+            });
+            if !failed {
+                return;
+            }
+            show_error_text.set(true);
+            let this_generation = *generation.peek() + 1;
+            generation.set(this_generation);
+            spawn(async move {
+                tokio::time::sleep(FAILURE_TEXT_TIMEOUT).await;
+                // A newer failure may have already bumped the generation and
+                // restarted its own timer; only the latest one may hide the text.
+                if *generation.peek() == this_generation {
+                    show_error_text.set(false);
+                }
+            });
+        });
+    }
 
     // Hooks stay above the early return below (fixed hook order). The event
     // handler must register here, not in `App()`: handlers are keyed to the
@@ -128,7 +181,8 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
     let paste_id = id.clone();
 
     // Keyed to the stage fields, not the note's origin, so a superseded pass stays retryable.
-    let footer = sticky_footer::footer(note.clean_state, note.extract_state);
+    let in_flight = passes_in_flight.read().contains(&id);
+    let footer = sticky_footer::footer(note.clean_state, note.extract_state, in_flight);
 
     rsx! {
         div {
@@ -265,10 +319,10 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
             StickyChips { note_id: chips_id, tasks }
             div { class: "sticky-footer",
                 button {
-                    class: if footer.icon == FooterIcon::Check {
-                        "sticky-pass sticky-pass-done"
-                    } else {
-                        "sticky-pass"
+                    class: match footer.icon {
+                        FooterIcon::Check => "sticky-pass sticky-pass-done",
+                        FooterIcon::Running => "sticky-pass sticky-pass-running",
+                        FooterIcon::Asterisk => "sticky-pass",
                     },
                     title: "{footer.tooltip}",
                     onclick: move |_| {
@@ -277,11 +331,14 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
                     if footer.icon == FooterIcon::Check {
                         IconCheck { size: 13 }
                     } else {
+                        // `Running` reuses the asterisk glyph; the pulse/color come from CSS.
                         IconAsterisk { size: 13 }
                     }
                 }
                 if let Some(message) = footer.error {
-                    span { class: "sticky-pass-error", "{message}" }
+                    if show_error_text() {
+                        span { class: "sticky-pass-error", "{message}" }
+                    }
                 } else if paste_hint() {
                     span { class: "sticky-paste-hint",
                         "Save the image first, then attach it with \u{1F4CE}"

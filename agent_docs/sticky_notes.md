@@ -40,6 +40,41 @@ something that is not an edit. `set_open` used to be in that list too; since
 Task 7 it is machine-local and does not touch `modified` at all. See
 "Machine-local state" below.
 
+## The footer: three icons, and a fading failure
+
+`src/ui/sticky_footer.rs`'s `footer()` decides the glyph from three inputs, not
+two: `clean_state`, `extract_state`, and now whether a pass for this note is
+in flight *right now*. In flight outranks everything, including a stale
+`Failed` from a prior attempt — a retry actually running must never still show
+the last attempt's failure text.
+
+"In flight" is **not** `StageState` — there is deliberately no `Running`
+variant, since `StageState` is persisted into the automerge doc and a
+transient runtime fact has no business there. Instead `pipeline.rs`'s
+`use_pipeline` keeps two copies of the same membership: the coroutine's own
+`Rc<RefCell<HashSet<String>>>` (a synchronous dedup guard, never a `Signal`)
+and a `Signal<HashSet<String>>` mirror, updated at the same insert/remove call
+sites, that exists purely so `StickyNote` can react to it. That signal is
+threaded down through `setup_sticky_windows` / `StickyNoteProps` alongside
+`notes` and `passes`.
+
+The failed-state red text (`.sticky-pass-error`) auto-hides itself ~7s after
+appearing, in `sticky.rs`, independent of whether the sweep has actually
+retried the note yet — this is a presentational fix, not a retry-policy
+change. It cannot key off `note.clean_state`/`extract_state` directly: those
+fields are backed by a `use_memo` that dedups by `Note`'s `PartialEq`, so a
+retry that fails the *same way twice in a row* produces an identical `Note`
+and never triggers a re-render. The timer instead watches the in-flight
+signal's own true→false transition for this note (a plain `Signal` write is
+never deduped), and checks the resulting state only at that edge. Once the
+text hides, the asterisk and its retry affordance stay exactly as before —
+only the words go quiet.
+
+`apply_cleanup`'s compare-and-swap (`notes/lifecycle.rs`) also resets a stale
+`Failed` back to `Pending` on `Superseded`: a retry response landing after a
+mid-flight edit is not evidence of anything actually broken, and leaving
+`Failed` in place would make the footer lie indefinitely.
+
 ## Read this first: extensions do not hot-reload on Wayland
 
 Every change to `extension/beamer-focus@beamer.app/` needs a **full GNOME log
