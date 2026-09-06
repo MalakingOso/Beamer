@@ -58,6 +58,7 @@ pub fn App() -> Element {
     let mut notes = use_signal(NoteStore::load);
     // After the notes, from the same automerge document (the note store owns the handle).
     let tasks = use_signal(|| TaskStore::load_beside(&notes.peek()));
+    let config = use_signal(|| Config::load().unwrap_or_default());
     // `use_hook`, not a plain call: `Signal::write` notifies every subscriber
     // even when the value is unchanged, and this flag is fixed for the process.
     // Must run before anything can delete an attachment (`release_attachment_bytes`

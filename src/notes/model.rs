@@ -64,6 +64,10 @@ impl NoteColor {
         Self::ALL[entropy as usize % Self::ALL.len()]
     }
 
+    // No non-test caller in this tree yet: the only reader of
+    // `notes.default_color` is still in flight. Kept (not deleted)
+    // because the parse-fallback contract is pinned by test below.
+    #[allow(dead_code)]
     pub fn from_config_name(name: &str) -> Self {
         match name.trim().to_ascii_lowercase().as_str() {
             "violet" => Self::Violet,
