@@ -733,7 +733,7 @@ body {
 }
 
 .btn-icon:hover {
-  background: var(--bg-elevated);
+  background: var(--bg-hover);
   color: var(--fg);
 }
 

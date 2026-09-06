@@ -14,3 +14,7 @@
 # Logs
 *.log
 vendor/
+
+# Build artifacts (dx/tauri-bundler output, never committed)
+*.deb
+*-setup.exe

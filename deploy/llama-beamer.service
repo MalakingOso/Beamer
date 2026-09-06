@@ -13,7 +13,7 @@
 #   journalctl --user -u llama-beamer -f
 #
 # Backend is SYCL, chosen by measurement (2.35x Vulkan at prompt processing).
-# See docs/superpowers/benchmarks/2026-08-20-b60-llama-vulkan.md
+# See agent_docs/local_inference.md ("The standalone server's own build").
 #
 # Toolchain is oneAPI 2026.1 (build-sycl-2026). Measured 2026-08-27 against
 # the 2025.3 build on gemma-4-E4B: pp512 2782.35 vs 2781.64 t/s, tg128 79.83

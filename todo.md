@@ -2,7 +2,7 @@
 
 ## Packaging / Release
 
-- [ ] **Bundle GNOME extension in release artifacts** — No release pipeline exists yet (no CI, no build scripts, no `cargo-deb` config; `installer/` only has `.bmp` assets for a never-built Windows NSIS installer). When a release pipeline is created, copy `extension/beamer-focus@beamer.app/` into the artifact so `locate_source_dir()` can find it. Preferred placement (FHS fallback 2): `<artifact_root>/share/beamer/extension/beamer-focus@beamer.app/`. Acceptable fallback (portable fallback 3): `<artifact_root>/extension/beamer-focus@beamer.app/`. Dev/cargo-run fallback (fallback 4) already works because the directory sits at the repo root.
+- [ ] **Bundle GNOME extension in release artifacts** — A release pipeline exists now: `.github/workflows/windows.yml` builds and tests on Windows AND Linux. The Windows job uploads a portable `beamer.exe` plus an NSIS installer (`dx bundle --package-types nsis`); the Linux job uploads `sync_server` plus a `.deb` (`dx bundle --package-types deb`, which carries `sync_server` into the package via `[bundle.deb.files]` in `Dioxus.toml`). What is still missing: the GNOME extension is not bundled — copy `extension/beamer-focus@beamer.app/` into the artifact so `locate_source_dir()` can find it. Preferred placement (FHS fallback 2): `<artifact_root>/share/beamer/extension/beamer-focus@beamer.app/`. Acceptable fallback (portable fallback 3): `<artifact_root>/extension/beamer-focus@beamer.app/`. Dev/cargo-run fallback (fallback 4) already works because the directory sits at the repo root.
 
 ## Features
 - [ ] ElevenLabs usage dashboard — API supports `GET /v1/user/subscription` (character_count/character_limit) and `GET /v1/usage/character-stats` (historical data with aggregation). Mistral has no usage API.
@@ -28,9 +28,6 @@
       If precision is poor, the levers are the prompt and the model ladder —
       **not** `min_confidence`, which measured 0.90-0.98 across every probe and
       filters approximately nothing.
-- [ ] `assets/styles.css:752` references `var(--bg-elevated)`, which is not
-      defined in the token block. Pre-existing since `c709faa`, unrelated to
-      notes; an undefined custom property fails silently.
 
 ## Live Sync, open questions
 
@@ -129,7 +126,6 @@ worth its complexity yet.
       `agent_docs/sticky_notes.md` — expect `(uint32 6,)`.
 
 ## Low Priority
-- [ ] `overlay_enabled` config field is never read — wire it to conditionally show/hide the glow overlay
 - [ ] `debug_logging` toggle saves to config but has no runtime effect — consider wiring it to control injection trace logging
 - [ ] Auto-start toggle in settings UI — `auto_start` config field exists but there's no settings control for it
 - [ ] `set_auto_start(false)` code path is unreachable — no UI to disable auto-start once enabled
