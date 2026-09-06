@@ -37,8 +37,8 @@ pub fn reconcile(sync: &mut SyncDoc, notes: &[Note], unreadable: &[String]) -> R
         put_str(doc, &obj, "modified", &note.modified)?;
         put_str(doc, &obj, "raw", &note.raw)?;
         put_text(doc, &obj, "body", &note.body)?; // character-merged, see `sync_doc::put_text`
-        put_str(doc, &obj, "clean_state", &enum_name(&note.clean_state))?;
-        put_str(doc, &obj, "extract_state", &enum_name(&note.extract_state))?;
+        merge_stage(doc, &obj, "clean_state", note.clean_state)?;
+        merge_stage(doc, &obj, "extract_state", note.extract_state)?;
         put_str(doc, &obj, "origin", &enum_name(&note.origin))?;
         put_str(doc, &obj, "color", &enum_name(&note.color))?;
         put_bool(doc, &obj, "archived", note.archived)?;
@@ -75,6 +75,21 @@ pub fn hydrate(sync: &SyncDoc) -> Hydrated {
     }
     notes.sort_by(|a, b| a.created.cmp(&b.created).then_with(|| a.id.cmp(&b.id)));
     Hydrated { notes, unreadable }
+}
+
+/// Reconcile one stage field toward `Done`, never away from it. A completed
+/// pass is monotonic progress; `Failed`/`Pending` are transient, so plain
+/// last-write-wins would let a concurrent failure regress a success. `Skipped`
+/// is a deliberate user choice and always propagates, as does `Done` itself.
+fn merge_stage(doc: &mut AutoCommit, obj: &ObjId, key: &str, local: StageState) -> Result<()> {
+    if !matches!(local, StageState::Done | StageState::Skipped) {
+        if let Some(current) = get_str(doc, obj, key) {
+            if current == enum_name(&StageState::Done) {
+                return Ok(());
+            }
+        }
+    }
+    put_str(doc, obj, key, &enum_name(&local))
 }
 
 fn read_note(doc: &AutoCommit, obj: &ObjId, key: &str) -> Option<Note> {

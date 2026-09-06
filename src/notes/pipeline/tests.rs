@@ -12,7 +12,8 @@
 //! one fires at all.
 
 use super::*;
-use crate::notes::{Note, NoteColor, NoteOrigin};
+use crate::notes::{Note, NoteColor, NoteOrigin, StageState};
+use std::collections::HashSet;
 
 fn note(id: &str, clean: StageState, extract: StageState) -> Note {
     Note {
@@ -96,27 +97,27 @@ fn nothing_failed_yields_nothing_to_sweep() {
         note("a", StageState::Done, StageState::Done),
         note("b", StageState::Pending, StageState::Skipped),
     ]);
-    assert!(sweep_requests(&notes).is_empty());
+    assert!(sweep_requests(&notes, &HashSet::new()).is_empty());
 }
 
 #[test]
 fn a_failed_cleanup_alone_asks_for_clean_only() {
     let notes = store(vec![note("a", StageState::Failed, StageState::Done)]);
-    let reqs = sweep_requests(&notes);
+    let reqs = sweep_requests(&notes, &HashSet::new());
     assert_eq!(reqs, vec![PipelineRequest { note_id: "a".into(), stages: Stages::CleanOnly, swept: true }]);
 }
 
 #[test]
 fn a_failed_extraction_alone_asks_for_extract_only() {
     let notes = store(vec![note("a", StageState::Done, StageState::Failed)]);
-    let reqs = sweep_requests(&notes);
+    let reqs = sweep_requests(&notes, &HashSet::new());
     assert_eq!(reqs, vec![PipelineRequest { note_id: "a".into(), stages: Stages::ExtractOnly, swept: true }]);
 }
 
 #[test]
 fn both_stages_failed_asks_for_both() {
     let notes = store(vec![note("a", StageState::Failed, StageState::Failed)]);
-    let reqs = sweep_requests(&notes);
+    let reqs = sweep_requests(&notes, &HashSet::new());
     assert_eq!(reqs, vec![PipelineRequest { note_id: "a".into(), stages: Stages::Both, swept: true }]);
 }
 
@@ -127,7 +128,7 @@ fn every_swept_request_carries_the_swept_flag() {
         note("b", StageState::Done, StageState::Failed),
         note("c", StageState::Failed, StageState::Failed),
     ]);
-    let reqs = sweep_requests(&notes);
+    let reqs = sweep_requests(&notes, &HashSet::new());
     assert_eq!(reqs.len(), 3);
     assert!(reqs.iter().all(|r| r.swept), "a sweep that forgot the flag on even one request re-sweeps forever");
 }
@@ -140,7 +141,7 @@ fn a_mixed_backlog_asks_each_note_only_for_what_it_needs() {
         note("extract-only", StageState::Skipped, StageState::Failed),
         note("both", StageState::Failed, StageState::Failed),
     ]);
-    let reqs = sweep_requests(&notes);
+    let reqs = sweep_requests(&notes, &HashSet::new());
     let by_id = |id: &str| reqs.iter().find(|r| r.note_id == id).map(|r| r.stages);
     assert_eq!(by_id("clean-only"), Some(Stages::CleanOnly));
     assert_eq!(by_id("healthy"), None);
@@ -158,9 +159,40 @@ fn an_archived_notes_failed_stage_is_not_swept() {
         archived(note("gone", StageState::Failed, StageState::Failed)),
         note("active", StageState::Failed, StageState::Done),
     ]);
-    let reqs = sweep_requests(&notes);
+    let reqs = sweep_requests(&notes, &HashSet::new());
     assert_eq!(reqs.len(), 1);
     assert_eq!(reqs[0].note_id, "active");
+}
+
+#[test]
+fn a_terminal_stage_is_not_swept() {
+    // A failure that needs a config or server change first (wrong model
+    // name, broken preset) would fail identically on every sweep. The footer
+    // still offers a manual retry; the sweep just leaves it alone.
+    let notes = store(vec![note("a", StageState::Failed, StageState::Done)]);
+    let terminal: HashSet<(String, Stage)> =
+        [("a".to_string(), Stage::Clean)].into_iter().collect();
+    assert!(sweep_requests(&notes, &terminal).is_empty());
+}
+
+#[test]
+fn a_sweep_narrows_when_only_one_stage_is_terminal() {
+    // The terminal stage is skipped but the retryable one still gets its
+    // retry: terminal-ness is per stage, not per note.
+    let notes = store(vec![note("a", StageState::Failed, StageState::Failed)]);
+    let terminal: HashSet<(String, Stage)> =
+        [("a".to_string(), Stage::Clean)].into_iter().collect();
+    let reqs = sweep_requests(&notes, &terminal);
+    assert_eq!(
+        reqs,
+        vec![PipelineRequest { note_id: "a".into(), stages: Stages::ExtractOnly, swept: true }]
+    );
+}
+
+#[test]
+fn a_terminal_outcome_is_not_a_success() {
+    assert!(!succeeded_from(&[RequestOutcome::Terminal]));
+    assert!(!succeeded_from(&[RequestOutcome::Responded, RequestOutcome::Terminal]));
 }
 
 // ─── succeeded_from ────────────────────────────────────────────────────────

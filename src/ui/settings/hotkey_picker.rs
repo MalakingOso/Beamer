@@ -41,7 +41,8 @@ pub fn format_hotkey(ctrl: bool, alt: bool, shift: bool, win: bool, key: &str) -
     parts.join("+")
 }
 
-/// Normalize long-form key names to what global_hotkey expects.
+/// Normalize long-form key names to the picker's canonical chord vocabulary
+/// (`HotkeyConfig::parse` on the settings side).
 pub fn normalize_key(key: &str) -> String {
     let upper = key.to_uppercase();
     match upper.as_str() {

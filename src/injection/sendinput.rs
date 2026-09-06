@@ -62,15 +62,33 @@ pub fn inject_via_sendinput(text: &str) -> Result<bool> {
         return Ok(true);
     }
 
-    let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+    let size = std::mem::size_of::<INPUT>() as i32;
+    let sent = unsafe { SendInput(&inputs, size) } as usize;
+    if sent == inputs.len() {
+        return Ok(true);
+    }
+    tracing::warn!("SendInput: sent {} of {} events", sent, inputs.len());
 
-    if sent as usize != inputs.len() {
-        tracing::warn!("SendInput: sent {} of {} events", sent, inputs.len());
+    // Retry the unsent tail once before giving up: the accepted prefix is
+    // already typed, and falling through to clipboard would paste the whole
+    // text over it (visible duplication). A still-short retry falls through
+    // as a failure — partial text stays, nothing is silently lost.
+    let tail = &inputs[sent.min(inputs.len())..];
+    if tail.is_empty() {
+        return Ok(false);
+    }
+    let resent = unsafe { SendInput(tail, size) } as usize;
+    if resent != tail.len() {
+        tracing::warn!(
+            "SendInput: tail retry sent {} of {} events",
+            resent,
+            tail.len()
+        );
     }
 
     // Require full queue insertion so a partial send still falls through
     // to the next backend. (Can't catch targets that accept events but drop them.)
-    Ok(sent as usize == inputs.len())
+    Ok(resent == tail.len())
 }
 
 fn make_unicode_input(char_code: u16, key_up: bool) -> INPUT {

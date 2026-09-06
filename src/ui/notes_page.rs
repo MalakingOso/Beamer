@@ -247,6 +247,12 @@ pub fn NotesPage(props: NotesPageProps) -> Element {
                                                     // Else the card reopens the note just archived.
                                                     e.stop_propagation();
                                                     notes.write().archive(&id);
+                                                    // Flush inline like delete: a crash inside
+                                                    // the tick window must not resurrect it.
+                                                    crate::notes::flush_stores(
+                                                        &mut notes.write(),
+                                                        &mut tasks.write(),
+                                                    );
                                                 }
                                             },
                                             "Archive"

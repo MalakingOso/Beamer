@@ -10,10 +10,14 @@ path = "src/main.rs"
 [[bin]]
 name = "ws_test"
 path = "src/bin/ws_test.rs"
+# Manual probes, like `task_eval` below: `cargo build` still type-checks them.
+test = false
 
 [[bin]]
 name = "voxtral_test"
 path = "src/bin/voxtral_test.rs"
+# Manual probes, like `task_eval` below: `cargo build` still type-checks them.
+test = false
 
 [[bin]]
 name = "sync_server"
@@ -43,7 +47,11 @@ keyring = { version = "3", features = ["windows-native", "sync-secret-service"] 
 # bundles assets the crate then cannot resolve. CI installs dioxus-cli at
 # the same floor; see .github/workflows/windows.yml.
 dioxus = { version = "0.7.10", features = ["desktop"] }
-global-hotkey = "0.7"
+# Used directly (not via the dioxus re-exports): same versions dioxus 0.7
+# builds its tray support on, so the `Menu`/`Icon` values flow into
+# `init_tray_icon` unchanged.
+tray-icon = "0.21"
+muda = "0.17"
 arboard = { version = "3", features = ["wayland-data-control"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -88,14 +96,6 @@ windows = { version = "0.58", features = [
     "Win32_Media_Audio",
     "Win32_Media_Audio_Endpoints",
 ] }
-
-[build-dependencies]
-# Unconditional, not `[target.'cfg(target_os = "windows")'.build-dependencies]`:
-# build.rs only calls into this crate when cross-compiling to Windows, but
-# build-dependencies build for the *host*. Gating this on the target would drop
-# it from the Linux host's build graph, and cross-compiling from Linux is
-# exactly the case this crate needs to run in. See build.rs for the matching
-# runtime check.
 
 [profile.release]
 lto = "thin"

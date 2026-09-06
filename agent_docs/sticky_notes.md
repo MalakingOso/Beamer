@@ -66,7 +66,11 @@ fields are backed by a `use_memo` that dedups by `Note`'s `PartialEq`, so a
 retry that fails the *same way twice in a row* produces an identical `Note`
 and never triggers a re-render. The timer instead watches the in-flight
 signal's own true→false transition for this note (a plain `Signal` write is
-never deduped), and checks the resulting state only at that edge. Once the
+never deduped), and checks the resulting state only at that edge. A note
+opened already-`Failed` never crosses that edge in its window, so mount is a
+second trigger: it gets one timed display too, or the text would show
+forever. Both cases are one pure predicate,
+`sticky_footer::should_flash_error`, pinned by tests there. Once the
 text hides, the asterisk and its retry affordance stay exactly as before —
 only the words go quiet.
 
@@ -530,8 +534,11 @@ Deleting a note also drops its rows from `TaskStore` (`delete_for_note`). That
 is a **deliberate exception** to "dismissed rows are retained as labelled
 negatives" — everywhere else a decision is permanent corpus data, but an
 explicit delete means gone, and keeping the rows would leave the corpus holding
-labels for a note whose text no longer exists to explain them. Rows are removed
-first, so a crash between the two strands nothing.
+labels for a note whose text no longer exists to explain them. Both mutations
+happen in memory before a single `flush_stores` call; a crash between the two
+mirror writes inside that call can still strand rows, so `flush_stores` prunes
+rows whose note is gone on the next pass (never over a failed load, where
+"gone" means "unreadable").
 
 **The user's original file is still never touched.** See "Attachments are
 owned copies, not references".

@@ -358,35 +358,42 @@ impl AudioPipeline {
         let (tx, rx) = mpsc::channel(CHUNK_CHANNEL_CAPACITY);
 
         // Dedicated thread: cpal callbacks are real-time sensitive and must not
-        // block on async channel operations.
-        std::thread::spawn(move || {
-            let mut dropped_chunks: u64 = 0;
-            loop {
-                let samples = match sample_rx.blocking_recv() {
-                    Some(s) => s,
-                    None => {
+        // block on async channel operations. Named like the other
+        // long-lived threads, so crash dumps and thread lists say what it is.
+        std::thread::Builder::new()
+            .name("beamer-audio-chunker".into())
+            .spawn(move || {
+                let mut dropped_chunks: u64 = 0;
+                loop {
+                    let samples = match sample_rx.blocking_recv() {
+                        Some(s) => s,
+                        None => {
+                            publish_level(0.0);
+                            break;
+                        }
+                    };
+
+                    if samples.is_empty() {
+                        // Capture-error sentinel: drop the meter to zero rather
+                        // than freezing the pill waveform at its last value.
                         publish_level(0.0);
-                        break;
+                        continue;
                     }
-                };
 
-                if samples.is_empty() {
-                    continue;
-                }
+                    publish_level(normalize_rms(chunk_rms(&samples)));
 
-                publish_level(normalize_rms(chunk_rms(&samples)));
-
-                let bytes = f32_to_i16_bytes(&samples);
-                match tx.try_send(bytes) {
-                    Ok(()) => {}
-                    Err(mpsc::error::TrySendError::Full(_)) => {
-                        warn_channel_full(&mut dropped_chunks, "PCM chunk");
+                    let bytes = f32_to_i16_bytes(&samples);
+                    match tx.try_send(bytes) {
+                        Ok(()) => {}
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            warn_channel_full(&mut dropped_chunks, "PCM chunk");
+                        }
+                        // Consumer gone: normal teardown, not backpressure.
+                        Err(mpsc::error::TrySendError::Closed(_)) => {}
                     }
-                    // Consumer gone: normal teardown, not backpressure.
-                    Err(mpsc::error::TrySendError::Closed(_)) => {}
                 }
-            }
-        });
+            })
+            .expect("failed to spawn audio chunker thread");
 
         Ok((stream, rx))
     }

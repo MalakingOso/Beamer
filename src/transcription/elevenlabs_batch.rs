@@ -18,6 +18,26 @@ pub async fn transcribe_batch(
     vocab: &[String],
     no_verbatim: bool,
 ) -> Result<String> {
+    tokio::time::timeout(
+        super::BATCH_OVERALL_TIMEOUT,
+        transcribe_batch_inner(api_key, audio_pcm, language, vocab, no_verbatim),
+    )
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "ElevenLabs batch exceeded the overall {}s deadline",
+            super::BATCH_OVERALL_TIMEOUT.as_secs()
+        )
+    })?
+}
+
+async fn transcribe_batch_inner(
+    api_key: &str,
+    audio_pcm: Vec<u8>,
+    language: &str,
+    vocab: &[String],
+    no_verbatim: bool,
+) -> Result<String> {
     let wav = pcm_to_wav(&audio_pcm);
     let wav_bytes = Bytes::from(wav);
     let terms = keyterms::sanitize(vocab, keyterms::BATCH_MAX_TERMS, keyterms::BATCH_MAX_CHARS);
@@ -35,14 +55,14 @@ pub async fn transcribe_batch(
                 "file",
                 multipart::Part::stream(reqwest::Body::from(wav_bytes.clone()))
                     .file_name("audio.wav")
-                    .mime_str("application/octet-stream")?,
+                    .mime_str("audio/wav")?,
             );
 
         for term in &terms {
             form = form.text("keyterms", term.clone());
         }
 
-        let resp = client
+        let resp = match client
             .post("https://api.elevenlabs.io/v1/speech-to-text")
             .header("xi-api-key", api_key)
             // A stalled upload would strand the recording loop (hotkey owner).
@@ -50,12 +70,14 @@ pub async fn transcribe_batch(
             .multipart(form)
             .send()
             .await
-            .context("ElevenLabs batch request failed")?;
-
-        if resp.status() == 429 {
-            if attempt < 3 {
+        {
+            Ok(resp) => resp,
+            // Timeouts and refused connections are transient; anything else
+            // (bad request shape, TLS config) fails identically on retry.
+            Err(e) if (e.is_timeout() || e.is_connect()) && attempt < 3 => {
                 tracing::warn!(
-                    "ElevenLabs 429 rate-limited, retrying in {}s (attempt {})",
+                    "ElevenLabs batch transport error ({}), retrying in {}s (attempt {})",
+                    e,
                     backoff,
                     attempt + 1
                 );
@@ -63,7 +85,22 @@ pub async fn transcribe_batch(
                 backoff *= 2;
                 continue;
             }
-            bail!("ElevenLabs rate limit exceeded after {} retries", attempt);
+            Err(e) => return Err(e).context("ElevenLabs batch request failed"),
+        };
+
+        if super::batch_should_retry(resp.status()) {
+            if attempt < 3 {
+                tracing::warn!(
+                    "ElevenLabs {} — retrying in {}s (attempt {})",
+                    resp.status(),
+                    backoff,
+                    attempt + 1
+                );
+                tokio::time::sleep(tokio::time::Duration::from_secs(backoff)).await;
+                backoff *= 2;
+                continue;
+            }
+            bail!("ElevenLabs request failed with {} after retries", resp.status());
         }
 
         if !resp.status().is_success() {
@@ -73,8 +110,12 @@ pub async fn transcribe_batch(
         }
 
         let json: serde_json::Value = resp.json().await.context("Failed to parse response")?;
-        let text = json["text"].as_str().unwrap_or("").to_string();
-        return Ok(text);
+        // A missing `text` field is a broken response, not silence: an empty
+        // string is still a successful (silent) transcription.
+        match json["text"].as_str() {
+            Some(text) => return Ok(text.to_string()),
+            None => bail!("ElevenLabs batch response had no text field: {}", json),
+        }
     }
 
     bail!("ElevenLabs batch request failed after retries")

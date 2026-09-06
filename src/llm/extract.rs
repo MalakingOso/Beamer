@@ -1,4 +1,5 @@
-//! Stage 2 — task extraction with Gemma. A precision problem: a fabricated
+//! Stage 2 — task extraction. Model-agnostic: no branch here reads which
+//! model is configured. A precision problem: a fabricated
 //! task poisons a list nobody then trusts, so every check here assumes the
 //! model misbehaves. Parse-time gates: fences tolerated, evidence must ground
 //! in the sent note, confidence floor applied before the store. Date gates in
@@ -75,10 +76,16 @@ struct ResolvedDate {
     phrase: Option<String>,
 }
 
+/// The farthest future a resolved date may name. Beyond it the model
+/// hallucinated a year, not read a phrase: a "remind me in 2099" note keeps
+/// its task, but the date does not reach the calendar.
+const MAX_FUTURE_DAYS: i64 = 366;
+
 /// Apply the date gates; never fails — worst outcome is no date. `due_phrase`
-/// must ground in the note, `due` must parse, and `due` may be at most a day
-/// in the past (one day of slack for just-after-midnight passes). `today` is a
-/// parameter so the gates are testable without mocking time.
+/// must ground in the note, `due` must parse, `due` may be at most a day
+/// in the past (one day of slack for just-after-midnight passes) and at most
+/// a year in the future. `today` is a parameter so the gates are testable
+/// without mocking time.
 fn resolve_date(raw: &RawTask, note: &str, today: NaiveDate) -> ResolvedDate {
     let phrase = raw
         .due_phrase
@@ -113,6 +120,14 @@ fn resolve_date(raw: &RawTask, note: &str, today: NaiveDate) -> ResolvedDate {
     if day < today - ChronoDuration::days(1) {
         tracing::warn!(
             "extraction: {:?} resolved to {}, which is in the past — keeping the phrase only",
+            phrase, day
+        );
+        return ResolvedDate { due: None, all_day: false, phrase };
+    }
+
+    if day > today + ChronoDuration::days(MAX_FUTURE_DAYS) {
+        tracing::warn!(
+            "extraction: {:?} resolved to {}, which is impossibly far out — keeping the phrase only",
             phrase, day
         );
         return ResolvedDate { due: None, all_day: false, phrase };

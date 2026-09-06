@@ -43,6 +43,16 @@ fn super_with_another_key_is_rejected() {
 }
 
 #[test]
+fn a_chord_with_no_modifier_at_all_is_rejected() {
+    for chord in ["", "N", "Space", "F9", "Enter"] {
+        assert!(
+            HotkeyConfig::parse(chord, false).is_none(),
+            "{chord:?} would fire on every unmodified keypress; that is never intent"
+        );
+    }
+}
+
+#[test]
 fn super_alone_still_parses_as_the_trigger() {
     let cfg = HotkeyConfig::parse("Ctrl+Super", false).expect("Super alone must still parse");
     assert!(cfg.ctrl);

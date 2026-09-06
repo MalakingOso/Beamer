@@ -1,6 +1,6 @@
-use dioxus::desktop::trayicon::menu::{Menu, MenuItem, PredefinedMenuItem};
-use dioxus::desktop::trayicon::Icon;
+use muda::{Menu, MenuItem, PredefinedMenuItem};
 use std::sync::OnceLock;
+use tray_icon::Icon;
 
 static IDLE_ICON_RGBA: OnceLock<(Vec<u8>, u32, u32)> = OnceLock::new();
 
@@ -56,17 +56,31 @@ pub fn build_tray_menu() -> (Menu, TrayMenuItems) {
     (menu, items)
 }
 
-pub fn load_icon() -> Icon {
-    let (rgba_data, width, height) = IDLE_ICON_RGBA
-        .get_or_init(|| {
-            let icon_bytes = crate::assets::ICON_PNG;
-            let img = image::load_from_memory(icon_bytes).expect("Failed to load icon");
+/// A 1x1 transparent icon, so a corrupt or missing baked-in asset degrades
+/// the tray instead of panicking the process at startup.
+fn fallback_icon() -> Icon {
+    Icon::from_rgba(vec![0, 0, 0, 0], 1, 1).expect("1x1 transparent icon is always valid")
+}
+
+fn decode_icon(bytes: &[u8], what: &str) -> (Vec<u8>, u32, u32) {
+    match image::load_from_memory(bytes) {
+        Ok(img) => {
             let rgba = img.to_rgba8();
             let (w, h) = rgba.dimensions();
             (rgba.into_raw(), w, h)
-        })
+        }
+        Err(e) => {
+            tracing::error!("Tray: failed to decode {}: {}", what, e);
+            (vec![0, 0, 0, 0], 1, 1)
+        }
+    }
+}
+
+pub fn load_icon() -> Icon {
+    let (rgba_data, width, height) = IDLE_ICON_RGBA
+        .get_or_init(|| decode_icon(crate::assets::ICON_PNG, "tray icon"))
         .clone();
-    Icon::from_rgba(rgba_data, width, height).expect("Failed to create tray icon")
+    Icon::from_rgba(rgba_data, width, height).unwrap_or_else(|_| fallback_icon())
 }
 
 /// Linux-only recording indicator icon.
@@ -74,12 +88,11 @@ pub fn load_icon() -> Icon {
 pub fn load_recording_icon() -> Icon {
     let (rgba_data, width, height) = RECORDING_ICON_RGBA
         .get_or_init(|| {
-            let icon_bytes = include_bytes!("../../assets/icon_recording.ico");
-            let img = image::load_from_memory(icon_bytes).expect("Failed to load recording icon");
-            let rgba = img.to_rgba8();
-            let (w, h) = rgba.dimensions();
-            (rgba.into_raw(), w, h)
+            decode_icon(
+                include_bytes!("../../assets/icon_recording.ico"),
+                "recording icon",
+            )
         })
         .clone();
-    Icon::from_rgba(rgba_data, width, height).expect("Failed to create tray icon")
+    Icon::from_rgba(rgba_data, width, height).unwrap_or_else(|_| fallback_icon())
 }

@@ -54,6 +54,13 @@ fn is_connection_dead(err: &zbus::Error) -> bool {
 /// connection at build time, so it can't vary across calls sharing this cached
 /// connection (100 ms focus poll vs. multi-second `TypeText`). A timed-out call
 /// is abandoned; its late result is discarded.
+///
+/// Known cost: the worker thread stays parked inside the blocking zbus call
+/// until it returns, so each timeout leaks one thread until the call itself
+/// finishes. Timeouts are rare (a wedged helper, not steady state) and every
+/// call site bounds its wait, so accumulation is self-limiting; killing the
+/// thread is unsound and an async rewrite of this module is not worth it
+/// for that bound.
 fn with_timeout<T, F>(timeout_ms: u64, call: F) -> Result<T, zbus::Error>
 where
     T: Send + 'static,
@@ -120,17 +127,26 @@ where
 const TERMINAL_APP_IDS: &[&str] = &[
     "org.gnome.console",
     "org.gnome.terminal",
+    "org.gnome.terminal-server",
+    "gnome-terminal-server",
     "org.wezfurlong.wezterm",
+    "wezterm",
     "dev.warp.warp",
     "com.mitchellh.ghostty",
+    "ghostty",
     "kitty",
     "foot",
     "alacritty",
     "org.kde.konsole",
+    "konsole",
     "io.elementary.terminal",
     "org.xfce.terminal",
     "com.raggesilver.blackbox",
     "tilix",
+    "app.ptyxis.ptyxis",
+    "ptyxis",
+    "xterm",
+    "uxterm",
 ];
 
 /// Exact-match against a curated list, case-insensitive. No substring
@@ -170,6 +186,19 @@ mod tests {
         assert!(is_terminal("Kitty"));
         assert!(is_terminal("FOOT"));
         assert!(is_terminal("org.gnome.Console"));
+    }
+
+    #[test]
+    fn bare_x11_class_names_and_new_terminals_match() {
+        // XWayland exposes WM_CLASS, not app ids.
+        assert!(is_terminal("wezterm"));
+        assert!(is_terminal("ghostty"));
+        assert!(is_terminal("konsole"));
+        assert!(is_terminal("xterm"));
+        assert!(is_terminal("uxterm"));
+        assert!(is_terminal("gnome-terminal-server"));
+        assert!(is_terminal("app.ptyxis.Ptyxis"));
+        assert!(is_terminal("ptyxis"));
     }
 
     #[test]

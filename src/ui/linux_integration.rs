@@ -32,9 +32,10 @@ pub(super) fn setup_linux_integration(
             let _ = tray.set_icon(Some(icon));
         }
 
-        // Read, not peek: a mode change must re-run this effect.
+        // Read, not peek: a mode change — or toggling the pill itself —
+        // must re-run this effect.
         let mode = *active_mode.read();
-        let pill_enabled = config.peek().appearance.pill_enabled;
+        let pill_enabled = config.read().appearance.pill_enabled;
         match pill_state(state, mode).filter(|_| pill_enabled) {
             Some(style) => crate::ui::shell_indicator::show(style),
             None => crate::ui::shell_indicator::hide(),

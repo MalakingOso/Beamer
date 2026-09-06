@@ -260,18 +260,26 @@ fn apply_incoming(
         return;
     };
 
+    // Assign (and dirty) only what actually changed: a vocabulary-only
+    // delivery moves the shared heads without touching notes or tasks, and
+    // an unconditional write would rewrite both mirrors and re-render every
+    // subscriber for nothing.
     let mut notes_mut = notes.write();
-    notes_mut.notes = n.notes;
-    notes_mut.unreadable_notes = n.unreadable;
-    notes_mut.dirty = true;
-    notes_mut.doc_dirty = true;
+    if notes_mut.notes != n.notes || notes_mut.unreadable_notes != n.unreadable {
+        notes_mut.notes = n.notes;
+        notes_mut.unreadable_notes = n.unreadable;
+        notes_mut.dirty = true;
+        notes_mut.doc_dirty = true;
+    }
     drop(notes_mut);
 
     let mut tasks_mut = tasks.write();
-    tasks_mut.tasks = t.tasks;
-    tasks_mut.unreadable_tasks = t.unreadable;
-    tasks_mut.dirty = true;
-    tasks_mut.doc_dirty = true;
+    if tasks_mut.tasks != t.tasks || tasks_mut.unreadable_tasks != t.unreadable {
+        tasks_mut.tasks = t.tasks;
+        tasks_mut.unreadable_tasks = t.unreadable;
+        tasks_mut.dirty = true;
+        tasks_mut.doc_dirty = true;
+    }
 }
 
 #[cfg(test)]

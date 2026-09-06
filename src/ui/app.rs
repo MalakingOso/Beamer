@@ -11,7 +11,7 @@ use crate::notes::task_store::TaskStore;
 use crate::notes::NoteStore;
 use crate::orchestrator::{self, RecordingState};
 use crate::update::UpdateStatus;
-use crate::ui::app_setup;
+use crate::ui::{app_menu, app_pill, app_setup, app_splash};
 use crate::ui::sticky_windows;
 #[cfg(target_os = "linux")]
 use crate::ui::linux_integration;
@@ -49,7 +49,7 @@ pub fn App() -> Element {
     // Cold-start warmup splash. `app_ready` flips true when it closes; restored
     // stickies wait on it so they don't pop over the loading screen.
     let app_ready = use_signal(|| false);
-    app_setup::setup_splash(window.clone(), app_ready);
+    app_splash::setup_splash(window.clone(), app_ready);
 
     let mut current_page = use_signal(|| Page::Home);
     let rec_state = use_signal(RecordingState::default);
@@ -58,26 +58,6 @@ pub fn App() -> Element {
     let mut notes = use_signal(NoteStore::load);
     // After the notes, from the same automerge document (the note store owns the handle).
     let tasks = use_signal(|| TaskStore::load_beside(&notes.peek()));
-    // Taken *before* `Config::load()`, which creates the file as a side
-    // effect when it's missing — this is the only point that can still tell
-    // "fresh install" from "upgrade of an existing install". `Ok(false)`
-    // only: an `Err` (can't tell) is treated as "not fresh", the same
-    // conservative call `Config::load()` itself documents for the same stat.
-    let fresh_install = matches!(Config::config_path().try_exists(), Ok(false));
-    let config = use_signal(|| Config::load().unwrap_or_default());
-    let download_status = use_signal(crate::model_setup::DownloadStatus::default);
-    // K2-Horizon local extraction only exists for a bundled aarch64 build
-    // (the only arch the fork's llama-server.exe is built for). A fresh
-    // install downloads and starts it itself; an upgrade over an existing
-    // install must not retroactively engage this — that case's file
-    // placement/task update is instead handled entirely by the installer's
-    // hooks.nsh. See agent_docs/local_inference.md.
-    #[cfg(target_arch = "aarch64")]
-    use_hook(move || {
-        if fresh_install {
-            crate::model_setup::spawn_ensure_model_present(download_status);
-        }
-    });
     // `use_hook`, not a plain call: `Signal::write` notifies every subscriber
     // even when the value is unchanged, and this flag is fixed for the process.
     // Must run before anything can delete an attachment (`release_attachment_bytes`
@@ -94,7 +74,7 @@ pub fn App() -> Element {
     // Linux replaces the pill with an AppIndicator tray-icon swap (see
     // `linux_integration`): no in-tray GTK widgets or floating pill under Wayland.
     #[cfg(not(target_os = "linux"))]
-    app_setup::setup_recording_pill(window.clone(), rec_state, active_mode, config);
+    app_pill::setup_recording_pill(window.clone(), rec_state, active_mode, config);
 
     #[cfg(target_os = "linux")]
     linux_integration::setup_linux_integration(rec_state, active_mode, config);
@@ -185,8 +165,8 @@ pub fn App() -> Element {
     #[cfg(target_os = "windows")]
     app_setup::setup_windows_aumid_shortcut();
 
-    app_setup::setup_menu_handlers(&items, window.clone(), current_page, last_injection, config, update_status, notes, tasks);
-    app_setup::setup_tray_click_handler(window.clone());
+    app_menu::setup_menu_handlers(&items, window.clone(), current_page, last_injection, config, update_status, notes, tasks);
+    app_menu::setup_tray_click_handler(window.clone());
 
     let page = *current_page.read();
 
@@ -291,7 +271,7 @@ pub fn App() -> Element {
                         VocabPage {}
                     },
                     Page::Settings => rsx! {
-                        SettingsPage { config, last_injection, status_log, update_status, notes, tasks, sync_client: sync_client_handle, download_status }
+                        SettingsPage { config, last_injection, status_log, update_status, notes, tasks, sync_client: sync_client_handle }
                     },
                 }
             }

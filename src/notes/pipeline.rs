@@ -19,7 +19,7 @@ use crate::llm::extract;
 use crate::notes::lifecycle::StageOutcome;
 use crate::notes::task::{Proposal, TaskKind};
 use crate::notes::task_store::TaskStore;
-use crate::notes::{blocks, NoteStore, StageState};
+use crate::notes::{blocks, NoteStore};
 use crate::ui::status_log::{log_status, LogLevel, StatusLog};
 
 /// The sweep's pure decision logic, split out to keep this file under 500 lines.
@@ -75,6 +75,11 @@ pub fn use_pipeline(
 
     let coroutine = use_coroutine(move |mut rx: UnboundedReceiver<PipelineRequest>| async move {
         let in_flight: Rc<RefCell<HashSet<String>>> = Rc::new(RefCell::new(HashSet::new()));
+        // (note, stage) pairs whose last failure was terminal: the footer
+        // still offers a manual retry, but the sweep leaves them alone until
+        // one succeeds. In-memory only — a restart re-attempts once, then the
+        // set rebuilds itself from the fresh failures.
+        let terminal: Rc<RefCell<HashSet<(String, Stage)>>> = Rc::new(RefCell::new(HashSet::new()));
         let mut in_flight_signal = in_flight_signal;
         let mut running = FuturesUnordered::new();
 
@@ -95,11 +100,20 @@ pub fn use_pipeline(
                 Some(finished) = running.next(), if !running.is_empty() => {
                     in_flight.borrow_mut().remove(&finished.note_id);
                     in_flight_signal.write().remove(&finished.note_id);
+                    if finished.succeeded {
+                        // A success clears the terminal record: whatever was
+                        // misconfigured evidently is not anymore.
+                        terminal.borrow_mut().retain(|(id, _)| *id != finished.note_id);
+                    } else {
+                        for stage in &finished.terminal {
+                            terminal.borrow_mut().insert((finished.note_id.clone(), *stage));
+                        }
+                    }
 
                     // A succeeded request is itself the evidence the server is
                     // reachable; have it carry the failed backlog. Never a timer.
                     if should_sweep(finished.succeeded, finished.swept) {
-                        let backlog = sweep_requests(&notes.peek());
+                        let backlog = sweep_requests(&notes.peek(), &terminal.borrow());
                         for request in backlog {
                             // `in_flight` still guards here: a mid-retry note is left alone.
                             if in_flight.borrow_mut().insert(request.note_id.clone()) {
@@ -121,6 +135,8 @@ struct Finished {
     note_id: String,
     swept: bool,
     succeeded: bool,
+    /// Stages whose failure was terminal (see `RequestOutcome::Terminal`).
+    terminal: Vec<Stage>,
 }
 
 /// Run one note's requested stages.
@@ -135,12 +151,15 @@ async fn run_request(
     let swept = request.swept;
 
     // One snapshot up front. `peek`, not `read`: no reactive scope here.
+    // Both stages share the single `[llm] base_url`: per-stage overrides
+    // live outside this commit, so bind both from the shared value rather
+    // than the stage methods (which do not exist at this commit).
     let (enabled, cleanup_base_url, extract_base_url, timeout, cleanup_cfg, extract_cfg) = {
         let cfg = config.peek();
         (
             cfg.llm.enabled,
-            cfg.llm.cleanup_base_url().to_string(),
-            cfg.llm.extract_base_url().to_string(),
+            cfg.llm.base_url.clone(),
+            cfg.llm.base_url.clone(),
             Duration::from_millis(cfg.llm.request_timeout_ms),
             cfg.llm.cleanup.clone(),
             cfg.llm.extract.clone(),
@@ -148,22 +167,21 @@ async fn run_request(
     };
 
     if !enabled {
-        // Only never-run stages downgrade to Skipped, or "Run again" on a
-        // finished note would rewrite Done and erase that the passes ever ran.
+        // `mark_*_skipped` never overwrites `Done`, so these are safe without
+        // a Pending guard — and a `Failed` stage going quiet with the feature
+        // is correct, not a loss: the sweep must not keep retrying a pass
+        // nobody wants run.
         let mut store = notes.write();
-        if stage_is_pending(&store, &id, Stage::Clean) {
-            store.mark_clean_skipped(&id);
-        }
-        if stage_is_pending(&store, &id, Stage::Extract) {
-            store.mark_extract_skipped(&id);
-        }
+        store.mark_clean_skipped(&id);
+        store.mark_extract_skipped(&id);
         // Not `succeeded`: nothing attempted, so no evidence the server is reachable.
-        return Finished { note_id: id, swept, succeeded: false };
+        return Finished { note_id: id, swept, succeeded: false, terminal: Vec::new() };
     }
 
     // One `RequestOutcome` per named stage, folded by `succeeded_from`, so
     // "disabled"/"nothing to send" can't conflate with "responded".
     let mut outcomes: Vec<RequestOutcome> = Vec::with_capacity(2);
+    let mut terminal: Vec<Stage> = Vec::new();
 
     if matches!(request.stages, Stages::Both | Stages::CleanOnly) {
         if cleanup_cfg.enabled {
@@ -171,11 +189,11 @@ async fn run_request(
                 run_cleanup(&id, &cleanup_base_url, &cleanup_cfg, timeout, &mut notes, &mut status_log)
                     .await,
             );
-        } else {
-            let mut store = notes.write();
-            if stage_is_pending(&store, &id, Stage::Clean) {
-                store.mark_clean_skipped(&id);
+            if outcomes.last() == Some(&RequestOutcome::Terminal) {
+                terminal.push(Stage::Clean);
             }
+        } else {
+            notes.write().mark_clean_skipped(&id);
             outcomes.push(RequestOutcome::NotAttempted);
         }
     }
@@ -189,33 +207,22 @@ async fn run_request(
                 )
                 .await,
             );
-        } else {
-            let mut store = notes.write();
-            if stage_is_pending(&store, &id, Stage::Extract) {
-                store.mark_extract_skipped(&id);
+            if outcomes.last() == Some(&RequestOutcome::Terminal) {
+                terminal.push(Stage::Extract);
             }
+        } else {
+            notes.write().mark_extract_skipped(&id);
             outcomes.push(RequestOutcome::NotAttempted);
         }
     }
 
-    Finished { note_id: id, swept, succeeded: succeeded_from(&outcomes) }
+    Finished { note_id: id, swept, succeeded: succeeded_from(&outcomes), terminal }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 enum Stage {
     Clean,
     Extract,
-}
-
-/// Whether a stage has never run. Guards the `Skipped` downgrades.
-fn stage_is_pending(store: &NoteStore, id: &str, stage: Stage) -> bool {
-    store.get(id).is_some_and(|n| {
-        let state = match stage {
-            Stage::Clean => n.clean_state,
-            Stage::Extract => n.extract_state,
-        };
-        state == StageState::Pending
-    })
 }
 
 /// Clean one note, one text run at a time; reassemble and compare-and-swap
@@ -259,9 +266,24 @@ async fn run_cleanup(
                 notes.write().mark_clean_failed(id);
                 tracing::warn!("cleanup failed for note {}: {}", id, e);
                 log_status(status_log, LogLevel::Error, format!("Note cleanup failed: {e}"));
-                return RequestOutcome::Errored;
+                // Terminal failures (bad model name, broken preset) are still
+                // `Failed` in the store, but retrying them unchanged can only
+                // fail the same way, so the sweep leaves them alone.
+                return if e.is_retryable() {
+                    RequestOutcome::Errored
+                } else {
+                    RequestOutcome::Terminal
+                };
             }
         }
+    }
+
+    if !contacted_server {
+        // Blank or attachment-only body: nothing was sent, so this is success
+        // with no rewrite rather than a pass that stays `Pending` forever
+        // offering a retry that always no-ops.
+        notes.write().apply_cleanup(id, &sent, "");
+        return RequestOutcome::NotAttempted;
     }
 
     // Unchanged passes an empty response, which `apply_cleanup` reads as "success, change nothing".
@@ -318,6 +340,8 @@ async fn run_extraction(
     match extract::extract(base_url, cfg, &text, today, timeout).await {
         Ok(proposals) => {
             let count = proposals.len();
+            // Machine suffix for the new row ids (they sync keyed by id).
+            let machine_id = notes.peek().machine_id().to_string();
             {
                 let mut store = tasks.write();
                 let rows = proposals
@@ -337,6 +361,7 @@ async fn run_extraction(
                                     extract::TaskKind::Todo => TaskKind::Todo,
                                 },
                             },
+                            &machine_id,
                         )
                     })
                     .collect();
@@ -355,7 +380,11 @@ async fn run_extraction(
             notes.write().mark_extract_failed(id);
             tracing::warn!("extraction failed for note {}: {}", id, e);
             log_status(status_log, LogLevel::Error, format!("Task extraction failed: {e}"));
-            RequestOutcome::Errored
+            return if e.is_retryable() {
+                RequestOutcome::Errored
+            } else {
+                RequestOutcome::Terminal
+            };
         }
     }
 }

@@ -36,7 +36,7 @@ fn temp_store(tag: &str) -> TaskStore {
 }
 
 fn suggest(store: &mut TaskStore, note_id: &str, text: &str) -> String {
-    let task = TaskStore::new_suggestion(note_id, proposal(text, text, 0.9));
+    let task = TaskStore::new_suggestion(note_id, proposal(text, text, 0.9), "test-machine");
     let id = task.id.clone();
     store.tasks.push(task);
     id
@@ -73,7 +73,7 @@ fn replace_suggestions_keeps_decided_rows() {
     let other = suggest(&mut store, "note-2", "Send the invoice");
     store.accept(&decided);
 
-    let fresh = TaskStore::new_suggestion("note-1", proposal("Book a table", "book", 0.7));
+    let fresh = TaskStore::new_suggestion("note-1", proposal("Book a table", "book", 0.7), "test-machine");
     let fresh_id = fresh.id.clone();
     store.replace_suggestions("note-1", vec![fresh]);
 
@@ -116,12 +116,25 @@ fn a_corrupt_tasks_file_is_preserved_not_overwritten() {
 
 #[test]
 fn suggestions_made_in_the_same_millisecond_get_distinct_ids() {
-    let a = TaskStore::new_suggestion("note-1", proposal("one", "one", 0.5));
-    let b = TaskStore::new_suggestion("note-1", proposal("two", "two", 0.5));
+    let a = TaskStore::new_suggestion("note-1", proposal("one", "one", 0.5), "test-machine");
+    let b = TaskStore::new_suggestion("note-1", proposal("two", "two", 0.5), "test-machine");
     assert_ne!(
         a.id, b.id,
         "one extraction pass emits several tasks in a single instant; colliding \
          ids would make accept hit the wrong chip"
+    );
+}
+
+#[test]
+fn suggestion_ids_carry_the_machine_suffix() {
+    let a = TaskStore::new_suggestion("note-1", proposal("one", "one", 0.5), "aaaa");
+    let b = TaskStore::new_suggestion("note-1", proposal("one", "one", 0.5), "bbbb");
+    assert!(
+        a.id.ends_with("-aaaa") && b.id.ends_with("-bbbb"),
+        "rows sync keyed by id, so two machines extracting in the same \
+         millisecond must not mint the same id: {a:?} vs {b:?}",
+        a = a.id,
+        b = b.id
     );
 }
 
@@ -214,7 +227,7 @@ fn tasks_round_trip_through_disk() {
 
 #[test]
 fn confidence_is_stored_as_reported_not_clamped() {
-    let out_of_range = TaskStore::new_suggestion("note-1", proposal("x", "x", 1.7));
+    let out_of_range = TaskStore::new_suggestion("note-1", proposal("x", "x", 1.7), "test-machine");
     assert_eq!(
         out_of_range.confidence, 1.7,
         "an impossible confidence means the prompt or the parser misfired, and \
@@ -268,6 +281,7 @@ fn a_suggestion_carries_the_date_the_model_resolved() {
             due_phrase: Some("before Friday".into()),
             kind: TaskKind::Todo,
         },
+        "test-machine",
     );
     store.tasks.push(row);
 

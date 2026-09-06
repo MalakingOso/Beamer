@@ -5,9 +5,10 @@
 //! No protocol-level auth: `tailscaled` authenticates callers, and only for
 //! traffic that already reached loopback. See `agent_docs/sync.md`.
 //!
-//! No `src/lib.rs`, so this binary `#[path]`-includes `notes/sync_doc.rs`
-//! (written free of crate paths for this). It only relays the document, so
-//! `doc_notes`/`doc_tasks` stay out.
+//! No `src/lib.rs`, so this binary `#[path]`-includes `notes/sync_doc/`
+//! (written free of crate paths for this; its `fields` submodule resolves
+//! beside it). It only relays the document, so `doc_notes`/`doc_tasks` stay
+//! out.
 //!
 //! ```text
 //! cargo run --bin sync_server -- --bind 127.0.0.1:8081
@@ -16,7 +17,7 @@
 // Whole-module include pulls in items this binary never calls.
 #![allow(dead_code)]
 
-#[path = "../notes/sync_doc.rs"]
+#[path = "../notes/sync_doc/mod.rs"]
 mod sync_doc;
 
 use std::net::SocketAddr;

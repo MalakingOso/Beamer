@@ -50,13 +50,17 @@ impl Default for MachineStore {
 }
 
 impl MachineStore {
-    /// Four hex digits distinguishing installs. Not a uuid on purpose: `RandomState`
-    /// is already per-instance seeded, salted here with wall clock + pid.
+    /// Sixteen hex digits (64 bits) distinguishing installs. Not a uuid on
+    /// purpose: `RandomState` is already per-instance seeded, salted here with
+    /// wall clock + pid. Older four-digit ids keep working — ids are opaque
+    /// strings, never parsed — but all newly minted ids carry the full width,
+    /// since these back the cross-machine uniqueness of note, task and
+    /// attachment ids.
     fn generate_machine_id() -> String {
         let mut hasher = RandomState::new().build_hasher();
         hasher.write_i64(chrono::Local::now().timestamp_nanos_opt().unwrap_or_default());
         hasher.write_u32(std::process::id());
-        format!("{:04x}", (hasher.finish() & 0xffff) as u16)
+        format!("{:016x}", hasher.finish())
     }
 
     /// A fresh in-memory store at `path`. No disk I/O; the caller decides when to persist.
@@ -315,9 +319,22 @@ mod tests {
     }
 
     #[test]
-    fn two_machine_ids_are_never_the_same_by_construction() {
-        let a = MachineStore::new(temp_path("id_a")).machine_id;
-        let b = MachineStore::new(temp_path("id_b")).machine_id;
-        assert_ne!(a, b, "two fresh installs must not draw the same id in practice");
+    fn machine_ids_are_16_lowercase_hex_digits() {
+        let id = MachineStore::new(temp_path("id_format")).machine_id;
+        assert_eq!(id.len(), 16, "64 bits of install identity, got {id:?}");
+        assert!(
+            id.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "got {id:?}"
+        );
+    }
+
+    #[test]
+    fn ten_thousand_fresh_ids_are_all_distinct() {
+        // 64-bit space: this fails only on a broken RNG, not on birthday luck.
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..10_000 {
+            let id = MachineStore::generate_machine_id();
+            assert!(seen.insert(id), "duplicate machine id minted");
+        }
     }
 }

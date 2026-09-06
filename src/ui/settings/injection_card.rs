@@ -3,7 +3,21 @@ use crate::ui::components::Card;
 
 #[component]
 pub fn InjectionCard() -> Element {
-    let availability = use_hook(|| crate::injection::check_availability());
+    // Probed off the render thread: on Windows this runs Win32 calls
+    // (`GetForegroundWindow`, `OpenProcess`) plus `Clipboard::new()`, on
+    // Linux a `wtype` probe and a D-Bus handshake — none of which may run
+    // inline in a render. Same spawn_blocking pattern as the GNOME probe below.
+    let mut availability: Signal<
+        Option<Vec<(&'static str, &'static str, Result<(), String>)>>,
+    > = use_signal(|| None);
+    use_hook(move || {
+        spawn(async move {
+            match tokio::task::spawn_blocking(crate::injection::check_availability).await {
+                Ok(rows) => availability.set(Some(rows)),
+                Err(e) => tracing::warn!("injection availability probe panicked: {}", e),
+            }
+        });
+    });
     let mut show_fallbacks = use_signal(|| false);
 
     rsx! {
@@ -139,21 +153,25 @@ pub fn InjectionCard() -> Element {
                 "Fallbacks"
             }
             if show_fallbacks() {
-                div { class: "injection-fallbacks",
-                    for (name, display, result) in availability.iter().filter(|(n, _, _)| *n != "gnome") {
-                        span {
-                            key: "{name}",
-                            class: "injection-fallback-item",
+                if let Some(rows) = availability.read().clone() {
+                    div { class: "injection-fallbacks",
+                        for (name, display, result) in rows.iter().filter(|(n, _, _)| *n != "gnome") {
                             span {
-                                class: if result.is_ok() { "status-dot ok" } else { "status-dot err" },
-                                title: match result {
-                                    Ok(()) => "Available".to_string(),
-                                    Err(e) => e.clone(),
-                                },
+                                key: "{name}",
+                                class: "injection-fallback-item",
+                                span {
+                                    class: if result.is_ok() { "status-dot ok" } else { "status-dot err" },
+                                    title: match result {
+                                        Ok(()) => "Available".to_string(),
+                                        Err(e) => e.clone(),
+                                    },
+                                }
+                                "{display}"
                             }
-                            "{display}"
                         }
                     }
+                } else {
+                    div { class: "injection-fallbacks", "Checking availability…" }
                 }
             }
         }

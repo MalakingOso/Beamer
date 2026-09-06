@@ -7,7 +7,7 @@ use chrono::Local;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use super::next_id;
+use super::next_synced_id;
 use super::sync_doc::SyncHandle;
 use super::task::{Proposal, Task, TaskStatus};
 use super::{doc_tasks, NoteStore};
@@ -295,12 +295,13 @@ impl TaskStore {
         removed
     }
 
-    /// Build an undecided row. The id comes from `notes::next_id`, not a
-    /// timestamp, since one pass mints several rows in the same millisecond.
-    /// Takes a whole [`Proposal`] so a row can't be written half-dated.
-    pub fn new_suggestion(note_id: &str, proposal: Proposal) -> Task {
+    /// Build an undecided row. The id comes from `notes::next_synced_id`,
+    /// not a timestamp, since one pass mints several rows in the same
+    /// millisecond — and carries the machine suffix, since rows sync keyed
+    /// by id. Takes a whole [`Proposal`] so a row can't be written half-dated.
+    pub fn new_suggestion(note_id: &str, proposal: Proposal, machine_id: &str) -> Task {
         Task {
-            id: next_id(),
+            id: next_synced_id(machine_id),
             note_id: note_id.to_string(),
             text: proposal.text,
             evidence: proposal.evidence,

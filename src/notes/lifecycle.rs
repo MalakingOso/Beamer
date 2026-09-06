@@ -43,8 +43,16 @@ impl NoteStore {
     }
 
     /// Cleanup deliberately not run (disabled in config, or a typed note).
+    /// Never overwrites `Done`: asking for a pass while the feature is off
+    /// must not erase the record that it once ran. Enforced here rather than
+    /// at the call sites, so no future caller can get it wrong.
     pub fn mark_clean_skipped(&mut self, id: &str) {
-        self.set_clean_state(id, StageState::Skipped);
+        if let Some(note) = Self::find_mut(&mut self.notes, id) {
+            if note.clean_state != StageState::Done {
+                note.clean_state = StageState::Skipped;
+                self.dirty = true;
+            }
+        }
     }
 
     pub fn mark_analyzed(&mut self, id: &str) {
@@ -55,9 +63,15 @@ impl NoteStore {
         self.set_extract_state(id, StageState::Failed);
     }
 
-    /// Extraction deliberately not run.
+    /// Extraction deliberately not run. Same never-overwrites-`Done` rule as
+    /// [`Self::mark_clean_skipped`].
     pub fn mark_extract_skipped(&mut self, id: &str) {
-        self.set_extract_state(id, StageState::Skipped);
+        if let Some(note) = Self::find_mut(&mut self.notes, id) {
+            if note.extract_state != StageState::Done {
+                note.extract_state = StageState::Skipped;
+                self.dirty = true;
+            }
+        }
     }
 
     /// Each stage owns its own field; a failed cleanup never touches extraction.
@@ -179,6 +193,36 @@ mod tests {
             store.is_dirty(),
             "clearing the stale Failed state is itself a change that must reach disk"
         );
+    }
+
+    #[test]
+    fn skipped_never_overwrites_done() {
+        let mut store = temp_store("skipped_done");
+        let id = store.create("file the taxes".into(), NoteColor::Rose, NoteOrigin::Dictated);
+        store.mark_analyzed(&id);
+        store.apply_cleanup(&id, "file the taxes", "File the taxes.");
+
+        store.mark_clean_skipped(&id);
+        store.mark_extract_skipped(&id);
+
+        let note = store.get(&id).unwrap();
+        assert_eq!(note.clean_state, StageState::Done);
+        assert_eq!(note.extract_state, StageState::Done);
+    }
+
+    #[test]
+    fn skipped_downgrades_a_failed_stage_so_a_disabled_pass_goes_quiet() {
+        let mut store = temp_store("skipped_failed");
+        let id = store.create("file the taxes".into(), NoteColor::Rose, NoteOrigin::Dictated);
+        store.mark_clean_failed(&id);
+        store.mark_extract_failed(&id);
+
+        store.mark_clean_skipped(&id);
+        store.mark_extract_skipped(&id);
+
+        let note = store.get(&id).unwrap();
+        assert_eq!(note.clean_state, StageState::Skipped);
+        assert_eq!(note.extract_state, StageState::Skipped);
     }
 
     #[test]

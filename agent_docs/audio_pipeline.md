@@ -29,8 +29,10 @@ and targets 16 kHz mono. If the device's native config already matches, it
 captures directly at 16 kHz/1ch. Otherwise it captures at the device's
 **native** rate/channel count and does downmix + resample **inside the cpal
 callback itself**, using closure-owned state (`ResampleState { accumulator,
-last_sample }`, plus reused `float_buf`/`mono_buf`/`out_buf` scratch `Vec`s —
-no per-callback allocation).
+last_sample }`, plus reused `float_buf`/`mono_buf`/`out_buf` scratch `Vec`s so
+the intermediate stages don't reallocate). The one `Vec` sent downstream per
+callback is structural — the channel takes ownership — not an accident the
+scratch buffers missed.
 
 - Sample format: `AudioCapture::start()` reads `default_input_config()`
   **once** and dispatches on `sample_format()` into the generic

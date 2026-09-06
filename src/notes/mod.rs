@@ -101,10 +101,20 @@ impl Default for NoteStore {
 }
 
 /// Monotonic within a process run, so same-millisecond ids stay distinct without a
-/// uuid dependency. Shared by attachment and task ids; note ids use `next_note_id`.
+/// uuid dependency. Local-only ids (temp filenames); anything that syncs uses
+/// `next_synced_id`, and note ids use `next_note_id`.
 pub(crate) fn next_id() -> String {
     let (millis, n) = raw_id_parts();
     format!("{millis:x}-{n:04x}")
+}
+
+/// Same counter as `next_id`, plus a per-install suffix. Task and attachment
+/// ids sync across machines keyed by id in the shared document, so they need
+/// the same cross-machine uniqueness note ids got — two machines extracting
+/// in the same millisecond must not mint the same task id.
+pub(crate) fn next_synced_id(machine: &str) -> String {
+    let (millis, n) = raw_id_parts();
+    format_note_id(millis, n, machine)
 }
 
 /// Same counter as `next_id`, plus a per-install suffix. Without it, two machines
@@ -290,6 +300,12 @@ impl NoteStore {
         self.dirty || self.machine.is_dirty()
     }
 
+    /// This install's id suffix, for synced ids minted outside `notes/`
+    /// (attachment ids from the UI).
+    pub(crate) fn machine_id(&self) -> &str {
+        &self.machine.machine_id
+    }
+
     /// `origin` is explicit: a silent default would corrupt corpus provenance.
     pub fn create(&mut self, raw: String, color: NoteColor, origin: NoteOrigin) -> String {
         let now = Local::now().to_rfc3339();
@@ -427,5 +443,17 @@ impl NoteStore {
 mod tests;
 
 #[cfg(test)]
+#[path = "migration_tests.rs"]
+mod migration_tests;
+
+#[cfg(test)]
 #[path = "sync_tests.rs"]
 mod sync_tests;
+
+#[cfg(test)]
+#[path = "sync_doc_tests.rs"]
+mod sync_doc_tests;
+
+#[cfg(test)]
+#[path = "sync_recovery_tests.rs"]
+mod sync_recovery_tests;

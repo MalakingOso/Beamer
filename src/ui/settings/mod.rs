@@ -8,7 +8,6 @@ pub mod recording_card;
 pub mod sync_card;
 pub mod transcription_card;
 pub mod update_card;
-pub mod vocabulary_card;
 
 use dioxus::prelude::*;
 
@@ -46,7 +45,11 @@ pub struct SettingsPageProps {
 /// (no spawn/async deferral) so a write is never lost on quit.
 fn save_config(mut config: Signal<Config>, mutate: impl FnOnce(&mut Config)) {
     mutate(&mut config.write());
-    let _ = config.read().save();
+    // A failed save must surface: silently keeping the in-memory value while
+    // the file still holds the old one reads back as a reverted setting.
+    if let Err(e) = config.read().save() {
+        tracing::error!("Settings: failed to persist config: {:#}", e);
+    }
 }
 
 #[component]

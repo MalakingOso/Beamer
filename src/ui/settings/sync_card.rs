@@ -24,7 +24,11 @@ pub fn SyncCard(props: SyncCardProps) -> Element {
     // Shown iff a URL is configured. Turning the toggle off clears `url`
     // outright (off means unconfigured, not paused); turning it on just
     // reveals an empty field, since there is no default server to propose.
+    // `show_field` is only the toggle's intent — visibility also derives
+    // from the live prop, so a URL set anywhere but here still reveals the
+    // field instead of going stale behind the first render's snapshot.
     let mut show_field = use_signal(|| !props.url.trim().is_empty());
+    let field_visible = *show_field.read() || !props.url.trim().is_empty();
 
     let line = describe_status(&props.url, &props.started_url, &props.status.read());
 
@@ -33,7 +37,7 @@ pub fn SyncCard(props: SyncCardProps) -> Element {
             div { class: "card-row",
                 span { class: "card-label", "Sync notes between two machines" }
                 Toggle {
-                    value: *show_field.read(),
+                    value: field_visible,
                     ontoggle: move |on: bool| {
                         show_field.set(on);
                         if !on {
@@ -43,7 +47,7 @@ pub fn SyncCard(props: SyncCardProps) -> Element {
                 }
             }
 
-            if *show_field.read() {
+            if field_visible {
                 div { class: "card-row card-row-top",
                     span { class: "card-label", "Other machine's address" }
                     input {
@@ -63,7 +67,7 @@ pub fn SyncCard(props: SyncCardProps) -> Element {
             // Stays visible while a pre-toggle connection is still running:
             // the client reads the address once at startup, so turning the
             // toggle off doesn't drop it until restart.
-            if *show_field.read() || !props.started_url.is_empty() {
+            if field_visible || !props.started_url.is_empty() {
                 div { class: "card-row",
                     span { class: "sync-status {line.class}", "{line.headline}" }
                 }

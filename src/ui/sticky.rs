@@ -16,7 +16,7 @@ use dioxus::prelude::*;
 
 use crate::notes::pipeline::PipelineRequest;
 use crate::notes::task_store::TaskStore;
-use crate::notes::{next_id, Attachment, NoteColor, NoteOrigin, NoteStore, StageState};
+use crate::notes::{next_synced_id, Attachment, NoteColor, NoteOrigin, NoteStore, StageState};
 use crate::ui::icons::{IconAsterisk, IconCheck, IconPlus};
 use crate::ui::sticky_blocks::{self, StickyBody};
 use crate::ui::sticky_chips::StickyChips;
@@ -85,8 +85,8 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
 
     // Whether the footer's red failure text is currently shown. Starts true
     // so a note opened already-Failed still shows it once; the effect below
-    // hides it ~7s after each fresh entry into Failed and shows it again on
-    // the next one (e.g. a retry that fails again).
+    // hides it ~7s after each flash and shows it again on the next one
+    // (e.g. a retry that fails again).
     let mut show_error_text = use_signal(|| true);
     {
         let id = id.clone();
@@ -94,20 +94,22 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
         // retry that fails the same way it failed before leaves `clean_state`
         // unchanged (`Failed` -> `Failed`), so the note itself carries no
         // detectable transition. Passing through `in_flight` on every retry
-        // does.
+        // does. Mount is the separate second case: a note opened
+        // already-Failed never crosses that edge in this window, so without
+        // it the text would show forever (see `should_flash_error`).
         let mut was_running = use_signal(|| false);
+        let mut mounted = use_signal(|| false);
         let mut generation = use_signal(|| 0u64);
         use_effect(move || {
             let running = passes_in_flight.read().contains(&id);
             let just_finished = was_running.peek().to_owned() && !running;
             was_running.set(running);
-            if !just_finished {
-                return;
-            }
+            let is_mount = !mounted.peek().to_owned();
+            mounted.set(true);
             let failed = notes.peek().get(&id).is_some_and(|n| {
                 n.clean_state == StageState::Failed || n.extract_state == StageState::Failed
             });
-            if !failed {
+            if !sticky_footer::should_flash_error(is_mount, just_finished, running, failed) {
                 return;
             }
             show_error_text.set(true);
@@ -194,7 +196,9 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
             ondrop: move |e: Event<DragData>| {
                 e.prevent_default();
                 drop_target.set(false);
-                let dropped = attachments_from_drop(&e);
+                // Synced ids carry the machine suffix (attachments sync keyed by id).
+                let machine_id = notes.peek().machine_id().to_string();
+                let dropped = attachments_from_drop(&e, &machine_id);
                 if dropped.is_empty() {
                     return;
                 }
@@ -214,9 +218,10 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
                     Pasted::Url(url) => {
                         e.prevent_default();
                         paste_hint.set(false);
+                        let link_id = next_synced_id(notes.peek().machine_id());
                         notes.write().add_attachment(
                             &paste_id,
-                            Attachment::Link { id: next_id(), url, title: None },
+                            Attachment::Link { id: link_id, url, title: None },
                         );
                         crate::notes::flush_stores(&mut notes.write(), &mut tasks.write());
                     }
@@ -283,12 +288,13 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
                                     return;
                                 }
                                 {
+                                    let machine_id = notes.peek().machine_id().to_string();
                                     let mut store = notes.write();
                                     for file in files {
                                         store.add_attachment(
                                             &pick_id,
                                             sticky_blocks::attachment_for_path(
-                                                next_id(),
+                                                next_synced_id(&machine_id),
                                                 file.path(),
                                             ),
                                         );
@@ -305,7 +311,13 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
                         class: "sticky-archive",
                         title: "Archive this note",
                         onmousedown: move |e| e.stop_propagation(),
-                        onclick: move |_| { notes.write().archive(&archive_id); },
+                        onclick: move |_| {
+                            notes.write().archive(&archive_id);
+                            crate::notes::flush_stores(
+                                &mut notes.write(),
+                                &mut tasks.write(),
+                            );
+                        },
                         "\u{00d7}"
                     }
                 }
@@ -313,6 +325,7 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
             StickyBody {
                 id: id.clone(),
                 notes,
+                tasks,
                 body: note.body.clone(),
                 attachments: note.attachments.clone(),
             }
@@ -365,12 +378,12 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
 /// What a drop carries: real files first, else a URL from the data transfer.
 /// Off Windows, `files()` is authoritative when non-empty; a browser drag
 /// arrives as `text/uri-list` or bare `text/plain` instead.
-fn attachments_from_drop(e: &Event<DragData>) -> Vec<Attachment> {
+fn attachments_from_drop(e: &Event<DragData>, machine_id: &str) -> Vec<Attachment> {
     let files = e.files();
     if !files.is_empty() {
         return files
             .into_iter()
-            .map(|f| sticky_blocks::attachment_for_path(next_id(), f.path()))
+            .map(|f| sticky_blocks::attachment_for_path(next_synced_id(machine_id), f.path()))
             .collect();
     }
 
@@ -381,7 +394,7 @@ fn attachments_from_drop(e: &Event<DragData>) -> Vec<Attachment> {
         .unwrap_or_default();
 
     sticky_blocks::url_in(&text)
-        .map(|url| vec![Attachment::Link { id: next_id(), url, title: None }])
+        .map(|url| vec![Attachment::Link { id: next_synced_id(machine_id), url, title: None }])
         .unwrap_or_default()
 }
 

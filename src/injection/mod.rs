@@ -219,7 +219,15 @@ pub async fn inject_text(text: &str, backends: &[String], paste_shortcut: &str) 
     tokio::task::spawn_blocking(move || inject_text_blocking(&text, &backends, &paste_shortcut)).await?
 }
 
+/// Serializes concurrent injections. The GNOME helper refuses a second
+/// `TypeText` while one is in flight, and without this lock the chain would
+/// immediately fall through to the next backend while the first text is still
+/// typing — interleaving two dictations. Held across blocking work, so a
+/// plain `std` mutex (poison-tolerant), never an async one.
+static DISPATCH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn inject_text_blocking(text: &str, backend_names: &[String], paste_shortcut: &str) -> Result<InjectionResult> {
+    let _guard = DISPATCH_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let all = all_backends(paste_shortcut);
     let mut errors = Vec::new();
 
@@ -242,6 +250,7 @@ fn inject_text_blocking(text: &str, backend_names: &[String], paste_shortcut: &s
                 },
                 Err(reason) => {
                     tracing::info!("{} unavailable → falling through: {}", name, reason);
+                    errors.push(format!("{} unavailable: {}", name, reason));
                 }
             }
         } else {

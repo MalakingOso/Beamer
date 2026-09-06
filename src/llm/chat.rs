@@ -67,6 +67,21 @@ pub enum ChatError {
     ThinkingEnabled,
 }
 
+impl ChatError {
+    /// Whether retrying unchanged could succeed. Unreachable hosts, timeouts
+    /// and 5xx are transient; 4xx (wrong model name), malformed bodies and a
+    /// misconfigured server preset need a config or server change first. The
+    /// pipeline still records both as `Failed` — only the backlog sweep
+    /// treats them differently.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Unreachable(_) => true,
+            Self::Http(code) => *code >= 500,
+            Self::Malformed(_) | Self::ThinkingEnabled => false,
+        }
+    }
+}
+
 impl std::fmt::Display for ChatError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -251,6 +266,17 @@ mod tests {
             Err(ChatError::Malformed(_))
         ));
         assert!(matches!(parse_completion("not json"), Err(ChatError::Malformed(_))));
+    }
+
+    #[test]
+    fn only_transient_errors_are_retryable() {
+        assert!(ChatError::Unreachable("connection refused".into()).is_retryable());
+        assert!(ChatError::Http(500).is_retryable());
+        assert!(ChatError::Http(503).is_retryable());
+        assert!(!ChatError::Http(400).is_retryable());
+        assert!(!ChatError::Http(404).is_retryable());
+        assert!(!ChatError::Malformed("no choices".into()).is_retryable());
+        assert!(!ChatError::ThinkingEnabled.is_retryable());
     }
 
     #[test]

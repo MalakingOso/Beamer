@@ -210,6 +210,16 @@ fn a_due_date_in_the_past_drops_to_phrase_only() {
 }
 
 #[test]
+fn a_due_date_centuries_out_drops_to_phrase_only() {
+    // The mirror failure: a hallucinated year passes every other gate and
+    // would otherwise be exported straight to the calendar.
+    let got = parse(&dated("2099-01-01", "tomorrow", "todo"), NOTE, 0.5).unwrap();
+    assert_eq!(got.len(), 1, "the task itself must survive a date failure");
+    assert_eq!(got[0].due, None);
+    assert_eq!(got[0].due_phrase.as_deref(), Some("tomorrow"));
+}
+
+#[test]
 fn yesterday_is_inside_the_slack_but_last_week_is_not() {
     // One day of slack, not zero, so a pass that runs just after midnight on
     // something due "today" is not thrown away.

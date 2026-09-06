@@ -150,7 +150,14 @@ async fn correct_with_vocab(api_key: &str, text: &str, vocab: &[String]) -> Stri
             }
         }
         Ok(resp) => {
-            tracing::warn!("Vocab correction API returned {}, using raw transcript", resp.status());
+            // The body names the actual problem (a renamed model, a dead
+            // key); the status alone never does.
+            let body = resp.text().await.unwrap_or_default();
+            let shown: String = body.chars().take(500).collect();
+            tracing::warn!(
+                "Vocab correction API returned an error, using raw transcript: {}",
+                shown.trim()
+            );
             text.to_string()
         }
         Err(e) => {
@@ -162,7 +169,23 @@ async fn correct_with_vocab(api_key: &str, text: &str, vocab: &[String]) -> Stri
 
 /// Transcribe raw 16-bit LE, 16 kHz, mono PCM via the Mistral Voxtral batch API.
 /// Language is auto-detected; non-empty `vocab` triggers chat post-correction.
+/// The overall deadline covers transcription retries *and* the correction
+/// call, which carries its own full per-request timeout.
 pub async fn transcribe_batch(api_key: &str, audio_pcm: Vec<u8>, vocab: &[String]) -> Result<String> {
+    tokio::time::timeout(
+        super::BATCH_OVERALL_TIMEOUT,
+        transcribe_batch_inner(api_key, audio_pcm, vocab),
+    )
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "Voxtral batch exceeded the overall {}s deadline",
+            super::BATCH_OVERALL_TIMEOUT.as_secs()
+        )
+    })?
+}
+
+async fn transcribe_batch_inner(api_key: &str, audio_pcm: Vec<u8>, vocab: &[String]) -> Result<String> {
     let wav = pcm_to_wav(&audio_pcm);
     let wav_bytes = Bytes::from(wav);
 
@@ -176,22 +199,24 @@ pub async fn transcribe_batch(api_key: &str, audio_pcm: Vec<u8>, vocab: &[String
                 "file",
                 multipart::Part::stream(reqwest::Body::from(wav_bytes.clone()))
                     .file_name("audio.wav")
-                    .mime_str("application/octet-stream")?,
+                    .mime_str("audio/wav")?,
             );
 
-        let resp = client
+        let resp = match client
             .post("https://api.mistral.ai/v1/audio/transcriptions")
             .header("x-api-key", api_key)
             .timeout(super::BATCH_REQUEST_TIMEOUT)
             .multipart(form)
             .send()
             .await
-            .context("Voxtral batch request failed")?;
-
-        if resp.status() == 429 {
-            if attempt < 3 {
+        {
+            Ok(resp) => resp,
+            // Timeouts and refused connections are transient; anything else
+            // (bad request shape, TLS config) fails identically on retry.
+            Err(e) if (e.is_timeout() || e.is_connect()) && attempt < 3 => {
                 tracing::warn!(
-                    "Voxtral 429 rate-limited, retrying in {}s (attempt {})",
+                    "Voxtral batch transport error ({}), retrying in {}s (attempt {})",
+                    e,
                     backoff,
                     attempt + 1
                 );
@@ -199,7 +224,22 @@ pub async fn transcribe_batch(api_key: &str, audio_pcm: Vec<u8>, vocab: &[String
                 backoff *= 2;
                 continue;
             }
-            bail!("Voxtral rate limit exceeded after {} retries", attempt);
+            Err(e) => return Err(e).context("Voxtral batch request failed"),
+        };
+
+        if super::batch_should_retry(resp.status()) {
+            if attempt < 3 {
+                tracing::warn!(
+                    "Voxtral {} — retrying in {}s (attempt {})",
+                    resp.status(),
+                    backoff,
+                    attempt + 1
+                );
+                tokio::time::sleep(tokio::time::Duration::from_secs(backoff)).await;
+                backoff *= 2;
+                continue;
+            }
+            bail!("Voxtral request failed with {} after retries", resp.status());
         }
 
         if !resp.status().is_success() {
@@ -209,7 +249,12 @@ pub async fn transcribe_batch(api_key: &str, audio_pcm: Vec<u8>, vocab: &[String
         }
 
         let json: serde_json::Value = resp.json().await.context("Failed to parse response")?;
-        let raw_text = json["text"].as_str().unwrap_or("").to_string();
+        // A missing `text` field is a broken response, not silence: an empty
+        // string is still a successful (silent) transcription.
+        let raw_text = match json["text"].as_str() {
+            Some(text) => text.to_string(),
+            None => bail!("Voxtral batch response had no text field: {}", json),
+        };
         let text = correct_with_vocab(api_key, &raw_text, vocab).await;
         return Ok(text);
     }

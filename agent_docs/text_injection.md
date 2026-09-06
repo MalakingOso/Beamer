@@ -17,14 +17,13 @@ below, not because it's the weakest.
 - Handle Unicode surrogate pairs for emoji/CJK
 - Call `SendInput()` with array of inputs
 - **Pros:** Works in most apps, handles Unicode, non-destructive (inserts at cursor)
-- **Cons:** May be blocked by some security software; Windows 11's redesigned
-  Notepad is documented (community/AutoHotkey reports; Microsoft-acknowledged
-  Notepad-redesign bug) to buffer or drop batched synthetic Unicode keystrokes
-  — invisibly, since every event is still accepted into the input queue. See
-  `SKIP_SENDINPUT_PROCESSES` in `src/injection/sendinput.rs`: currently `warp.exe`
-  is skipped; `notepad.exe` remains unskipped because the clipboard fallback's
-  500ms restore timer lacks confirmation the paste landed, so RDP latency could
-  trade garbled text for stale clipboard content — fix that race first.
+- **Cons:** May be blocked by some security software. Windows 11's redesigned
+  Notepad was historically reported (community/AutoHotkey reports) to buffer
+  or drop batched synthetic Unicode keystrokes — invisibly, since every event
+  is still accepted into the input queue — but injection into Notepad is
+  verified working as of 2026-09, so `notepad.exe` is deliberately *not* in
+  `SKIP_SENDINPUT_PROCESSES` in `src/injection/sendinput.rs` (currently only
+  `warp.exe`). If garbled Notepad output ever reproduces, re-check here first.
 
 ### 2. Clipboard Paste
 - Save current clipboard contents
@@ -90,7 +89,7 @@ tokio::task::spawn_blocking(|| {
 | Chrome textarea | IValueProvider not available | SendInput or clipboard |
 | Discord | Electron, custom input | SendInput |
 | Word | Rich text, UIA works well | UIA SetValue |
-| Notepad | Win11 redesign buffers/drops batched SendInput | SendInput runs first regardless (no per-app routing exists); see §1 above |
+| Notepad | Older Win11 redesign reportedly buffered/dropped batched SendInput; verified working 2026-09 | SendInput runs first regardless (no per-app routing exists); see §1 above |
 
 ## Debug Logging
 

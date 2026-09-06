@@ -98,6 +98,15 @@ async fn do_injection(
     history: &mut Signal<TranscriptionHistory>,
     status_log: &mut Signal<StatusLog>,
 ) {
+    // A blank transcript injects nothing: running it through the chain would
+    // log a success for zero output, and the clipboard fallback would wipe
+    // the user's clipboard with an empty string.
+    if text.trim().is_empty() {
+        tracing::info!("Blank transcript: nothing to inject");
+        log_status(status_log, LogLevel::Info, "Blank transcript: nothing injected".to_string());
+        last_injection.set("Blank transcript: nothing injected".to_string());
+        return;
+    }
     match injection::inject_text(text, backends, paste_shortcut).await {
         Ok(result) => {
             let status = format!("{}: {}", result.method, result.target_info);

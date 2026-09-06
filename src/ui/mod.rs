@@ -1,5 +1,8 @@
 pub mod app;
+mod app_menu;
+mod app_pill;
 mod app_setup;
+mod app_splash;
 pub mod components;
 pub mod fonts;
 pub mod history;

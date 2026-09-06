@@ -61,6 +61,13 @@ impl HotkeyConfig {
 
         // No Meta modifier field exists, so "Super+N" would parse as bare N
         // and fire on every N press. Reject it (`None` = unbound) instead.
+        // Same for any chord with no modifier at all: a global hotkey that
+        // fires on an unmodified keypress (bare "N", "Space", "F9", or an
+        // empty string) is a misconfiguration, never intent. Callers fall
+        // back to the default chord (dictation) or unbound (note capture).
+        if !ctrl && !alt && !shift && !has_win {
+            return None;
+        }
         let trigger_vk = if has_win {
             if key_str.is_empty() {
                 VK_LWIN

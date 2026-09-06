@@ -46,8 +46,8 @@ cargo run --bin task_eval -- --limit 20   # Measure extraction against your own 
 
 - Keep all files under 500 lines of code — split and refactor when approaching the limit
 - Dioxus 0.7 owns the main thread and tokio runtime — never create a second runtime
-- All UIA/Win32 calls MUST go through tokio::task::spawn_blocking() with COM initialized
-- tray-icon and global-hotkey used directly (not via Dioxus re-exports)
+- All UIA/Win32 calls MUST go through tokio::task::spawn_blocking() with COM initialized (sole exception: the low-level keyboard hook in `src/hotkey/ll_hook.rs`, which must own a real thread with a Windows message loop — `SetWindowsHookExW`/`GetMessageW` cannot run on the runtime's pool)
+- tray-icon and muda used directly (not via Dioxus re-exports)
 - API keys stored in Windows Credential Manager via keyring — never on disk
 - Design language: Deploy Purple (purple accent, 2px borders, hard-offset shadows, solid backgrounds)
 
@@ -73,9 +73,10 @@ cargo run --bin task_eval -- --limit 20   # Measure extraction against your own 
 
 ## Current status
 
-Sticky Notes (all 3 phases) is built and committed on `master`. 168 tests
-pass, zero build warnings. `agent_docs/sticky_notes.md` and
-`agent_docs/local_inference.md` carry all the detail that used to live here —
-read them before touching related code. `todo.md` tracks everything still
-open, including the one pending manual action (a GNOME log-out to deploy the
-extension's latest version).
+Sticky Notes (all 3 phases) is built and committed on `master`. The suite is
+large and growing — run `cargo test` (CI enforces it with `-D warnings`, so a
+warning fails the build) rather than trusting any count here.
+`agent_docs/sticky_notes.md` and `agent_docs/local_inference.md` carry all
+the detail that used to live here — read them before touching related code.
+`todo.md` tracks everything still open, including the one pending manual
+action (a GNOME log-out to deploy the extension's latest version).

@@ -27,6 +27,19 @@ fn build_end_of_audio_frame(out: &mut String) {
     out.push_str(r#"{"type":"input_audio.end"}"#);
 }
 
+/// Render a server `error` message as a string. Handles the object shape
+/// (`{"error": {"message": ...}}`), the bare-string shape
+/// (`{"error": "..."}`), and a top-level `message` field; anything else
+/// falls back to the raw frame so nothing is ever swallowed silently.
+fn describe_error(parsed: &serde_json::Value, raw_frame: &str) -> String {
+    parsed["error"]["message"]
+        .as_str()
+        .or_else(|| parsed["error"].as_str())
+        .or_else(|| parsed["message"].as_str())
+        .unwrap_or(raw_frame)
+        .to_string()
+}
+
 /// Open a WebSocket to the Mistral Voxtral Mini realtime endpoint. Requires an
 /// initial `session.update` declaring pcm_s16le @ 16 kHz; language is auto-detected.
 pub async fn start_realtime_session(api_key: &str) -> Result<RealtimeSession> {
@@ -73,40 +86,50 @@ pub async fn start_realtime_session(api_key: &str) -> Result<RealtimeSession> {
             }
         }
     });
-    write
-        .send(Message::Text(session_config.to_string().into()))
-        .await
-        .context("Failed to send session config")?;
+    // Bounded like every other send: a post-handshake stall must fail the
+    // session here, not hang `start_realtime_session` indefinitely.
+    tokio::time::timeout(
+        super::WS_SEND_TIMEOUT,
+        write.send(Message::Text(session_config.to_string().into())),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("Timed out sending Voxtral session config"))?
+    .context("Failed to send session config")?;
 
     let (audio_tx, mut audio_rx) = mpsc::channel::<Vec<u8>>(AUDIO_CHANNEL_CAPACITY);
     let (transcript_tx, transcript_rx) =
         mpsc::channel::<TranscriptEvent>(TRANSCRIPT_CHANNEL_CAPACITY);
 
-    tokio::spawn(async move {
+    let sender = tokio::spawn(async move {
         let engine = base64::engine::general_purpose::STANDARD;
         let mut b64_buf = String::new();
         let mut frame_buf = String::new();
         while let Some(chunk) = audio_rx.recv().await {
             if chunk.is_empty() {
                 build_end_of_audio_frame(&mut frame_buf);
-                let _ = write.send(Message::Text(frame_buf.as_str().into())).await;
-                continue;
+            } else {
+                b64_buf.clear();
+                engine.encode_string(&chunk, &mut b64_buf);
+                build_audio_frame(&b64_buf, &mut frame_buf);
             }
-            b64_buf.clear();
-            engine.encode_string(&chunk, &mut b64_buf);
-            build_audio_frame(&b64_buf, &mut frame_buf);
-            if write
-                .send(Message::Text(frame_buf.as_str().into()))
-                .await
-                .is_err()
-            {
-                break;
+            let sent = tokio::time::timeout(
+                super::WS_SEND_TIMEOUT,
+                write.send(Message::Text(frame_buf.as_str().into())),
+            )
+            .await;
+            match sent {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => break,
+                Err(_) => {
+                    tracing::warn!("Voxtral realtime send timed out — ending session");
+                    break;
+                }
             }
         }
         let _ = write.close().await;
     });
 
-    tokio::spawn(async move {
+    let reader = tokio::spawn(async move {
         let mut dropped_transcripts: u64 = 0;
         let mut send_event = |ev: TranscriptEvent| {
             // Warn only on `Full`. `Closed` is normal session teardown, which
@@ -120,7 +143,22 @@ pub async fn start_realtime_session(api_key: &str) -> Result<RealtimeSession> {
             }
         };
 
-        while let Some(Ok(msg)) = read.next().await {
+        loop {
+            let msg = match read.next().await {
+                Some(Ok(msg)) => msg,
+                // A reset, protocol error or idle timeout must surface as an
+                // error, not dissolve into the trailing "WebSocket closed" info.
+                Some(Err(e)) => {
+                    let err = format!("WebSocket error: {}", e);
+                    tracing::error!("Voxtral realtime transport error: {}", err);
+                    send_event(TranscriptEvent {
+                        text: String::new(),
+                        kind: TranscriptKind::Error(err),
+                    });
+                    break;
+                }
+                None => break,
+            };
             if let Message::Text(text) = msg {
                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
                     match parsed["type"].as_str() {
@@ -164,14 +202,11 @@ pub async fn start_realtime_session(api_key: &str) -> Result<RealtimeSession> {
                             tracing::debug!("Voxtral segment: {}", text);
                         }
                         Some("error") => {
-                            let fallback = text.to_string();
-                            let message = parsed["error"]["message"]
-                                .as_str()
-                                .unwrap_or(&fallback);
+                            let message = describe_error(&parsed, &text);
                             tracing::error!("Voxtral error: {}", message);
                             send_event(TranscriptEvent {
                                 text: String::new(),
-                                kind: TranscriptKind::Error(message.to_string()),
+                                kind: TranscriptKind::Error(message),
                             });
                         }
                         other => {
@@ -187,10 +222,7 @@ pub async fn start_realtime_session(api_key: &str) -> Result<RealtimeSession> {
         });
     });
 
-    Ok(RealtimeSession {
-        audio_tx,
-        transcript_rx,
-    })
+    Ok(RealtimeSession::new(audio_tx, transcript_rx, vec![sender, reader]))
 }
 
 #[cfg(test)]
@@ -214,6 +246,19 @@ mod tests {
         });
 
         assert_eq!(actual, expected);
+    }
+
+    /// Every known error shape yields the message, never the raw frame.
+    #[test]
+    fn error_shapes_all_resolve_to_the_message() {
+        let object = serde_json::json!({"type": "error", "error": {"message": "bad audio"}});
+        assert_eq!(describe_error(&object, "RAW"), "bad audio");
+        let string = serde_json::json!({"type": "error", "error": "boom"});
+        assert_eq!(describe_error(&string, "RAW"), "boom");
+        let top = serde_json::json!({"type": "error", "message": "top level"});
+        assert_eq!(describe_error(&top, "RAW"), "top level");
+        let unknown = serde_json::json!({"type": "error", "code": 7});
+        assert_eq!(describe_error(&unknown, "RAW"), "RAW");
     }
 
     /// The end-of-audio (empty chunk) frame must match the `json!` construction.

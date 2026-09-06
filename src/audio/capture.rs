@@ -133,11 +133,11 @@ impl AudioCapture {
 
                 let samples: &[f32] = if needs_downmix {
                     mono_buf.clear();
-                    mono_buf.extend(
-                        float_buf
-                            .chunks(native_channels)
-                            .map(|frame| frame.iter().sum::<f32>() / native_channels as f32),
-                    );
+                    mono_buf.extend(float_buf.chunks(native_channels).map(|frame| {
+                        // A trailing runt chunk is shorter than a full frame:
+                        // divide by what is there, not the channel count.
+                        frame.iter().sum::<f32>() / frame.len().max(1) as f32
+                    }));
                     &mono_buf
                 } else {
                     &float_buf

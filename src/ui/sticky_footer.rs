@@ -88,6 +88,26 @@ pub fn footer(clean: StageState, extract: StageState, in_flight: bool) -> Footer
     }
 }
 
+/// Whether the footer's red failure text should (re)start its temporary
+/// display. Two cases, and only these two:
+///
+/// - first mount with the note already failed (a restart, or a window opened
+///   after the pass finished): show it once, then let it go quiet;
+/// - a pass for this note just finished failed: flash it again.
+///
+/// Anything else leaves visibility alone: a pass still running never shows
+/// words (the Running icon outranks a stale failure), a fresh success shows
+/// nothing, and a note that stays failed across unrelated re-renders must not
+/// restart its own timer.
+pub fn should_flash_error(
+    is_mount: bool,
+    just_finished: bool,
+    running: bool,
+    failed: bool,
+) -> bool {
+    failed && !running && (is_mount || just_finished)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,6 +166,39 @@ mod tests {
     fn a_skipped_stage_offers_nothing_to_retry() {
         assert_eq!(footer(Skipped, Skipped, false).icon, FooterIcon::Check);
         assert_eq!(footer(Skipped, Done, false).icon, FooterIcon::Check);
+    }
+
+    #[test]
+    fn a_note_opened_already_failed_flashes_once_then_goes_quiet() {
+        assert!(
+            should_flash_error(true, false, false, true),
+            "mount with a persisted failure is the only time the words appear unprompted"
+        );
+    }
+
+    #[test]
+    fn a_note_opened_while_its_pass_runs_does_not_flash() {
+        assert!(
+            !should_flash_error(true, false, true, true),
+            "Running outranks even a stale failure, on mount as everywhere else"
+        );
+    }
+
+    #[test]
+    fn a_just_finished_failed_pass_flashes_again() {
+        assert!(should_flash_error(false, true, false, true));
+        assert!(
+            !should_flash_error(false, false, false, true),
+            "a note that stays failed across unrelated re-renders must not restart its own timer"
+        );
+    }
+
+    #[test]
+    fn success_or_a_running_pass_never_flashes() {
+        assert!(!should_flash_error(true, false, false, false));
+        assert!(!should_flash_error(false, true, false, false));
+        assert!(!should_flash_error(true, false, true, false));
+        assert!(!should_flash_error(false, false, true, true));
     }
 
     #[test]

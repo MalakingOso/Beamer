@@ -38,8 +38,7 @@ fn modifier_physically_held(left_vk: i32, right_vk: i32) -> bool {
 // No tracked modifier fields (unlike linux_hotkey.rs): matching always reads
 // `GetAsyncKeyState` fresh, since Windows can drop modifier key-ups.
 struct HookState {
-    bindings: Arc<Mutex<Vec<BindingConfig>>>,
-    reset_flag: Arc<AtomicBool>,
+    shared: Arc<Shared>,
     tx: UnboundedSender<HotkeyEvent>,
     binding_state: [BindingState; MAX_BINDINGS],
     win_consumed: bool,
@@ -71,8 +70,15 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
             None => return false,
         };
 
-        // A config edit resets both bindings.
-        if state.reset_flag.swap(false, Ordering::Relaxed) {
+        // A config edit resets both bindings. Any in-flight recording ends
+        // first: without this a toggle latched on before the edit desyncs,
+        // and the next toggle press sends RecordStart while already recording.
+        if state.shared.reset_flag.swap(false, Ordering::Relaxed) {
+            for bs in state.binding_state.iter_mut() {
+                if bs.armed || bs.toggled_on {
+                    let _ = state.tx.send(HotkeyEvent::RecordStop);
+                }
+            }
             state.binding_state = [BindingState::default(); MAX_BINDINGS];
             state.win_consumed = false;
         }
@@ -81,7 +87,7 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
         let is_win_key_event = vk == VK_LWIN || vk == VK_RWIN;
         let norm_vk = if is_win_key_event { VK_LWIN } else { vk };
 
-        let bindings = state.bindings.lock().unwrap_or_else(|p| p.into_inner());
+        let bindings = state.shared.bindings.lock().unwrap_or_else(|p| p.into_inner());
 
         // Non-trigger keys (incl. bare modifiers) are only queried live via GetAsyncKeyState.
         if !bindings.iter().any(|b| b.config.trigger_vk == norm_vk) {
@@ -99,6 +105,12 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
                 .enumerate()
                 .any(|(i, b)| b.config.trigger_vk == norm_vk && state.binding_state[i].trigger_held);
 
+            // A press the hook consumes must not also reach the focused app:
+            // the default Ctrl+Space would otherwise type a space (or, e.g.,
+            // clear Word's character formatting) on every press. Repeats count
+            // as consumed while the trigger is still held from the first press.
+            let mut consumed = already_held;
+
             if !already_held {
                 // First press: read live modifier state (tracked state goes stale).
                 let ctrl_down = modifier_physically_held(VK_LCONTROL as i32, VK_RCONTROL as i32);
@@ -113,6 +125,7 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
                     let is_win_trigger = binding.config.trigger_vk == VK_LWIN;
                     let bs = &mut state.binding_state[idx];
                     bs.trigger_held = true;
+                    consumed = true;
                     if is_toggle {
                         bs.toggled_on = !bs.toggled_on;
                         let event = if bs.toggled_on {
@@ -131,23 +144,26 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
                 }
             }
             // Suppress all Win key presses while consumed (including repeats)
-            if is_win_key_event && state.win_consumed {
+            if consumed || (is_win_key_event && state.win_consumed) {
                 return true;
             }
         } else {
             // On release match the held binding: modifiers may already be up,
             // so re-matching the chord would find nothing and strand `armed`.
+            // A release ending a consumed hold is suppressed with its press.
+            let mut consumed = false;
             let idx = (0..bindings.len())
                 .find(|&i| bindings[i].config.trigger_vk == norm_vk && state.binding_state[i].trigger_held);
             if let Some(idx) = idx {
                 let bs = &mut state.binding_state[idx];
                 bs.trigger_held = false;
+                consumed = true;
                 if bs.armed {
                     let _ = state.tx.send(HotkeyEvent::RecordStop);
                     bs.armed = false;
                 }
             }
-            if is_win_key_event && state.win_consumed {
+            if consumed || (is_win_key_event && state.win_consumed) {
                 state.win_consumed = false;
                 return true;
             }
@@ -163,25 +179,39 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
     CallNextHookEx(HHOOK::default(), code, wparam, lparam)
 }
 
+/// Shared hook-thread state. The thread stops only when the last handle
+/// drops: posting `WM_QUIT` per clone would kill the hook out from under
+/// surviving clones.
+struct Shared {
+    bindings: Mutex<Vec<BindingConfig>>,
+    reset_flag: AtomicBool,
+    /// Filled in by the hook thread once its message loop exists; read by
+    /// `Drop` to address the quit message.
+    thread_id: std::sync::atomic::AtomicU32,
+}
+
 /// Handle for updating the LL keyboard hook configuration from the main thread.
 #[derive(Clone)]
 pub struct HotkeyHandle {
-    bindings: Arc<Mutex<Vec<BindingConfig>>>,
-    reset_flag: Arc<AtomicBool>,
-    thread_id: u32,
+    shared: Arc<Shared>,
 }
 
 impl HotkeyHandle {
     pub fn update_configs(&self, inject: HotkeyConfig, note: Option<HotkeyConfig>) {
-        *self.bindings.lock().unwrap_or_else(|p| p.into_inner()) = build_bindings(inject, note);
-        self.reset_flag.store(true, Ordering::Relaxed);
+        *self.shared.bindings.lock().unwrap_or_else(|p| p.into_inner()) =
+            build_bindings(inject, note);
+        self.shared.reset_flag.store(true, Ordering::Relaxed);
     }
 }
 
 impl Drop for HotkeyHandle {
     fn drop(&mut self) {
-        unsafe {
-            let _ = PostThreadMessageW(self.thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
+        // `self` still counts: 1 means this is the last owner.
+        if Arc::strong_count(&self.shared) == 1 {
+            let thread_id = self.shared.thread_id.load(Ordering::Relaxed);
+            unsafe {
+                let _ = PostThreadMessageW(thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
+            }
         }
     }
 }
@@ -193,11 +223,13 @@ pub fn start_ll_hook(
     note: Option<HotkeyConfig>,
     tx: UnboundedSender<HotkeyEvent>,
 ) -> HotkeyHandle {
-    let bindings = Arc::new(Mutex::new(build_bindings(inject, note)));
-    let reset_flag = Arc::new(AtomicBool::new(false));
+    let shared = Arc::new(Shared {
+        bindings: Mutex::new(build_bindings(inject, note)),
+        reset_flag: AtomicBool::new(false),
+        thread_id: std::sync::atomic::AtomicU32::new(0),
+    });
 
-    let bindings_clone = bindings.clone();
-    let reset_clone = reset_flag.clone();
+    let thread_shared = shared.clone();
     let (tid_tx, tid_rx) = std::sync::mpsc::channel();
 
     std::thread::Builder::new()
@@ -205,8 +237,7 @@ pub fn start_ll_hook(
         .spawn(move || {
             HOOK_STATE.with(|cell| {
                 *cell.borrow_mut() = Some(HookState {
-                    bindings: bindings_clone,
-                    reset_flag: reset_clone,
+                    shared: thread_shared.clone(),
                     tx,
                     binding_state: [BindingState::default(); MAX_BINDINGS],
                     win_consumed: false,
@@ -217,6 +248,7 @@ pub fn start_ll_hook(
                 let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0)
                     .expect("Failed to install keyboard hook");
 
+                thread_shared.thread_id.store(GetCurrentThreadId(), Ordering::Relaxed);
                 tid_tx.send(GetCurrentThreadId()).ok();
 
                 let mut msg = MSG::default();
@@ -232,6 +264,7 @@ pub fn start_ll_hook(
         .expect("Failed to spawn hook thread");
 
     let thread_id = tid_rx.recv().expect("Hook thread failed to start");
+    shared.thread_id.store(thread_id, Ordering::Relaxed);
 
-    HotkeyHandle { bindings, reset_flag, thread_id }
+    HotkeyHandle { shared }
 }

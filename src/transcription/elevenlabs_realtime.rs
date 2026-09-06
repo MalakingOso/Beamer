@@ -97,7 +97,7 @@ pub async fn start_realtime_session(
     if !terms.is_empty() {
         tracing::debug!("ElevenLabs realtime: sending {} keyterms", terms.len());
     }
-    let url = build_realtime_url(language, &terms, no_verbatim);
+    let url = build_realtime_url(&keyterms::encode_query_value(language), &terms, no_verbatim);
 
     let request = tungstenite::http::Request::builder()
         .uri(&url)
@@ -134,7 +134,7 @@ pub async fn start_realtime_session(
     let (transcript_tx, transcript_rx) =
         mpsc::channel::<TranscriptEvent>(TRANSCRIPT_CHANNEL_CAPACITY);
 
-    tokio::spawn(async move {
+    let sender = tokio::spawn(async move {
         let engine = base64::engine::general_purpose::STANDARD;
         let mut b64_buf = String::new();
         let mut frame_buf = String::new();
@@ -147,18 +147,26 @@ pub async fn start_realtime_session(
                 engine.encode_string(&chunk, &mut b64_buf);
                 build_audio_chunk_frame(&b64_buf, false, &mut frame_buf);
             }
-            if write
-                .send(Message::Text(frame_buf.as_str().into()))
-                .await
-                .is_err()
-            {
-                break;
+            // Bounded: a server that stops reading must end the session, not
+            // back-press this send until the commit never goes out.
+            let sent = tokio::time::timeout(
+                super::WS_SEND_TIMEOUT,
+                write.send(Message::Text(frame_buf.as_str().into())),
+            )
+            .await;
+            match sent {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => break,
+                Err(_) => {
+                    tracing::warn!("ElevenLabs realtime send timed out — ending session");
+                    break;
+                }
             }
         }
         let _ = write.close().await;
     });
 
-    tokio::spawn(async move {
+    let reader = tokio::spawn(async move {
         let mut dropped_transcripts: u64 = 0;
         let mut send_event = |ev: TranscriptEvent| {
             // Warn only on `Full`. `Closed` is normal session teardown, which
@@ -172,7 +180,22 @@ pub async fn start_realtime_session(
             }
         };
 
-        while let Some(Ok(msg)) = read.next().await {
+        loop {
+            let msg = match read.next().await {
+                Some(Ok(msg)) => msg,
+                // A reset, protocol error or idle timeout must surface as an
+                // error, not dissolve into the trailing "WebSocket closed" info.
+                Some(Err(e)) => {
+                    let err = format!("WebSocket error: {}", e);
+                    tracing::error!("ElevenLabs realtime transport error: {}", err);
+                    send_event(TranscriptEvent {
+                        text: String::new(),
+                        kind: TranscriptKind::Error(err),
+                    });
+                    break;
+                }
+                None => break,
+            };
             if let Message::Text(text) = msg {
                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
                     match parsed["message_type"].as_str() {
@@ -226,10 +249,7 @@ pub async fn start_realtime_session(
         });
     });
 
-    Ok(RealtimeSession {
-        audio_tx,
-        transcript_rx,
-    })
+    Ok(RealtimeSession::new(audio_tx, transcript_rx, vec![sender, reader]))
 }
 
 #[cfg(test)]

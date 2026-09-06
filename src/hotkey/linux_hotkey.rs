@@ -25,6 +25,18 @@ struct HookState {
     binding_state: [BindingState; MAX_BINDINGS],
 }
 
+/// Whether a device looks like it can produce hotkey chords. Deliberately
+/// broad: macro pads, foot pedals and numpad-only devices fail a strict
+/// A+Z+Space test and would otherwise be silently never listened to.
+/// Non-keyboard devices are filtered by `supported_keys` being absent, and
+/// every skip is logged so a missed device is diagnosable.
+fn looks_like_keyboard(keys: &evdev::AttributeSetRef<KeyCode>) -> bool {
+    keys.contains(KeyCode::KEY_A)
+        || keys.contains(KeyCode::KEY_ENTER)
+        || keys.contains(KeyCode::KEY_SPACE)
+        || keys.contains(KeyCode::KEY_LEFTCTRL)
+}
+
 /// Find all keyboard devices in /dev/input/event*, skipping any whose
 /// `/dev/input` path is already being watched.
 fn find_keyboard_devices(known: &mut HashSet<PathBuf>) -> Vec<(PathBuf, Device)> {
@@ -34,11 +46,8 @@ fn find_keyboard_devices(known: &mut HashSet<PathBuf>) -> Vec<(PathBuf, Device)>
         if known.contains(&path) {
             continue;
         }
-        if let Some(keys) = device.supported_keys() {
-            if keys.contains(KeyCode::KEY_A)
-                && keys.contains(KeyCode::KEY_Z)
-                && keys.contains(KeyCode::KEY_SPACE)
-            {
+        match device.supported_keys() {
+            Some(keys) if looks_like_keyboard(keys) => {
                 tracing::info!(
                     "Found keyboard device: {:?} at {:?} ({:?})",
                     device.name(),
@@ -47,6 +56,13 @@ fn find_keyboard_devices(known: &mut HashSet<PathBuf>) -> Vec<(PathBuf, Device)>
                 );
                 known.insert(path.clone());
                 keyboards.push((path, device));
+            }
+            _ => {
+                tracing::debug!(
+                    "Skipping non-keyboard input device: {:?} at {:?}",
+                    device.name(),
+                    path
+                );
             }
         }
     }
@@ -132,7 +148,14 @@ fn handle_key_event(key: KeyCode, value: i32, state: &mut HookState) {
     }
 
     if state.reset_flag.swap(false, Ordering::Relaxed) {
-        // A config edit resets both bindings, not just one.
+        // A config edit resets both bindings, not just one. Any in-flight
+        // recording ends first (mirrors ll_hook.rs): without this a toggle
+        // latched on before the edit desyncs.
+        for bs in state.binding_state.iter_mut() {
+            if bs.armed || bs.toggled_on {
+                let _ = state.tx.send(HotkeyEvent::RecordStop);
+            }
+        }
         state.binding_state = [BindingState::default(); MAX_BINDINGS];
     }
 

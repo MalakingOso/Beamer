@@ -22,9 +22,47 @@ pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// whole recording and transcribing it, so it bounds a stall, not latency.
 pub(crate) const BATCH_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Ceiling on one whole batch transcription including retries and (for
+/// Voxtral) the vocab-correction call. Without it the per-request timeout
+/// applies per call and a pathological sequence runs several times over.
+pub(crate) const BATCH_OVERALL_TIMEOUT: Duration = Duration::from_secs(480);
+
+/// Whether a batch attempt's HTTP status is worth retrying: rate limits (429)
+/// and transient server failures are; anything else (auth, model, malformed
+/// request) fails identically on retry.
+pub(crate) fn batch_should_retry(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::batch_should_retry;
+
+    #[test]
+    fn rate_limits_and_server_errors_retry() {
+        assert!(batch_should_retry(reqwest::StatusCode::TOO_MANY_REQUESTS));
+        assert!(batch_should_retry(reqwest::StatusCode::BAD_GATEWAY));
+        assert!(batch_should_retry(reqwest::StatusCode::SERVICE_UNAVAILABLE));
+        assert!(batch_should_retry(reqwest::StatusCode::INTERNAL_SERVER_ERROR));
+    }
+
+    #[test]
+    fn client_errors_do_not_retry() {
+        assert!(!batch_should_retry(reqwest::StatusCode::BAD_REQUEST));
+        assert!(!batch_should_retry(reqwest::StatusCode::UNAUTHORIZED));
+        assert!(!batch_should_retry(reqwest::StatusCode::NOT_FOUND));
+        assert!(!batch_should_retry(reqwest::StatusCode::OK));
+    }
+}
+
 /// How long to wait for a realtime WebSocket handshake. Also covers the startup
 /// warmup preconnect, which runs while the main window is still hidden.
 pub(crate) const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Ceiling on one outbound WebSocket send (session config, audio chunk,
+/// commit). A server that stops reading must end the session, not back-press
+/// the sender until stop-talk appears to hang.
+pub(crate) const WS_SEND_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Outbound PCM channel capacity (`RealtimeSession::audio_tx`): same worst-case
 /// cadence as the mic-capture path, 60s * 200 msgs/sec = 12_000.
@@ -92,4 +130,25 @@ pub struct TranscriptEvent {
 pub struct RealtimeSession {
     pub audio_tx: mpsc::Sender<Vec<u8>>,
     pub transcript_rx: mpsc::Receiver<TranscriptEvent>,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl RealtimeSession {
+    pub(crate) fn new(
+        audio_tx: mpsc::Sender<Vec<u8>>,
+        transcript_rx: mpsc::Receiver<TranscriptEvent>,
+        tasks: Vec<tokio::task::JoinHandle<()>>,
+    ) -> Self {
+        Self { audio_tx, transcript_rx, tasks }
+    }
+
+    /// Abort the background pump tasks. Call once recording and the final
+    /// drain are done: dropping the channels alone can leave the read task
+    /// parked on an open socket the server never closes, and the sender task
+    /// waiting on audio that will never come.
+    pub fn shutdown(&self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
 }

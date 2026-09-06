@@ -44,11 +44,65 @@ impl InjectionBackend for ClipboardBackend {
     }
 }
 
+/// What the clipboard held before an injection, so it can be put back.
+/// Text is the common case; images (screenshots, copied files render as
+/// formats `get_text` cannot see) must survive too — restoring nothing would
+/// leave the transcript behind and destroy the original.
+enum SavedClipboard {
+    Text(String),
+    Image(arboard::ImageData<'static>),
+}
+
+fn save_clipboard(clipboard: &mut Clipboard) -> Option<SavedClipboard> {
+    if let Ok(text) = clipboard.get_text() {
+        return Some(SavedClipboard::Text(text));
+    }
+    match clipboard.get_image() {
+        Ok(image) => Some(SavedClipboard::Image(image)),
+        Err(e) => {
+            tracing::debug!("Clipboard: nothing restorable saved ({})", e);
+            None
+        }
+    }
+}
+
+/// Put back what [`save_clipboard`] took — but only if the clipboard still
+/// holds our pasted text. If the user (or another app) copied something
+/// meanwhile, restoring would destroy *that*; if a slow target hasn't pasted
+/// yet, restoring hands it stale content, so skipping the restore is the
+/// safer failure in both directions. Either way the outcome is logged.
+fn restore_clipboard(clipboard: &mut Clipboard, pasted: &str, saved: Option<SavedClipboard>) {
+    match clipboard.get_text() {
+        Ok(current) if current == pasted => {}
+        Ok(_) => {
+            tracing::info!("Clipboard: content changed since paste, skipping restore");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!("Clipboard: cannot verify content before restore ({}), skipping", e);
+            return;
+        }
+    }
+    match saved {
+        Some(SavedClipboard::Text(text)) => {
+            if let Err(e) = clipboard.set_text(text) {
+                tracing::warn!("Clipboard: failed to restore previous text: {}", e);
+            }
+        }
+        Some(SavedClipboard::Image(image)) => {
+            if let Err(e) = clipboard.set_image(image) {
+                tracing::warn!("Clipboard: failed to restore previous image: {}", e);
+            }
+        }
+        None => {}
+    }
+}
+
 /// Set clipboard text and paste with Ctrl+V; restores the previous clipboard after.
 #[cfg(target_os = "windows")]
 fn inject_via_clipboard(text: &str) -> Result<bool> {
     let mut clipboard = Clipboard::new()?;
-    let saved = clipboard.get_text().ok();
+    let saved = save_clipboard(&mut clipboard);
 
     tracing::info!("Clipboard: setting {} bytes of text", text.len());
     if clipboard.set_text(text).is_err() {
@@ -57,11 +111,10 @@ fn inject_via_clipboard(text: &str) -> Result<bool> {
 
     std::thread::sleep(std::time::Duration::from_millis(80));
     tracing::info!("Clipboard: sending Ctrl+V");
+    // `?` matters: a failed Ctrl+V must fall through to UIA, not report success.
     send_ctrl_v()?;
     std::thread::sleep(std::time::Duration::from_millis(500));
-    if let Some(saved_text) = saved {
-        let _ = clipboard.set_text(saved_text);
-    }
+    restore_clipboard(&mut clipboard, text, saved);
     Ok(true)
 }
 
@@ -71,7 +124,7 @@ fn inject_via_clipboard(text: &str) -> Result<bool> {
 #[cfg(not(target_os = "windows"))]
 fn inject_via_clipboard(text: &str, paste_shortcut: &str) -> Result<Option<&'static str>> {
     let mut clipboard = Clipboard::new()?;
-    let saved = clipboard.get_text().ok();
+    let saved = save_clipboard(&mut clipboard);
 
     tracing::info!("Clipboard: setting {} bytes of text", text.len());
     set_clipboard_linux(text, &mut clipboard)?;
@@ -82,9 +135,7 @@ fn inject_via_clipboard(text: &str, paste_shortcut: &str) -> Result<Option<&'sta
     if let Some(mechanism) = try_paste_chord(paste_shortcut) {
         std::thread::sleep(std::time::Duration::from_millis(500));
         // Restore only after the target has read the offer — too early pastes OLD content.
-        if let Some(saved_text) = saved {
-            let _ = clipboard.set_text(saved_text);
-        }
+        restore_clipboard(&mut clipboard, text, saved);
         Ok(Some(mechanism))
     } else {
         tracing::info!(
@@ -144,9 +195,10 @@ fn set_clipboard_linux(text: &str, clipboard: &mut Clipboard) -> Result<()> {
 }
 
 /// Run a command with a hard timeout. Needed because wl-paste can hang
-/// indefinitely on some GNOME compositor states, mid-injection.
+/// indefinitely on some GNOME compositor states, mid-injection. Shared with
+/// the wtype/ydotool call sites, which have the same wedged-helper hazard.
 #[cfg(not(target_os = "windows"))]
-fn run_with_timeout(
+pub(crate) fn run_with_timeout(
     cmd: &mut std::process::Command,
     timeout: std::time::Duration,
 ) -> std::io::Result<Option<std::process::Output>> {
@@ -269,8 +321,11 @@ fn send_ctrl_v() -> Result<()> {
         make_key_input(vk_control, true),
     ];
 
-    unsafe {
-        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    // The accepted-count is the only signal: a swallowed chord (UIPI-blocked
+    // elevated window) must fall through to UIA, never report success.
+    let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+    if sent as usize != inputs.len() {
+        anyhow::bail!("SendInput accepted {} of {} Ctrl+V events", sent, inputs.len());
     }
     Ok(())
 }
@@ -338,12 +393,15 @@ fn try_ydotool_paste(use_shift: bool) -> bool {
     };
 
     tracing::debug!("Clipboard: trying ydotool key for {}", combo);
-    match std::process::Command::new("ydotool").args(&args).output() {
-        Ok(output) if output.status.success() => {
+    // Bounded: a wedged `ydotoold` must not park a spawn_blocking thread forever.
+    let mut cmd = std::process::Command::new("ydotool");
+    cmd.args(&args);
+    match run_with_timeout(&mut cmd, std::time::Duration::from_secs(5)) {
+        Ok(Some(output)) if output.status.success() => {
             tracing::info!("Clipboard: {} sent via ydotool", combo);
             true
         }
-        Ok(output) => {
+        Ok(Some(output)) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
             tracing::warn!(
                 "ydotool key failed for {} (status {}): {}",
@@ -351,6 +409,10 @@ fn try_ydotool_paste(use_shift: bool) -> bool {
                 output.status,
                 stderr.trim()
             );
+            false
+        }
+        Ok(None) => {
+            tracing::warn!("ydotool key timed out for {}", combo);
             false
         }
         Err(e) => {
@@ -425,6 +487,14 @@ fn resolve_use_shift_v(configured: &str) -> bool {
                 configured.to_string()
             }
         });
+
+    // Explicit chords skip the focus lookup (a ~100ms D-Bus round trip plus a
+    // thread spawn); only "auto" needs to know what is focused.
+    match setting.to_ascii_lowercase().as_str() {
+        "ctrl_v" | "ctrl+v" => return false,
+        "ctrl_shift_v" | "ctrl+shift+v" => return true,
+        _ => {}
+    }
 
     let focused = crate::injection::focus::focused_app_id();
     let use_shift = choose_use_shift_v(&setting, focused.as_deref());

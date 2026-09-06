@@ -288,6 +288,11 @@ async fn handle_recording(
     )
     .await;
 
+    // Stop the backend's pump tasks: the channels are drained and drop here,
+    // but a server that never closes its side would otherwise leave the read
+    // task parked on the socket (and the sender waiting on audio) forever.
+    session.shutdown();
+
     log_status(status_log, LogLevel::Info, "Recording stopped");
     Ok(())
 }

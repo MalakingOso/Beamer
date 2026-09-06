@@ -11,6 +11,7 @@ use dioxus::prelude::*;
 use std::path::{Path, PathBuf};
 
 use crate::notes::blocks::{self, Block};
+use crate::notes::task_store::TaskStore;
 use crate::notes::{Attachment, Location, NoteStore};
 
 /// First segment of the media URL. Routed by this segment alone, so it must not
@@ -138,6 +139,7 @@ pub fn rows_for(text: &str, is_only_run: bool) -> usize {
 pub struct StickyBodyProps {
     pub id: String,
     pub notes: Signal<NoteStore>,
+    pub tasks: Signal<TaskStore>,
     /// Passed down so this re-renders with the parent, not via a second store subscription.
     pub body: String,
     pub attachments: Vec<Attachment>,
@@ -145,7 +147,7 @@ pub struct StickyBodyProps {
 
 #[component]
 pub fn StickyBody(props: StickyBodyProps) -> Element {
-    let StickyBodyProps { id, mut notes, body, attachments } = props;
+    let StickyBodyProps { id, mut notes, tasks, body, attachments } = props;
 
     let blocks = blocks::parse(&body);
     let total_runs = blocks.iter().filter(|b| matches!(b, Block::Text(_))).count();
@@ -189,6 +191,7 @@ pub fn StickyBody(props: StickyBodyProps) -> Element {
                                     key: "att-{i}",
                                     note_id: id.clone(),
                                     notes,
+                                    tasks,
                                     attachment,
                                 }
                             },
@@ -211,12 +214,13 @@ pub fn StickyBody(props: StickyBodyProps) -> Element {
 struct AttachmentBlockProps {
     note_id: String,
     notes: Signal<NoteStore>,
+    tasks: Signal<TaskStore>,
     attachment: Attachment,
 }
 
 #[component]
 fn AttachmentBlock(props: AttachmentBlockProps) -> Element {
-    let AttachmentBlockProps { note_id, mut notes, attachment } = props;
+    let AttachmentBlockProps { note_id, mut notes, mut tasks, attachment } = props;
 
     let att_id = attachment.id().to_string();
     let label = attachment.label();
@@ -231,6 +235,9 @@ fn AttachmentBlock(props: AttachmentBlockProps) -> Element {
         move |e: Event<MouseData>| {
             e.stop_propagation();
             notes.write().remove_attachment(&note_id, &att_id);
+            // Flush inline like the attach gestures: a removed record must
+            // not linger past a crash (its bytes may already be released).
+            crate::notes::flush_stores(&mut notes.write(), &mut tasks.write());
         }
     };
 
@@ -246,7 +253,7 @@ fn AttachmentBlock(props: AttachmentBlockProps) -> Element {
                             title: "{resolved.as_ref().map(|p| p.display().to_string()).unwrap_or_default()}",
                             "{label}"
                         }
-                        Locate { note_id: note_id.clone(), notes, attachment_id: att_id.clone() }
+                        Locate { note_id: note_id.clone(), notes, tasks, attachment_id: att_id.clone() }
                     }
                 },
                 (Attachment::Image { .. }, false) => rsx! {
@@ -301,12 +308,13 @@ fn AttachmentBlock(props: AttachmentBlockProps) -> Element {
 struct LocateProps {
     note_id: String,
     notes: Signal<NoteStore>,
+    tasks: Signal<TaskStore>,
     attachment_id: String,
 }
 
 #[component]
 fn Locate(props: LocateProps) -> Element {
-    let LocateProps { note_id, mut notes, attachment_id } = props;
+    let LocateProps { note_id, mut notes, mut tasks, attachment_id } = props;
     rsx! {
         label { class: "sticky-locate",
             "Locate\u{2026}"
@@ -316,6 +324,8 @@ fn Locate(props: LocateProps) -> Element {
                 onchange: move |e: Event<FormData>| {
                     let Some(file) = e.files().into_iter().next() else { return };
                     notes.write().relocate_attachment(&note_id, &attachment_id, file.path());
+                    // Flush inline: a repoint is a discrete gesture, not a keystroke.
+                    crate::notes::flush_stores(&mut notes.write(), &mut tasks.write());
                 },
             }
         }

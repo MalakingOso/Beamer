@@ -126,7 +126,9 @@ pub fn calendar(task: &Task, now: DateTime<Utc>) -> String {
     out
 }
 
-/// A file name from task text, restricted to shell- and filesystem-safe characters.
+/// A file name from task text plus the task id, restricted to shell- and
+/// filesystem-safe characters. The id suffix keeps two tasks that start with
+/// the same words from overwriting each other in the temp dir.
 pub fn file_name(task: &Task) -> String {
     let slug: String = task
         .text
@@ -138,10 +140,19 @@ pub fn file_name(task: &Task) -> String {
         .take(6)
         .collect::<Vec<_>>()
         .join("-");
+    // Task ids are hex/timestamp shapes already, but sanitize defensively:
+    // the name must stay filesystem-safe whatever mints the id.
+    let id_suffix: String = task
+        .id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .filter(|c| *c != '-')
+        .take(24)
+        .collect();
     if slug.is_empty() {
-        format!("beamer-task-{}.ics", task.id)
+        format!("beamer-task-{id_suffix}.ics")
     } else {
-        format!("{slug}.ics")
+        format!("{slug}-{id_suffix}.ics")
     }
 }
 
@@ -346,10 +357,23 @@ mod tests {
     fn the_file_name_survives_arbitrary_task_text() {
         let t = task("Ring Sarah / Bob \"today\"\n", None, false, TaskKind::Todo);
         let name = file_name(&t);
-        assert_eq!(name, "ring-sarah-bob-today.ics");
+        assert_eq!(name, "ring-sarah-bob-today-18f20001.ics");
         assert!(!name.contains('/') && !name.contains('"') && !name.contains('\n'));
 
         let blank = task("\u{2014}\u{2014}", None, false, TaskKind::Todo);
-        assert_eq!(file_name(&blank), "beamer-task-18f2-0001.ics");
+        assert_eq!(file_name(&blank), "beamer-task-18f20001.ics");
+    }
+
+    #[test]
+    fn same_text_tasks_get_distinct_file_names() {
+        let mut a = task("Ring Sarah", None, false, TaskKind::Todo);
+        let mut b = task("Ring Sarah", None, false, TaskKind::Todo);
+        a.id = "18f2-0001-aaaa".into();
+        b.id = "18f2-0002-aaaa".into();
+        assert_ne!(
+            file_name(&a),
+            file_name(&b),
+            "same words, different tasks — one export must not overwrite the other"
+        );
     }
 }

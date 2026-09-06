@@ -22,7 +22,20 @@ impl InjectionBackend for UiaBackend {
     }
 
     fn available(&self) -> Result<(), String> {
-        Ok(())
+        // Probe the real thing: on SKUs without UIA (Server Core, locked-down
+        // images) `CoCreateInstance` fails, and without this the dispatch can
+        // never skip UIA up front.
+        unsafe {
+            let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let created: windows::core::Result<IUIAutomation> =
+                CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER);
+            if hr.is_ok() {
+                CoUninitialize();
+            }
+            created
+                .map(|_| ())
+                .map_err(|e| format!("UIA unavailable: {e}"))
+        }
     }
 
     fn inject(&self, text: &str) -> Result<InjectionResult> {
@@ -87,14 +100,23 @@ unsafe fn try_set_value_inner(text: &str) -> Result<UiaResult> {
         let value_pattern: std::result::Result<IUIAutomationValuePattern, _> = pattern.cast();
         if let Ok(vp) = value_pattern {
             let bstr = windows::core::BSTR::from(text);
-            if vp.SetValue(&bstr).is_ok() {
-                return Ok(UiaResult {
-                    success: true,
-                    method: "UIA SetValue",
-                    target_info,
-                });
+            match vp.SetValue(&bstr) {
+                Ok(()) => {
+                    return Ok(UiaResult {
+                        success: true,
+                        method: "UIA SetValue",
+                        target_info,
+                    });
+                }
+                Err(e) => {
+                    tracing::debug!("UIA: SetValue failed for {}: {:?}", target_info, e);
+                }
             }
+        } else {
+            tracing::debug!("UIA: focused element has no Value pattern ({})", target_info);
         }
+    } else {
+        tracing::debug!("UIA: no pattern on focused element ({})", target_info);
     }
 
     Ok(UiaResult {

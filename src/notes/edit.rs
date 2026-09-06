@@ -289,3 +289,7 @@ fn extension_for(source: &Path) -> String {
 #[cfg(test)]
 #[path = "edit/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "edit/delete_tests.rs"]
+mod delete_tests;

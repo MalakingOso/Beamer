@@ -21,6 +21,7 @@ struct DocPass {
 /// Reconcile, merge, save. Returns whether anything was written. Called from the
 /// 500 ms tick and the tray's Quit handler (which must write before `process::exit`).
 pub fn flush_stores(notes: &mut NoteStore, tasks: &mut TaskStore) -> bool {
+    prune_orphan_rows(notes, tasks);
     let pass = run_document_pass(notes, tasks);
 
     // A merge rewrote both vecs, so both mirrors are stale regardless of dirty flags.
@@ -45,6 +46,26 @@ pub fn flush_stores(notes: &mut NoteStore, tasks: &mut TaskStore) -> bool {
         tasks.doc_dirty = false;
     }
     wrote
+}
+
+/// Drop task rows whose note is gone. Deleting a note mutates both stores in
+/// memory before one `flush_stores` call, but a crash between the two mirror
+/// writes still strands rows for a deleted note; left alone they linger on no
+/// page and poison the eval corpus with labels for text that no longer
+/// exists. Only when the notes side is trustworthy — never over a failed
+/// load, where "gone" means "unreadable" — and rows for unreadable (kept, not
+/// deleted) notes are spared with it.
+fn prune_orphan_rows(notes: &NoteStore, tasks: &mut TaskStore) {
+    if notes.load_error.is_some() || notes.document_read_only() {
+        return;
+    }
+    let before = tasks.tasks.len();
+    tasks.tasks.retain(|t| {
+        notes.get(&t.note_id).is_some() || notes.unreadable_notes.iter().any(|id| id == &t.note_id)
+    });
+    if tasks.tasks.len() != before {
+        tasks.dirty = true;
+    }
 }
 
 fn run_document_pass(notes: &mut NoteStore, tasks: &mut TaskStore) -> DocPass {
