@@ -68,5 +68,7 @@ works without it too, falling back through `wtype` → `ydotool` → clipboard.
 
 On-device transcript cleanup uses [S1-mini](https://huggingface.co/superwhisper/s1-mini)
 by Superwhisper, Apache 2.0 with an additional naming term
-(`licenses/S1-mini-LICENSE.txt`). Task extraction uses Google's Gemma 4
-(`licenses/gemma-4-LICENSE.txt`).
+(`licenses/S1-mini-LICENSE.txt`). Task extraction uses
+[K2-Horizon-0.9B](https://huggingface.co/IFM/K2-Horizon-0.9B) by IFM
+(`licenses/K2-Horizon-LICENSE.txt` — licence terms unconfirmed, see that
+file's provenance note).

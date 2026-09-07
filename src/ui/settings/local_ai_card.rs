@@ -4,6 +4,7 @@ use dioxus::prelude::*;
 
 use crate::llm::client::{self, ModelInfo};
 use crate::llm::{MODEL_CREDIT, MIN_CONNECT_TIMEOUT_MS};
+use crate::model_setup::{self, DownloadStatus};
 use crate::ui::components::{Card, Select, Toggle};
 
 #[derive(Clone, PartialEq)]
@@ -22,13 +23,20 @@ pub struct LocalAiCardProps {
     /// Connect timeout, separate from the request timeout. Baked into the HTTP
     /// client at startup, so edits take effect after a restart (see the note).
     pub connect_timeout_ms: u64,
+    /// Transcript cleanup, toggled on its own: it needs a second model the
+    /// installer never fetches, so it is off unless the user asks for it.
+    pub cleanup_enabled: bool,
     pub cleanup_model: String,
     pub extract_model: String,
     pub on_enabled_change: EventHandler<bool>,
     pub on_base_url_change: EventHandler<String>,
     pub on_connect_timeout_ms_change: EventHandler<u64>,
+    pub on_cleanup_enabled_change: EventHandler<bool>,
     pub on_cleanup_model_change: EventHandler<String>,
     pub on_extract_model_change: EventHandler<String>,
+    /// K2-Horizon's first-run download/setup state — `Idle` except on a
+    /// fresh, bundled aarch64 install. See `crate::model_setup`.
+    pub download_status: Signal<crate::model_setup::DownloadStatus>,
 }
 
 #[component]
@@ -37,6 +45,7 @@ pub fn LocalAiCard(props: LocalAiCardProps) -> Element {
 
     let base_url = props.base_url.clone();
     let timeout = std::time::Duration::from_millis(props.request_timeout_ms);
+    let download_status = props.download_status;
 
     let start_probe = move |base_url: String| {
         spawn(async move {
@@ -64,7 +73,7 @@ pub fn LocalAiCard(props: LocalAiCardProps) -> Element {
     rsx! {
         Card { title: "Local AI".to_string(),
             div { class: "card-row",
-                span { class: "card-label", "Enable on-device cleanup and task extraction" }
+                span { class: "card-label", "Enable on-device AI" }
                 Toggle {
                     value: props.enabled,
                     ontoggle: move |v: bool| props.on_enabled_change.call(v),
@@ -138,29 +147,43 @@ pub fn LocalAiCard(props: LocalAiCardProps) -> Element {
                     }
                 },
                 Probe::Failed(_) => rsx! {
-                    // A down server costs cleanup, never capture.
+                    // A down server costs the model passes, never capture.
                     div { class: "llm-note",
-                        "Notes are still captured \u{2014} they just are not cleaned up."
+                        "Notes are still captured \u{2014} tasks just are not found in them."
                     }
                 },
                 _ => rsx! {},
             }
 
             div { class: "card-row",
-                span { class: "card-label", "Cleanup model" }
-                if served.is_empty() {
-                    input {
-                        class: "input input-mono",
-                        value: "{props.cleanup_model}",
-                        onchange: move |e: Event<FormData>| {
-                            props.on_cleanup_model_change.call(e.value().to_string());
-                        },
-                    }
-                } else {
-                    Select {
-                        value: props.cleanup_model.clone(),
-                        options: model_options(&served, &props.cleanup_model),
-                        onchange: move |v: String| props.on_cleanup_model_change.call(v),
+                span { class: "card-label", "Clean up dictated transcripts" }
+                Toggle {
+                    value: props.cleanup_enabled,
+                    ontoggle: move |v: bool| props.on_cleanup_enabled_change.call(v),
+                }
+            }
+            div { class: "llm-note",
+                "Off by default \u{2014} it needs a second model this install does not fetch. \
+                 Task extraction runs either way."
+            }
+
+            if props.cleanup_enabled {
+                div { class: "card-row",
+                    span { class: "card-label", "Cleanup model" }
+                    if served.is_empty() {
+                        input {
+                            class: "input input-mono",
+                            value: "{props.cleanup_model}",
+                            onchange: move |e: Event<FormData>| {
+                                props.on_cleanup_model_change.call(e.value().to_string());
+                            },
+                        }
+                    } else {
+                        Select {
+                            value: props.cleanup_model.clone(),
+                            options: model_options(&served, &props.cleanup_model),
+                            onchange: move |v: String| props.on_cleanup_model_change.call(v),
+                        }
                     }
                 }
             }
@@ -184,8 +207,48 @@ pub fn LocalAiCard(props: LocalAiCardProps) -> Element {
                 }
             }
 
-            div { class: "llm-credit",
-                "Cleanup uses {MODEL_CREDIT}."
+            match &*download_status.read() {
+                DownloadStatus::Idle | DownloadStatus::Ready => rsx! {},
+                DownloadStatus::Verifying => rsx! {
+                    div { class: "card-row",
+                        span { class: "llm-status", "Verifying K2-Horizon model\u{2026}" }
+                    }
+                },
+                DownloadStatus::Downloading { bytes, total } => {
+                    let pct = if *total > 0 {
+                        (*bytes as f64 / *total as f64 * 100.0) as u32
+                    } else {
+                        0
+                    };
+                    rsx! {
+                        div { class: "card-row",
+                            span { class: "llm-status", "Downloading K2-Horizon model\u{2026} {pct}%" }
+                            button {
+                                class: "btn btn-secondary",
+                                onclick: move |_| model_setup::cancel(download_status),
+                                "Cancel"
+                            }
+                        }
+                    }
+                },
+                DownloadStatus::Failed(msg) => rsx! {
+                    div { class: "card-row",
+                        span { class: "llm-status bad", "K2-Horizon setup failed: {msg}" }
+                        button {
+                            class: "btn btn-secondary",
+                            onclick: move |_| model_setup::retry(download_status),
+                            "Retry download"
+                        }
+                    }
+                },
+            }
+
+            // The licence binds the credit to the model actually being used;
+            // with cleanup off, s1-mini is never loaded.
+            if props.cleanup_enabled {
+                div { class: "llm-credit",
+                    "Cleanup uses {MODEL_CREDIT}."
+                }
             }
         }
     }

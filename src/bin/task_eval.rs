@@ -98,7 +98,7 @@ async fn main() -> Result<()> {
     let tasks_path = arg(&args, "--tasks")
         .map(PathBuf::from)
         .unwrap_or(config_dir()?.join("tasks.json"));
-    let base_url = arg(&args, "--base-url").unwrap_or(defaults.base_url.clone());
+    let base_url = arg(&args, "--base-url").unwrap_or(defaults.extract_base_url().to_string());
     let limit = match arg(&args, "--limit") {
         Some(s) => Some(s.parse::<usize>().context("--limit takes a number")?),
         None => None,

@@ -156,6 +156,12 @@ fn malformed_json_is_an_error_not_an_empty_list() {
 #[test]
 fn the_extraction_request_asks_the_server_to_constrain_the_grammar() {
     let req = build_request(&ExtractConfig::default(), NOTE, today());
+    // Only a bundled aarch64 build defaults to K2-Horizon; every other
+    // target defaults back to Gemma — see `default_extract_model` in
+    // `src/llm/mod.rs`.
+    #[cfg(target_arch = "aarch64")]
+    assert_eq!(req.model, "K2-Horizon-0.9B-Q8_0");
+    #[cfg(not(target_arch = "aarch64"))]
     assert_eq!(req.model, "gemma-4-E4B_q4_0-it");
     assert!(req.response_format.is_some());
     assert_eq!(req.messages[0].content, prompts::extract_system(today()));

@@ -8,6 +8,45 @@
 - [ ] ElevenLabs usage dashboard — API supports `GET /v1/user/subscription` (character_count/character_limit) and `GET /v1/usage/character-stats` (historical data with aggregation). Mistral has no usage API.
 - [ ] Overlay window — the `Overlay` component exists but isn't wired to a separate transparent window for showing live transcription text on screen
 
+## Local inference — S1-mini cleanup, parked
+
+- [ ] **Bring transcript cleanup back.** `[llm.cleanup] enabled` now defaults
+      to `false` and has its own toggle on the Local AI settings card
+      (2026-09-06, see `docs/decisions.md`). Nothing was deleted — `llm/
+      cleanup.rs`, `prompts::CLEANUP_SYSTEM`, `pipeline::run_cleanup`, the
+      per-stage `base_url` override and the whole `clean_state` lifecycle are
+      all intact and tested. What it needs to work again is a server that
+      actually serves the model: either an `[s1-mini-q4_k_m]` preset in
+      `deploy/llama-models-bearcave.ini` plus the 462 MiB GGUF fetched into
+      `%LOCALAPPDATA%\Beamer\...` the way `model_setup` fetches K2-Horizon,
+      or a reachable GPU host. Do **not** substitute a different quant — the
+      94.8% token-accuracy figure in `agent_docs/local_inference.md` was
+      measured on `q4_k_m` specifically. Note the licence obligation
+      (`llm::MODEL_CREDIT`) comes back with it.
+- [ ] **Cleanup may want to be a dictation feature, not a notes feature.** The
+      framing that prompted turning it off was "unrelated to the stickies":
+      cleaning a transcript is arguably something dictation should do before
+      *injection*, not something a note pass does afterward. Today it only ever
+      runs over `notes`. Worth deciding before it is switched back on, because
+      it changes where the toggle belongs and whether `clean_state` is still
+      the right home for the result.
+- [ ] **`failure_message` reports an unreachable host as a reachable one.**
+      `src/llm/client.rs` checks `timed_out` before `connect_failed`, but
+      reqwest sets `is_timeout()` for a *connect* timeout too — so a tailnet
+      host that never accepted a TCP connection renders as "No response — the
+      server is reachable but did not answer", which is the opposite of what
+      happened and directly misled a real debugging session. Swap the two
+      branches; the existing test `failures_are_described_in_the_users_terms`
+      pins the current order and needs updating with it.
+- [ ] **`succeeded_from` conflates two servers' reachability.** With per-stage
+      `base_url`, one request can touch two hosts, but
+      `pipeline/sweep.rs::succeeded_from` folds them into a single
+      `succeeded` bool: any errored stage suppresses the backlog sweep, so a
+      successful *local* extraction cannot trigger a sweep while a *remote*
+      cleanup is down. Latent while cleanup is off (one host, one stage);
+      fix it before re-enabling a split deployment. Probably wants the sweep
+      trigger keyed by base_url rather than by request.
+
 ## Sticky Notes — omissions
 
 - [ ] **Suggestion count badge on the notes board.** The spec (§9) calls for a

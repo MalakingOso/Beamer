@@ -55,6 +55,31 @@ impl NoteStore {
         }
     }
 
+    /// Mark cleanup skipped on every note at once. Called when the cleanup
+    /// pass is turned off, because the pipeline only ever visits a note it is
+    /// asked about: without this, a `Failed` recorded while cleanup was on
+    /// stays on disk and the footer keeps reporting a pass nobody wants run.
+    /// Same never-overwrites-`Done` rule as [`Self::mark_clean_skipped`], and
+    /// idempotent — a store with nothing left to change is not dirtied.
+    /// Whether [`Self::skip_cleanup_on_every_note`] would change anything.
+    /// Exists so the caller can `peek` before it writes: `Signal::write`
+    /// notifies every sticky window even when the value is unchanged, and the
+    /// effect that owns this check re-runs on every config save.
+    pub fn has_cleanup_left_to_skip(&self) -> bool {
+        self.notes
+            .iter()
+            .any(|n| !matches!(n.clean_state, StageState::Done | StageState::Skipped))
+    }
+
+    pub fn skip_cleanup_on_every_note(&mut self) {
+        for note in &mut self.notes {
+            if !matches!(note.clean_state, StageState::Done | StageState::Skipped) {
+                note.clean_state = StageState::Skipped;
+                self.dirty = true;
+            }
+        }
+    }
+
     pub fn mark_analyzed(&mut self, id: &str) {
         self.set_extract_state(id, StageState::Done);
     }
@@ -223,6 +248,60 @@ mod tests {
         let note = store.get(&id).unwrap();
         assert_eq!(note.clean_state, StageState::Skipped);
         assert_eq!(note.extract_state, StageState::Skipped);
+    }
+
+    #[test]
+    fn turning_cleanup_off_clears_the_backlog_it_left_behind() {
+        let mut store = temp_store("skip_all");
+        let failed = store.create("one".into(), NoteColor::Purple, NoteOrigin::Dictated);
+        let pending = store.create("two".into(), NoteColor::Teal, NoteOrigin::Dictated);
+        let done = store.create("three".into(), NoteColor::Rose, NoteOrigin::Dictated);
+        store.mark_clean_failed(&failed);
+        store.apply_cleanup(&done, "three", "Three.");
+        store.mark_extract_failed(&failed);
+        store.flush_if_dirty();
+
+        store.skip_cleanup_on_every_note();
+
+        assert_eq!(store.get(&failed).unwrap().clean_state, StageState::Skipped);
+        assert_eq!(store.get(&pending).unwrap().clean_state, StageState::Skipped);
+        assert_eq!(
+            store.get(&done).unwrap().clean_state,
+            StageState::Done,
+            "turning the pass off must not erase the record that it once ran"
+        );
+        assert_eq!(
+            store.get(&failed).unwrap().extract_state,
+            StageState::Failed,
+            "the stages are independent — disabling cleanup says nothing about extraction"
+        );
+    }
+
+    #[test]
+    fn the_backlog_predicate_agrees_with_what_the_sweep_would_do() {
+        let mut store = temp_store("skip_all_predicate");
+        assert!(!store.has_cleanup_left_to_skip(), "an empty store has no backlog");
+        let id = store.create("one".into(), NoteColor::Purple, NoteOrigin::Dictated);
+        assert!(store.has_cleanup_left_to_skip(), "a fresh note is Pending");
+        store.skip_cleanup_on_every_note();
+        assert!(!store.has_cleanup_left_to_skip());
+        store.mark_clean_failed(&id);
+        assert!(store.has_cleanup_left_to_skip(), "a failure is backlog again");
+    }
+
+    #[test]
+    fn skipping_cleanup_everywhere_twice_only_dirties_once() {
+        let mut store = temp_store("skip_all_idempotent");
+        store.create("one".into(), NoteColor::Purple, NoteOrigin::Dictated);
+        store.skip_cleanup_on_every_note();
+        store.flush_if_dirty();
+
+        store.skip_cleanup_on_every_note();
+
+        assert!(
+            !store.is_dirty(),
+            "this runs on every config read; a no-op pass must not schedule a write"
+        );
     }
 
     #[test]

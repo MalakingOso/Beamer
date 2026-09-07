@@ -58,7 +58,26 @@ pub fn App() -> Element {
     let mut notes = use_signal(NoteStore::load);
     // After the notes, from the same automerge document (the note store owns the handle).
     let tasks = use_signal(|| TaskStore::load_beside(&notes.peek()));
+    // Taken *before* `Config::load()`, which creates the file as a side
+    // effect when it's missing — this is the only point that can still tell
+    // "fresh install" from "upgrade of an existing install". `Ok(false)`
+    // only: an `Err` (can't tell) is treated as "not fresh", the same
+    // conservative call `Config::load()` itself documents for the same stat.
+    let fresh_install = matches!(Config::config_path().try_exists(), Ok(false));
     let config = use_signal(|| Config::load().unwrap_or_default());
+    let download_status = use_signal(crate::model_setup::DownloadStatus::default);
+    // K2-Horizon local extraction only exists for a bundled aarch64 build
+    // (the only arch the fork's llama-server.exe is built for). A fresh
+    // install downloads and starts it itself; an upgrade over an existing
+    // install must not retroactively engage this — that case's file
+    // placement/task update is instead handled entirely by the installer's
+    // hooks.nsh. See agent_docs/local_inference.md.
+    #[cfg(target_arch = "aarch64")]
+    use_hook(move || {
+        if fresh_install {
+            crate::model_setup::spawn_ensure_model_present(download_status);
+        }
+    });
     // `use_hook`, not a plain call: `Signal::write` notifies every subscriber
     // even when the value is unchanged, and this flag is fixed for the process.
     // Must run before anything can delete an attachment (`release_attachment_bytes`
@@ -83,6 +102,19 @@ pub fn App() -> Element {
     // Model passes live here, not in the requesting window: `App()`'s scope
     // outlives every sticky, so closing a note mid-pass cannot cancel it.
     let (note_passes, note_passes_in_flight) = pipeline::use_pipeline(config, notes, tasks, status_log);
+
+    // Cleanup is opt-in and toggled independently of extraction (see
+    // `llm::CleanupConfig::enabled`). With it off, notes carrying a `Failed`
+    // from when it was on would keep reporting it forever: the pipeline only
+    // ever visits a note it is asked about, and nothing asks about a pass that
+    // no longer runs. Idempotent, so one effect covers both startup and the
+    // moment the toggle flips. `peek` before `write` — a `Signal::write`
+    // notifies every sticky window even when nothing changed.
+    use_effect(move || {
+        if !config.read().llm.cleanup.enabled && notes.peek().has_cleanup_left_to_skip() {
+            notes.write().skip_cleanup_on_every_note();
+        }
+    });
 
     let coroutine = use_coroutine(move |rx: UnboundedReceiver<HotkeyEvent>| {
         orchestrator::run(
@@ -272,7 +304,7 @@ pub fn App() -> Element {
                         VocabPage {}
                     },
                     Page::Settings => rsx! {
-                        SettingsPage { config, last_injection, status_log, update_status, notes, tasks, sync_client: sync_client_handle }
+                        SettingsPage { config, last_injection, status_log, update_status, notes, tasks, sync_client: sync_client_handle, download_status }
                     },
                 }
             }

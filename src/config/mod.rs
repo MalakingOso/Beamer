@@ -130,7 +130,7 @@ fn default_language() -> String { "en".into() }
 fn default_backends() -> Vec<String> { crate::injection::default_backend_names() }
 fn default_paste_shortcut() -> String { "auto".into() }
 fn default_note_mode() -> String { "toggle".into() }
-fn default_note_color() -> String { "purple".into() }
+fn default_note_color() -> String { "random".into() }
 fn default_true() -> bool { true }
 
 
@@ -466,7 +466,7 @@ mod note_config_tests {
     fn notes_config_defaults() {
         let cfg = NotesConfig::default();
         assert!(cfg.all_workspaces, "a sticky note should follow you across workspaces");
-        assert_eq!(cfg.default_color, "purple");
+        assert_eq!(cfg.default_color, "random");
     }
 
     #[test]

@@ -91,3 +91,54 @@ the laptop has no GPU capable of running the models, so Windows Beamer talks
 to the Linux desktop's llama-server over Tailscale rather than shipping a
 second inference stack. Since verified running on real Windows hardware
 (x86_64 and Windows ARM) — see `agent_docs/running_on_bearcave.md`.
+
+## Extraction moves off callisto onto bearcave itself (2026-09-04)
+
+The "no GPU capable of running the models" premise above turned out to hold
+for cleanup but not extraction. A sandbox investigation
+(`k2-horizon-test/HANDOFF.md`) found that K2-Horizon-0.9B at Q8_0 (1.15 GB)
+runs acceptably CPU-only, on the same Windows-on-ARM laptop that has no
+llama.cpp GPU backend at all — a 0.9B model doesn't need one. Split
+`LlmConfig::base_url` into per-stage overrides
+(`cleanup_base_url()`/`extract_base_url()`, `src/llm/mod.rs`) so extraction
+could point at a local server while cleanup keeps using callisto over
+Tailscale, and made K2-Horizon-0.9B-Q8_0 the new default extraction model.
+This is a real architecture change, not a config tweak: K2-Horizon requires a
+different llama.cpp fork than either existing server builds from
+(`MBZUAI-IFM/llama.cpp`, branch `model/K2Horizon` — upstream cannot load the
+architecture at all), and bearcave now runs its own standalone `llama-server`
+for the first time, launched by a Windows Scheduled Task rather than a
+systemd unit. See `agent_docs/local_inference.md` and
+`agent_docs/running_on_bearcave.md` for the full detail, including two open
+extraction-quality gaps this did not fix (an occasional third-party-commitment
+misattribution, and relative-date math past "tomorrow") and the model's
+unresolved licence terms.
+
+## Cleanup becomes opt-in, and everything runs on device (2026-09-06)
+
+The previous entry left cleanup on callisto and moved only extraction local.
+That split was invisible until callisto stopped answering, at which point
+every dictated note came back with a red "Cleanup failed" footer while the
+note itself looked perfectly clean — because ElevenLabs already returns
+punctuated, capitalized text, so `raw == body` on a note s1-mini never
+touched, and extraction (local, working) still produced its tasks. The footer
+was telling the truth about a pass the user had no way to turn off on its own:
+`[llm.cleanup] enabled` existed in the config but the settings card exposed
+only one combined switch for both stages. Worse, the failures could not clear
+themselves — `succeeded_from` requires *no* errored stage, so a cleanup error
+against an unreachable host suppressed the backlog sweep that a successful
+local extraction had otherwise earned.
+
+So: `CleanupConfig::enabled` now defaults to `false` and gets its own toggle on
+the Local AI card, independent of the master `[llm] enabled`. This is the
+honest default rather than a workaround — `model_setup` installs K2-Horizon and
+nothing else, so on a fresh install cleanup was *always* going to ask a server
+for a model it had never been told to serve. Extraction is the pass that earns
+its place on a sticky. To keep the change from leaving a graveyard behind,
+`App()` runs `NoteStore::skip_cleanup_on_every_note` while cleanup is off,
+downgrading leftover `Failed`/`Pending` cleanup stages to `Skipped`; the
+pipeline only visits notes it is asked about, so without that the old failures
+would sit on disk and re-flash on every window open. Per-stage `base_url`
+support and the whole cleanup path are kept intact — bringing S1-mini back
+needs a local s1-mini preset (or a reachable GPU host), not new code. See
+`todo.md`.

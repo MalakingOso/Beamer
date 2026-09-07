@@ -28,10 +28,14 @@ pub fn init_http_client(connect_timeout: Duration) {
     });
 }
 
-/// Shared client: one connection pool for the process, reused by `chat.rs`.
+/// Shared client: one connection pool for the process, reused by `chat.rs`
+/// and (`pub(crate)`, not `pub(super)`) `model_setup`'s one-time model
+/// download — that module lives outside `src/llm/` (it needs
+/// `crate::config::Config`, which `src/llm/**` may not reference) but still
+/// wants the same one-client-per-process pool rather than opening a second.
 /// Falls back to a default client if [`init_http_client`] never ran (tests and
 /// `task_eval` only; the app always calls it at startup).
-pub(super) fn http_client() -> &'static reqwest::Client {
+pub(crate) fn http_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(reqwest::Client::new)
 }
 

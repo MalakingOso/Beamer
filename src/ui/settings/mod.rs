@@ -36,6 +36,10 @@ pub struct SettingsPageProps {
     pub notes: Signal<NoteStore>,
     pub tasks: Signal<TaskStore>,
     pub sync_client: SyncClientHandle,
+    /// K2-Horizon's first-run download/setup state. `Idle` on every platform
+    /// but a bundled aarch64 build with a fresh install — see `App()` and
+    /// `crate::model_setup`.
+    pub download_status: Signal<crate::model_setup::DownloadStatus>,
 }
 
 /// Apply a mutation to the config signal, then synchronously persist it.
@@ -124,6 +128,7 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                 base_url: config.read().llm.base_url.clone(),
                 request_timeout_ms: config.read().llm.request_timeout_ms,
                 connect_timeout_ms: config.read().llm.connect_timeout_ms,
+                cleanup_enabled: config.read().llm.cleanup.enabled,
                 cleanup_model: config.read().llm.cleanup.model.clone(),
                 extract_model: config.read().llm.extract.model.clone(),
                 on_enabled_change: move |v: bool| {
@@ -135,12 +140,16 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                 on_connect_timeout_ms_change: move |ms: u64| {
                     save_config(config, |c| c.llm.connect_timeout_ms = ms);
                 },
+                on_cleanup_enabled_change: move |v: bool| {
+                    save_config(config, |c| c.llm.cleanup.enabled = v);
+                },
                 on_cleanup_model_change: move |m: String| {
                     save_config(config, |c| c.llm.cleanup.model = m);
                 },
                 on_extract_model_change: move |m: String| {
                     save_config(config, |c| c.llm.extract.model = m);
                 },
+                download_status: props.download_status,
             }
 
             SyncCard {

@@ -5,6 +5,21 @@ rewrites the transcript, **extraction** proposes tasks. This document is about
 how they are wired and, mostly, about the ways they fail *without saying so* —
 which is nearly all of them.
 
+⚠️ **Cleanup is off by default and toggled on its own** (`[llm.cleanup]
+enabled`, its own switch on the Local AI settings card). Only extraction ships
+working: `model_setup` installs K2-Horizon and nothing else, so a default-on
+cleanup pass asks a server for s1-mini that was never told to serve it, fails,
+and puts "Cleanup failed" on the note footer for a pass nobody asked for. The
+two stages were already independent in the store (`clean_state` /
+`extract_state` are separate fields, and a failed cleanup still runs
+extraction); this makes them independent in the config and the UI too. While
+cleanup is off, `App()` runs `NoteStore::skip_cleanup_on_every_note`, which
+downgrades any leftover `Failed`/`Pending` cleanup stage to `Skipped` — without
+it a failure recorded while cleanup was on stays on disk forever, because the
+pipeline only ever visits a note it is asked about and the backlog sweep only
+fires after a *fully* successful pass. Everything below describes cleanup as it
+behaves when it is turned back on.
+
 Read `agent_docs/sticky_notes.md` first for the note windows themselves.
 
 ## The shape of it
@@ -16,7 +31,7 @@ dictation ──> sink::do_note_capture ──> flush to disk ──> pipeline r
                                     │
                     ┌───────────────┴───────────────┐
               llm::cleanup                     llm::extract
-              (s1-mini, plain text)            (gemma, json_object)
+              (s1-mini, plain text)            (K2-Horizon, json_object)
                     │                                │
               apply_cleanup (CAS)            replace_suggestions
                     │                                │
@@ -36,8 +51,15 @@ dictation ──> sink::do_note_capture ──> flush to disk ──> pipeline r
 | `notes/lifecycle.rs` | The only code allowed to write a stage result to a note. |
 | `bin/task_eval.rs` | Measures extraction against the user's own accepted/dismissed rows. |
 
-**Beamer never spawns the server.** It runs standalone (`deploy/llama-beamer.service`)
-and Beamer's entire connection surface is `base_url`. See `agent_docs/config_schema.md`.
+**Beamer never spawns the server.** It runs standalone and Beamer's entire
+connection surface is a per-stage `base_url` (`LlmConfig::cleanup_base_url()` /
+`extract_base_url()`, each falling back to the shared `[llm] base_url` when
+unset — see `agent_docs/config_schema.md`). The two stages can point at
+different servers: on bearcave, cleanup stays on callisto over Tailscale
+(`deploy/llama-beamer.service`) while extraction runs locally, CPU-only,
+against `deploy/llama-models-bearcave.ini` — see
+`agent_docs/running_on_bearcave.md`. Elsewhere the two still default to the
+same box (`deploy/llama-beamer.service`) exactly as before this split.
 
 `llama-server` has no authentication of its own, so it stays bound to
 `127.0.0.1:8080` even when a client on another machine needs to reach it.
@@ -72,32 +94,67 @@ applies inside them.**
 
 Every item here returns HTTP 200 with a plausible body.
 
-### 1. Thinking is on unless the preset turns it off
+### 1. Thinking is on unless the preset turns it off — and K2-Horizon has no off
 
-Both models reason by default and neither was trained to.
+Both models reason by default and neither was trained to skip it entirely.
 
 - **S1-mini** inherits Qwen3's template. With thinking on it emits `<think>`
   and stops after about three tokens. Do **not** substitute `reasoning-budget 0`
   — the model card says output degrades. It also needs greedy decoding forced,
   because the GGUF carries `temp 0.6 / top_p 0.95 / top_k 20` inherited from
-  Qwen3-0.6B.
-- **Gemma 4** fills `reasoning_content` and leaves `content` empty, or fills
-  both and simply costs more.
+  Qwen3-0.6B. Its switch is `chat_template_kwargs.enable_thinking: false`, and
+  it works: the template reads that flag.
+- **K2-Horizon-0.9B** does not. Its chat template reads
+  `chat_template_kwargs.reasoning_effort` directly and opens the assistant turn
+  with one of three tags — `high` (default) → `<ifm|think>`, `medium` →
+  `<ifm|think_fast>`, `low` → `<ifm|think_faster>` — unconditionally. There is
+  no fourth branch for "off": `enable_thinking: false` (the generic llama.cpp
+  kill switch, and what S1-mini uses) is a **silent no-op** here, since the
+  template never reads that name at all. `low` is what
+  `deploy/llama-models-bearcave.ini` sets — the fastest of the three, not a
+  disabled state.
+- **Gemma 4** (pre-K2-Horizon default) filled `reasoning_content` and left
+  `content` empty, or filled both and simply cost more.
 
-Both switches live **server-side** in `deploy/llama-models.ini`, and Beamer
-sends no sampling or template parameters of its own — see below. That makes the
-preset the single owner, and a gap in it a gap everywhere.
+Both switches live **server-side** in the models preset
+(`deploy/llama-models.ini` on callisto, `deploy/llama-models-bearcave.ini` on
+bearcave), and Beamer sends no sampling or template parameters of its own —
+see below. That makes the preset the single owner, and a gap in it a gap
+everywhere.
 
-> **This was a live bug until 2026-08-22.** Only s1-mini had the setting;
-> Gemma had been reasoning on every request since the preset was written.
-> Nothing showed it — the status is 200, the JSON is valid, and the extracted
-> tasks are byte-identical either way. Measured, same prompt and note:
-> **306 predicted tokens / 4069 ms with thinking on, 64 tokens / 842 ms with it
-> off.** Only the clock differs, which is why it survived so long.
+> **The Gemma version of this was a live bug until 2026-08-22.** Only s1-mini
+> had the setting; Gemma had been reasoning on every request since the preset
+> was written. Nothing showed it — the status is 200, the JSON is valid, and
+> the extracted tasks are byte-identical either way. Measured, same prompt and
+> note: **306 predicted tokens / 4069 ms with thinking on, 64 tokens / 842 ms
+> with it off.** Only the clock differs, which is why it survived so long.
 
 `ChatError::ThinkingEnabled` exists for exactly this: empty `content` beside
 non-empty `reasoning_content`. Without it the symptom arrives as an inscrutable
 parse error, or — worse for cleanup — as "the model cleaned it to nothing".
+It does **not** fire for K2-Horizon at any effort level: at `high` both
+`content` and `reasoning_content` fill (so `content` is never empty); at
+`medium`/`low`, `reasoning_content` is simply absent from the response, so
+`reasoning` reads empty too and the check never trips either way — see the
+next item.
+
+### 1a. K2-Horizon's `reasoning_content` split only works at `high`
+
+At `reasoning_effort: high`, llama-server's OAI-compatible response correctly
+separates `reasoning_content` from `content`. At `medium`/`low`, it does not:
+the reasoning trace, its closing tag, and the JSON answer all land
+concatenated in `content`, e.g. `...Return JSON with tasks
+array.\n</ifm|think_fast>\n{"tasks": [...]}\n`. The fork's fork-specific
+chat-format parser (grep `common/chat.cpp` for `ifm`: zero matches) doesn't
+generalize the `high`-tag split to the `_fast`/`_faster` variants.
+
+`extract::strip_think_tags` (`src/llm/extract.rs`) fixes this client-side
+rather than in the fork: it finds the **last** `</...think...>`-shaped closing
+tag in the response body and takes everything after it, generically (any
+`think`-containing closing tag, case-insensitive — also covers `<think>` for
+free on a DeepSeek/Qwen-style server), and is wired into `parse_tasks` before
+`strip_fences`. A tagless body passes through unchanged, so this costs nothing
+against a server that never leaks the trace.
 
 ### 2. The request body carries the model and the messages and nothing else
 
@@ -242,25 +299,48 @@ nobody is ever shown is not a labelled example, and letting it reach
 ## The prompt
 
 `extract_system(today)` is tunable — unlike `CLEANUP_SYSTEM` — but its *shape*
-is not.
-It enumerates seven negative categories with examples, states that most notes
-contain no tasks and that empty is the correct and common answer, and carries
-**two hard-negative exemplars**. Positive-only exemplars teach a model that
-output is always expected, which is the same over-triggering failure the
-categories exist to suppress. Aspirations are excluded deliberately: they are
-the largest ambiguous class.
+is not. Its current shape (`EXTRACT_BODY` in `src/llm/prompts.rs`) asks for a
+`scan` array before `tasks`: one entry per clause in the note that names any
+action, by anyone, each carrying `subject_is_speaker` (true only for the
+note's own author) and `category` (one of eight, including `fact` — which
+explicitly covers a recurring or ongoing problem, not just a one-off
+statement). A clause only becomes a `tasks` entry when its own scan row says
+`subject_is_speaker: true` **and** `category: "task"`. `TaskEnvelope` ignores
+the extra `scan` field on deserialize, so nothing downstream needed to change
+to carry it.
 
-Spot-checked against the live model on 2026-08-22 (E4B, thinking off):
+This shape exists because two failure modes did not respond to stronger
+wording alone: a small model asked "is this concrete and dated" would say yes
+to another person's dated promise, and telling it explicitly not to (an
+earlier prompt version, tried and measured, not shipped) had no effect. Making
+the subject check a separate, named field the model must fill in before
+judging catches both a misattributed third-party commitment and a
+recurring-problem statement dressed up as a commitment ("the server keeps
+crashing" vs. "the server crashed once, I'll look into it").
 
-| Probe | Result |
-|---|---|
-| One commitment beside two planted negatives | exactly one task |
-| Pure venting | `{"tasks": []}` |
-| Past actions plus a fact | `{"tasks": []}` |
-| Aspirations phrased like commitments | `{"tasks": []}` |
-| Three real commitments | all three, all grounded |
+Verbatim `evidence`/`due_phrase` (rejected downstream if not grounded — see
+below), strict-or-null dates. Aspirations excluded deliberately: a poisoned
+list cannot be un-poisoned.
 
-n=5 is a spot-check, not an evaluation. That is what `task_eval` is for.
+Swept all 6 hand-written regression notes and most of a broader 14-note
+edge-case set, against `K2-Horizon-0.9B-Q8_0` at `reasoning_effort: low`. Two
+known open gaps, both still present after the `scan` structure landed:
+
+1. **The model's own `scan` sometimes disagrees with its `tasks` output.** A
+   clause scanned `subject_is_speaker: false, category: "someone_else"` still
+   occasionally appears in `tasks` anyway — the judgment is right, the model
+   just doesn't enforce it when assembling the final array. Not caught by any
+   parse-time gate, because the clause text is a real, grounded span; this is
+   a compliance gap, not a fabrication.
+2. **Relative-date math beyond "tomorrow" is unreliable.** "Next Tuesday",
+   "next weekend", "the 1st" sometimes resolve to the wrong day — including,
+   at least once, a day in the *past* that still passes `resolve_date`'s
+   one-day-of-slack gate because it happens to land within it. The gate
+   catches an egregiously wrong date; it does not catch "right direction,
+   wrong magnitude".
+
+n=20 hand-checked notes is still a spot-check, not an evaluation. That is what
+`task_eval` is for — see "Measuring it" below.
 
 ## Dated tasks
 
@@ -463,25 +543,30 @@ Errors surface through `StatusLog` as well as `RUST_LOG`.
 
 ## Models on disk
 
-Both are official **QAT / publisher** builds, downloaded to `~/models/beamer/`.
-Neither `mmproj` (vision) file is needed — Beamer's use is text-only.
+`s1-mini` is an official **QAT / publisher** build. `K2-Horizon-0.9B` is a
+third-party GGUF quant (`NANI-Nithin/K2-Horizon-0.9B-GGUF`, Q8_0) of IFM's
+BF16 release — llama.cpp upstream cannot even load it (see "The standalone
+server's own build" below), so there is no publisher GGUF to prefer. Neither
+`mmproj` (vision) file is needed — Beamer's use is text-only.
 
-| File | Size | Role |
-|---|---|---|
-| `s1-mini-q4_k_m.gguf` | 462 MiB | Stage 1 cleanup. 94.8% token accuracy on 7,519 held-out cases, measured on **this** quant — do not substitute f16. |
-| `gemma-4-E4B_q4_0-it.gguf` | 4.80 GiB | Stage 2 extraction. Ladder rung 1. |
+| File | Size | Role | Where it lives |
+|---|---|---|---|
+| `s1-mini-q4_k_m.gguf` | 462 MiB | Stage 1 cleanup. 94.8% token accuracy on 7,519 held-out cases, measured on **this** quant — do not substitute f16. | callisto |
+| `K2-Horizon-0.9B-Q8_0.gguf` | 1.15 GiB | Stage 2 extraction. | bearcave (`%USERPROFILE%\models\beamer\`) |
 
 Licences are in `licenses/`; required attribution is in `README.md` (see
-"Licence obligation" below).
+"Licence obligation" below). K2-Horizon's licence terms are **unresolved as of
+this writing** — see the provenance note in `licenses/K2-Horizon-LICENSE.txt`.
 
-**Model ladder** — the extraction model is chosen by *measurement against a
-corpus of real notes*, not assertion. Promote only if precision is inadequate;
-all are Google QAT + Apache-2.0, so promotion is a config change and a download:
+**Gemma 4 (the previous extraction model) is retired from bearcave's default,
+but still what callisto-hosted Beamer instances should use**, since upstream
+llama.cpp — which callisto's `deploy/llama-beamer.service` builds — has no
+`K2HorizonForCausalLM` support at all. Its old model ladder:
 
 | Rung | Model | Disk | Note |
 |---|---|---|---|
-| 0 | `google/gemma-4-E2B-it-qat-q4_0-gguf` | 3.12 GiB | Smaller/faster than the default; downgrade option if latency binds |
-| 1 (default) | `google/gemma-4-E4B-it-qat-q4_0-gguf` | 4.80 GiB | |
+| 0 | `google/gemma-4-E2B-it-qat-q4_0-gguf` | 3.12 GiB | Smaller/faster; downgrade option if latency binds |
+| 1 | `google/gemma-4-E4B-it-qat-q4_0-gguf` | 4.80 GiB | Former default |
 | 2 | `unsloth/gemma-4-12B-it-qat-GGUF` (UD-Q4_K_XL) | 6.72 GB | |
 | 3 | `google/gemma-4-26B-A4B-it-qat-q4_0-gguf` | 13.45 GiB | **The slowest measured**, 43.6 t/s — see below |
 
@@ -493,7 +578,67 @@ and gather overhead dominate here. On this hardware the ladder is monotonic in
 size — **smaller is faster** — so rung 3 is a *quality* option only, never a
 speed play.
 
+K2-Horizon has no equivalent ladder yet: only the 0.9B size exists in the
+K2-Horizon family as of this writing, and the choice actually exercised was
+across **quant and reasoning effort**, not size — see "Rejected on
+measurement" below.
+
 ## The standalone server's own build
+
+### bearcave's extraction server — a different fork, a different build
+
+K2-Horizon's architecture (`K2HorizonForCausalLM`) is not in upstream
+llama.cpp at all — the model fails to load, full stop. Bearcave's extraction
+server is therefore built from **`MBZUAI-IFM/llama.cpp`, branch
+`model/K2Horizon`**, not the upstream tree callisto's cleanup server uses.
+That fork also needed a tokenizer patch: K2-Horizon's pretokenizer regex
+carries a `\uXXXX` escape that MSVC's `std::regex`/`std::wregex` cannot parse,
+so `unicode_regex_split_custom_k2_horizon()` was added to `src/unicode.cpp`
+(copied from `unicode_regex_split_custom_llama3`'s shape, extended for
+`\p{M}` combining marks and literal ZWJ/ZWNJ codepoints).
+
+Registered as the Scheduled Task **"Beamer K2-Horizon Server"** (runs at
+logon), not a systemd unit — bearcave is Windows. See
+`agent_docs/running_on_bearcave.md` for the full setup and
+`deploy/llama-models-bearcave.ini` for the preset. Runtime is 9 files (the
+exe, its 4 direct DLL deps, 3 `ggml*.dll`, and `libomp140.aarch64.dll` — the
+release OpenMP runtime; only the debug variant ships in `System32`, so it
+must be copied in beside the exe or the server fails to start with no error
+text), not the full ~736 MB dev checkout. CPU-only by design: bearcave has no
+GPU, which is the entire point of choosing a 0.9B model here.
+
+#### Getting the runtime + model onto a fresh install
+
+A locally-built NSIS installer (`installer/k2horizon/hooks.nsh`) now does
+this automatically for a bundled aarch64 build — see
+`agent_docs/running_on_bearcave.md`'s "Local extraction" section for the
+full walkthrough. Three things worth knowing if touching this code:
+
+- **The runtime and the model live at a fixed per-user path**
+  (`%LOCALAPPDATA%\Beamer\llama-k2horizon\`,
+  `%USERPROFILE%\models\beamer\...`), independent of whether Beamer itself
+  was installed per-user or per-machine. Beamer runs `asInvoker` and a
+  per-machine install puts the app under `Program Files`, which an
+  unelevated process can't write into later — so neither the runtime nor the
+  (much larger, downloaded-not-bundled) model can live inside the app's own
+  install directory.
+- **`src/model_setup.rs` starting the Scheduled Task is the one narrow,
+  deliberate exception to "Beamer never touches server lifecycle."** It
+  shells out to `schtasks /run` exactly once, after downloading and
+  sha256-verifying the model, to start a task the installer registered
+  *dormant*. It never spawns `llama-server.exe` directly, and nothing else
+  in the app ever calls into Task Scheduler.
+- **`[bundle].resources` does not work for bundling arbitrary files into an
+  NSIS payload in this `dioxus-cli` version** — tried first, disproven
+  empirically (nothing referencing a `resources` glob entry ever appeared in
+  the generated `.nsi` or its staging directory; only manganis `asset!()`
+  output does). `hooks.nsh` instead embeds the runtime files directly via
+  NSIS's own `File /nonfatal "<path>\*.*"`, which also downgrades a
+  zero-match glob (the CI scenario — `vendor/llama-k2horizon/` is gitignored
+  and never populated there) from a compile error to a harmless warning,
+  verified both ways.
+
+### callisto's cleanup server
 
 The server is `deploy/llama-beamer.service` on callisto, not spawned by
 Beamer. Backend is **SYCL, not Vulkan** — measured **2.35x** Vulkan at prompt
@@ -526,8 +671,23 @@ not a config that still needs doing.
 
 ```bash
 cargo run --bin task_eval -- --limit 20
-cargo run --bin task_eval -- --model gemma-4-E2B_q4_0-it   # walk the ladder
+cargo run --bin task_eval -- --model K2-Horizon-0.9B-Q8_0 --base-url http://127.0.0.1:8080
 ```
+
+Run against bearcave's real corpus (2026-09-04, 11 of 33 notes carried
+decided rows; the rest were skipped for want of labels): **62.5% precision (5
+TP / 8 judged), 50.0% recall (5 TP / 10 accepted rows), 0 errors, mean 7.98
+s/note.** Several of the "missed" rows were near-misses on trailing
+punctuation in `evidence` rather than a genuinely absent task — `match_row`
+matches text and evidence by normalized equality, and normalization collapses
+whitespace and case but not punctuation, so a proposal missing a note's
+trailing period does not match a decided row that has one. Worth relabeling
+those specific notes in the app before trusting the recall number as final;
+this is a matcher-strictness effect, not necessarily a K2-Horizon-specific
+one. Read the FP/FN rows the tool prints before drawing a conclusion — several
+of the FPs on this run look like reasonable extractions the user dismissed
+for reasons outside the note's text (already handled, or a throwaway test
+note), not model misjudgment.
 
 The corpus is the user's own notes plus their accept/dismiss decisions; a note
 with no decided rows carries no labels and is skipped rather than guessed at.
@@ -539,30 +699,54 @@ lie in the direction that looks like rigour.
 
 ## Measured, so stop estimating
 
-Arc Pro B60 via SYCL, `-dev SYCL1`, thinking off, 2026-08-22 unless noted.
+Callisto figures: Arc Pro B60 via SYCL, `-dev SYCL1`, thinking off, 2026-08-22
+unless noted. Bearcave figures: Snapdragon X (aarch64), CPU-only, no GPU
+backend, `reasoning_effort: low` unless noted.
 
 | Thing | Measured |
 |---|---|
-| S1-mini cleans a filler-heavy ~25-word note | **109 ms** |
-| S1-mini cleans a ~60-word note | 225 ms |
-| Gemma E4B extraction, thinking **off** | **0.13–3.0 s**, typically ~1.1 s |
-| Gemma E4B extraction, thinking **on** | 4.1 s for identical output |
-| Wake extraction model from sleep | 1.68 s |
-| Cold start (spawn + 4.8 GB load) | 4.06 s |
-| Resident VRAM, both models | ~4.3 GB of 22.7 GB |
+| S1-mini cleans a filler-heavy ~25-word note (callisto) | **109 ms** |
+| S1-mini cleans a ~60-word note (callisto) | 225 ms |
+| Gemma E4B extraction, thinking **off** (callisto) | **0.13–3.0 s**, typically ~1.1 s |
+| Gemma E4B extraction, thinking **on** (callisto) | 4.1 s for identical output |
+| Wake Gemma from sleep (callisto) | 1.68 s |
+| Gemma cold start, spawn + 4.8 GB load (callisto) | 4.06 s |
+| Resident VRAM, both callisto models | ~4.3 GB of 22.7 GB |
+| K2-Horizon-0.9B-Q8_0 extraction, `low`, 14-note batch (bearcave) | 1.3–12.4 s/note |
+| K2-Horizon-0.9B-Q8_0 extraction, `low`, real-corpus `task_eval` run (bearcave) | mean 7.98 s/note, 0 timeouts against a 60 s budget |
+| K2-Horizon-0.9B-Q8_0 extraction, `medium` (bearcave) | ~2–85 s/note, 100–1430 tokens |
+| K2-Horizon-0.9B-Q8_0 extraction, `high` (bearcave) | 5–95 s/note typical; **hung past 120 s on one note** in testing |
+| K2-Horizon-0.9B-Q8_0 resident RAM (bearcave) | ~1.15 GB — no reason to sleep it |
 
-The model ladder is **monotonic in size on this hardware: smaller is faster.**
-Rung 3 (`gemma-4-26B-A4B`) is the slowest measured, not the fastest — the
+The Gemma ladder was **monotonic in size on the B60: smaller is faster.**
+Rung 3 (`gemma-4-26B-A4B`) was the slowest measured, not the fastest — the
 bytes-read-per-token argument assumes bandwidth-bound decoding and expert
-routing dominates here. It is a *quality* option only.
+routing dominates there. It was a *quality* option only. K2-Horizon has not
+been measured against a size ladder (see "Models on disk" above);
+the axis that mattered for it was quant and reasoning effort instead (below).
 
 ## Rejected on measurement — do not re-propose without new evidence
 
-- **n-gram speculative decoding** (`--spec-default`). The apparent 5x was an
-  artifact of re-running identical text against cached output. On unseen notes
-  it does not engage; tuned shorter it accepts ~30% and nets a wash.
-- **Ollama.** No Intel Arc support in the standard release; Intel's path is the
-  retired IPEX-LLM fork.
+- **n-gram speculative decoding** (`--spec-default`, callisto/Gemma). The
+  apparent 5x was an artifact of re-running identical text against cached
+  output. On unseen notes it does not engage; tuned shorter it accepts ~30%
+  and nets a wash.
+- **Ollama.** No Intel Arc support in the standard release; Intel's path is
+  the retired IPEX-LLM fork.
+- **K2-Horizon at `reasoning_effort: medium` or `high`, despite each fixing a
+  real gap `low` has.** `medium`/`high` correctly classify a recurring-problem
+  note that `low` hallucinates a task from — genuine, reproduced information.
+  But neither is a strict upgrade: `medium` then drops a different, correctly-
+  extracted task elsewhere; `high` hung past 120 s (retried at 240 s, still no
+  response) on one note in a 6-note test set. An extraction pass meant to run
+  automatically after every dictated note cannot carry an unbounded tail, so
+  `low` ships despite its own known miss.
+- **K2-Horizon-0.9B-Q6_K, to recover `medium`/`high`'s fix at less cost than
+  Q8_0.** Genuinely 30–50% faster than Q8_0 at matched effort and does carry
+  the same fix. But across the same test matrix it also produced two failures
+  Q8_0 never did: a non-terminating repetition loop on one note, and a
+  complete miss (zero tasks) on another — a different, worse class of problem
+  than a wrong judgment call. Q8_0 remains the quant used.
 
 ## Licence obligation
 
@@ -571,3 +755,14 @@ Apache 2.0 **plus a binding additional term** requiring the model to be
 identified as `"S1-mini" by "Superwhisper"` — that exact capitalization. It is
 pinned by an exact-equality test whose comment explains that the risk is not
 malice but tidiness.
+
+⚠️ **K2-Horizon-0.9B's licence terms are unresolved, not confirmed-permissive.**
+`IFM/K2-Horizon-0.9B`'s own metadata pairs an `apache-2.0` SPDX tag with
+`license_name: internal-only` and a `license_link` pointing at a `LICENSE`
+file that does not exist in the repository (checked 2026-09-04). That
+combination is the same shape S1-mini uses to signal an actual additional
+term, not a plain-Apache repo. The GGUF quant used here
+(`NANI-Nithin/K2-Horizon-0.9B-GGUF`) just defers back to the same missing
+file. `licenses/K2-Horizon-LICENSE.txt` carries the canonical Apache 2.0 text
+as the best available floor and a full provenance note — re-check the source
+repository for a published `LICENSE` file before treating this as settled.

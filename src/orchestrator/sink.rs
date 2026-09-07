@@ -36,7 +36,7 @@ pub(super) async fn do_note_capture(
     text: &str,
     notes: &mut Signal<NoteStore>,
     tasks: &mut Signal<TaskStore>,
-    _config: &Signal<Config>,
+    config: &Signal<Config>,
     status_log: &mut Signal<StatusLog>,
     note_passes: Coroutine<PipelineRequest>,
 ) -> Option<String> {
@@ -45,9 +45,12 @@ pub(super) async fn do_note_capture(
         return None;
     }
 
+    // The configured default color, honoring "random" (the default) and any
+    // explicit color; a bad value falls back to purple in `from_config_name`.
+    let color = NoteColor::from_config_name(&config.peek().notes.default_color);
     let id = notes
         .write()
-        .create(text.to_string(), NoteColor::random(), NoteOrigin::Dictated);
+        .create(text.to_string(), color, NoteOrigin::Dictated);
     crate::notes::flush_stores(&mut notes.write(), &mut tasks.write());
 
     log_status(

@@ -151,15 +151,12 @@ async fn run_request(
     let swept = request.swept;
 
     // One snapshot up front. `peek`, not `read`: no reactive scope here.
-    // Both stages share the single `[llm] base_url`: per-stage overrides
-    // live outside this commit, so bind both from the shared value rather
-    // than the stage methods (which do not exist at this commit).
     let (enabled, cleanup_base_url, extract_base_url, timeout, cleanup_cfg, extract_cfg) = {
         let cfg = config.peek();
         (
             cfg.llm.enabled,
-            cfg.llm.base_url.clone(),
-            cfg.llm.base_url.clone(),
+            cfg.llm.cleanup_base_url().to_string(),
+            cfg.llm.extract_base_url().to_string(),
             Duration::from_millis(cfg.llm.request_timeout_ms),
             cfg.llm.cleanup.clone(),
             cfg.llm.extract.clone(),

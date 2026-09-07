@@ -13,17 +13,26 @@ Windows changes, not an open question.
 ## What runs where
 
 callisto is the always-on Linux desktop with the Arc Pro B60. It holds the
-models and, if you turn sync on, the sync server. bearcave runs Beamer and
-nothing else.
+cleanup model and, if you turn sync on, the sync server. bearcave runs the
+app **and now its own extraction model** — see "Local extraction" below.
 
 | Piece | Machine | Why |
 |---|---|---|
 | `beamer.exe` | bearcave | the app |
-| llama-server | callisto | the B60 is there, and models are 4.3 GB resident |
+| llama-server, cleanup (S1-mini) | callisto | the B60 is there |
+| llama-server, extraction (K2-Horizon-0.9B) | bearcave | 1.15 GB, CPU-only, no GPU needed — see below |
 | `sync_server` | callisto | one server, every client connects to it |
 
 You never run `sync_server` on bearcave. Two servers means two authoritative
 documents, which is the one topology the sync design tells you to avoid.
+
+This is a change from earlier: bearcave used to have no local inference at
+all and both stages ran on callisto over Tailscale. Extraction moved local
+because K2-Horizon-0.9B (Q8_0, 1.15 GB) runs acceptably on CPU — the laptop's
+Adreno GPU has no llama.cpp backend, but at this size that stopped mattering.
+Cleanup (S1-mini) stays on callisto: it was never the bottleneck, and moving
+it would mean building and running *two* local servers instead of one. See
+`agent_docs/local_inference.md` and `docs/decisions.md` for the full story.
 
 ## Install
 
@@ -50,27 +59,122 @@ Windows 11 it is already there and nothing happens.
 
 Config lives at `%APPDATA%\Beamer\config.toml`, created on first launch.
 
-### Point it at callisto's models
+### Point cleanup at callisto, extraction at bearcave itself
 
 ```toml
 [llm]
-base_url = "https://callisto.taila63f23.ts.net"
+base_url = "https://callisto.taila63f23.ts.net"   # cleanup's server (the shared fallback)
+
+[llm.extract]
+model = "K2-Horizon-0.9B-Q8_0"
+base_url = "http://127.0.0.1:8080"                # extraction's own, local, server
 ```
 
-That is Tailscale Serve in front of a loopback llama-server. `reqwest` is built
-with `native-tls`, so the certificate validates against the Windows trust store
-with no extra work.
+The shared `[llm] base_url` is what cleanup uses (it has no override of its
+own here), and Tailscale Serve fronts callisto's loopback llama-server exactly
+as before — `reqwest` is built with `native-tls`, so the certificate validates
+against the Windows trust store with no extra work. `[llm.extract].base_url`
+overrides just that one stage to bearcave's own local server. See
+`agent_docs/config_schema.md` for the full per-stage override shape.
 
-Check it from bearcave before launching Beamer, because a failure here is a
-tailnet problem and not an app problem:
+Check callisto from bearcave before launching Beamer, because a failure here
+is a tailnet problem and not an app problem:
 
 ```powershell
 curl.exe -s https://callisto.taila63f23.ts.net/v1/models
 ```
 
-A JSON list naming both models is the gate. If that fails, make sure callisto is
+A JSON list naming S1-mini is the gate. If that fails, make sure callisto is
 awake, `systemctl --user is-active llama-beamer` says active, and
 `tailscale status` on bearcave shows callisto.
+
+### Local extraction — bearcave's own llama-server
+
+Unlike cleanup, extraction needs nothing from callisto or the tailnet at all.
+K2-Horizon-0.9B-Q8_0 (1.15 GB) runs CPU-only on bearcave itself, via a
+different llama.cpp build than callisto's: upstream llama.cpp cannot load
+K2-Horizon (no `K2HorizonForCausalLM` support), so this is built from
+`MBZUAI-IFM/llama.cpp`, branch `model/K2Horizon`. See
+`agent_docs/local_inference.md`'s "bearcave's extraction server" section for
+why, and for the tokenizer patch that build needed.
+
+**An NSIS installer built locally on this machine (`dx bundle --release
+--package-types nsis`) now does this automatically**, on a fresh install
+(no pre-existing `config.toml`) of a bundled aarch64 build:
+
+1. `installer/k2horizon/hooks.nsh` (NSIS, `!include`d via
+   `[bundle.windows.nsis].installer_hooks` in `Dioxus.toml`) embeds the 9
+   runtime files plus `deploy/llama-models-bearcave.ini` and the two portable
+   launcher scripts (`installer/k2horizon/start-llama-k2horizon.cmd`,
+   `...-hidden.vbs`) directly into the installer — sourced from
+   `vendor/llama-k2horizon/` on the build machine (gitignored; populate it by
+   hand before running `dx bundle`, copying from wherever you built or
+   staged the fork's `llama-server.exe` + DLLs) — and places them at
+   `%LOCALAPPDATA%\Beamer\llama-k2horizon\` at install time. This is a fixed
+   per-user path independent of whether the install itself was per-user or
+   per-machine (`install_mode = "Both"`): Beamer runs `asInvoker` and can't
+   write into `Program Files` later, so the runtime and the model
+   (`%USERPROFILE%\models\beamer\K2-Horizon-0.9B-Q8_0.gguf`, same as before)
+   both live outside the app's own install directory on purpose.
+2. The same install step registers the Scheduled Task, **dormant** (no
+   `/run`) — starting it before the model file exists leaves the router
+   stuck reporting `"loading"` forever with no error, confirmed empirically,
+   so it must never fire before the model is actually present.
+3. `src/model_setup.rs` downloads the model itself on first launch (sha256-
+   verified against Hugging Face's published hash, restart-from-scratch on
+   failure, retried automatically on the next launch), then triggers the
+   dormant task (`schtasks /run`) once verified — the Local AI settings card
+   shows progress and a Cancel control while this runs. This is the one
+   narrow, deliberate exception to "Beamer never touches server lifecycle":
+   it starts a pre-installed task exactly once, after a download it
+   initiated, never `llama-server.exe` directly.
+4. Re-running the installer over an already-set-up machine is safe: the
+   install step stops any running `llama-server.exe` first, `schtasks
+   /create ... /F` overwrites the existing task definition rather than
+   duplicating it, and `model_setup` treats a model file already present at
+   the target path as something to **verify** (size + sha256), not skip
+   blindly or redownload unconditionally.
+5. Uninstalling removes all of it: the task, the runtime directory, and the
+   model file (not the whole `models\beamer\` directory — Gemma/S1-mini
+   GGUFs may also live there).
+
+The manual procedure below is now the fallback — for a from-scratch fork
+build, or a non-installer setup:
+
+1. Runtime files (9: the exe, its 4 DLL deps, 3 `ggml*.dll`,
+   `libomp140.aarch64.dll`) in `C:\Users\<you>\Programming\llama.cpp-k2horizon\`.
+2. The GGUF in `%USERPROFILE%\models\beamer\K2-Horizon-0.9B-Q8_0.gguf`.
+3. `deploy/llama-models-bearcave.ini` (checked into the repo) as the
+   `--models-preset`.
+4. A Scheduled Task, **"Beamer K2-Horizon Server"**, `AtLogOn`, running
+   `wscript.exe start-llama-k2horizon-hidden.vbs`, which shells out to a
+   `.cmd` wrapper that launches
+   `llama-server.exe --models-dir "%USERPROFILE%\models\beamer" --models-preset "...\llama-models-bearcave.ini" --models-max 1 --host 127.0.0.1 --port 8080`.
+   The `wscript`/`.vbs` indirection (`WScript.Shell.Run(cmd, 0, False)`) is
+   what keeps the console window hidden — Task Scheduler running the `.cmd`
+   directly flashes/shows one, since window-hiding at the task-settings level
+   only hides the task from Task Scheduler's own UI, not the process it
+   launches. Not a Windows Service — a logon-triggered task needs no admin
+   install step and is easy to inspect/restart from Task Scheduler.
+
+Gate check, same shape as callisto's:
+
+```powershell
+curl.exe -s http://127.0.0.1:8080/v1/models
+```
+
+Expect one entry, id `K2-Horizon-0.9B-Q8_0`. If it's missing, check
+`Get-ScheduledTask -TaskName "Beamer K2-Horizon Server" | Get-ScheduledTaskInfo`
+and that nothing else is bound to port 8080 (`netstat -ano | findstr :8080`).
+
+⚠️ **`--models-preset` must be honored, not merely present as a flag.**
+Beamer's real request carries no sampling or template parameters of its own —
+`reasoning_effort` reaches the model only if the preset's
+`chat-template-kwargs` is actually applied server-side. Confirmed for this
+fork build by POSTing a Beamer-shaped request (`model` + `messages` +
+`response_format` only) and checking the response's leaked reasoning tag:
+`<ifm|think_faster>` means `low` (the preset) took effect; `<ifm|think>` would
+mean it silently fell back to the model's own default (`high`) instead.
 
 ### API keys
 
@@ -155,13 +259,45 @@ not exist if the Windows hotkey work had been done as a four-line patch.
    `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Beamer.lnk` exists.
 8. **Dictate into an elevated window and confirm nothing happens.** Expected,
    and worth seeing once so you recognise it later.
-9. **With callisto reachable, dictate a note.** It should clean itself and grow
-   task chips.
-10. **Stop llama-server on callisto** (`systemctl --user stop llama-beamer`,
-    never `pkill -f`, which matches the shell running it). Dictate three notes.
-    All three should be captured and show the red footer label.
-11. **Start it again and dictate a fourth.** It cleans, **and the three stale
-    notes clean themselves with no click.** That is the backlog sweep.
+9. **With both servers reachable, dictate a note.** It should clean itself and
+   grow task chips.
+10. **Stop llama-server on callisto only** (`systemctl --user stop
+    llama-beamer`, never `pkill -f`, which matches the shell running it).
+    Dictate three notes. Cleanup should fail (red footer label on that stage)
+    while **extraction still succeeds** — bearcave's own K2-Horizon server has
+    no dependency on callisto. This is the regression test for that property,
+    not just a config check: better yet, disable Wi-Fi entirely rather than
+    only stopping the remote service, so the tailnet route itself is unreachable.
+11. **Start callisto's server again and dictate a fourth.** Cleanup runs,
+    **and the three stale notes clean themselves with no click.** That is the
+    backlog sweep.
+12. **Stop bearcave's own extraction server**
+    (`Stop-ScheduledTask -TaskName "Beamer K2-Horizon Server"` — the process it
+    launched keeps running even once the task itself shows Ready again, so
+    also `Get-Process llama-server | Stop-Process`). Dictate a note: cleanup
+    succeeds, extraction fails with its own red footer label, no task chips.
+    Start the task again (`Start-ScheduledTask`) and confirm the note's
+    extraction can be retried from the footer.
+13. **Fresh-install download.** On a machine with no `config.toml` and no
+    model file, launch a bundled aarch64 build: the Local AI settings card
+    should show download progress unprompted, a Cancel control while it
+    runs, and the server should start (task goes `Running`, `GET
+    127.0.0.1:8080/v1/models` succeeds) once it completes — a dictated note
+    then extracts correctly with no manual setup at all.
+14. **Cancel and retry.** Cancel a download mid-flight from the card; confirm
+    the `.part` file is gone and the card returns to idle. Relaunch: the
+    download should restart from scratch (not resume) automatically.
+15. **Installer re-run over an already-set-up machine.** With bearcave's own
+    manual setup (or a prior install) already in place and its Scheduled Task
+    running, run the newly-built installer again. Confirm: the old
+    `llama-server.exe` process is gone afterward (not orphaned holding port
+    8080), the task is updated rather than duplicated (`schtasks /query /tn
+    "Beamer K2-Horizon Server"` shows exactly one), and the already-present
+    model is verified rather than redundantly redownloaded (no download
+    progress shown in the card on next launch).
+16. **Uninstall.** Confirm the task, `%LOCALAPPDATA%\Beamer\llama-k2horizon\`,
+    and the model file are all gone; `models\beamer\` itself (and any other
+    GGUF in it) is left alone.
 
 ## Things that are known-unverified on Windows
 

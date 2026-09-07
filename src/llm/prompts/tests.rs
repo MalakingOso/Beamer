@@ -178,38 +178,46 @@ fn extract_prompt() -> String {
 
 #[test]
 fn the_extraction_prompt_names_every_negative_category() {
+    // v5a gates on an explicit "category" enum (see `scan` in the prompt)
+    // rather than the bullet-list headers v2 used — naming each value here is
+    // what suppresses it, same as before.
     for category in [
-        "Completed or past action",
-        "Someone else's action",
-        "Hypothetical or conditional",
-        "Opinion, venting, emotion",
-        "Observation or fact",
-        "Vague aspiration or idea",
-        "Rhetorical question",
+        "past",
+        "someone_else",
+        "hypothetical",
+        "opinion",
+        "fact",
+        "aspiration",
+        "rhetorical",
     ] {
         assert!(
-            extract_prompt().contains(category),
+            extract_prompt().contains(&format!("\"{category}\"")),
             "naming a category is what suppresses it; `{category}` is missing"
         );
     }
 }
 
 #[test]
-fn the_extraction_prompt_says_an_empty_answer_is_normal() {
+fn the_extraction_prompt_gates_tasks_on_speaker_and_category_together() {
+    // The compliance gap `HANDOFF.md` documents (a clause's own scan row
+    // saying "someone_else" and it still leaking into `tasks` anyway) is a
+    // model-behavior problem this rule can't fully close by itself — but the
+    // rule still has to be stated, or there is nothing pushing back on it.
     let prompt = extract_prompt();
-    assert!(prompt.contains("Returning an empty list is the correct and common answer"));
-    assert!(prompt.contains("When uncertain, return nothing"));
+    assert!(prompt.contains(r#""subject_is_speaker": true AND "category": "task""#));
 }
 
 #[test]
 fn the_extraction_prompt_carries_at_least_two_hard_negative_exemplars() {
     // Positive-only exemplars teach the model that output is always
     // expected, which is the same over-triggering failure the negative
-    // categories exist to prevent.
-    let empty_answers = extract_prompt().matches(r#"{"tasks": []}"#).count();
+    // categories exist to prevent. v5a's examples are `"scan": [...], "tasks": []`
+    // rather than v2's bare `{"tasks": []}`, so the brace is dropped from the
+    // match.
+    let empty_answers = extract_prompt().matches(r#""tasks": []"#).count();
     assert!(
         empty_answers >= 2,
-        "expected at least two exemplars answering with an empty list, found {empty_answers}"
+        "expected at least two exemplars answering with an empty task list, found {empty_answers}"
     );
 }
 
@@ -226,20 +234,13 @@ fn the_extraction_prompt_tells_the_model_not_to_tidy_up_the_quote() {
     // "Verbatim" alone was not enough in practice: a model will still
     // silently capitalize a name or drop a filler word while "quoting" it,
     // which is exactly the kind of edit that fails the grounding check.
-    // This bullet and exemplar name the failure directly instead of trusting
-    // "verbatim" to rule it out on its own.
+    // This bullet names the failure directly instead of trusting "verbatim"
+    // to rule it out on its own. v5a's worked examples are all filler-free
+    // (unlike v2's dedicated "um so i guess..." exemplar), so only the
+    // instruction text is pinned here, not a worked demonstration of it.
     let prompt = extract_prompt();
     assert!(prompt.contains("copy-paste, not a transcription"));
     assert!(prompt.contains(r#"Preserve filler words ("um", "uh")"#));
-    assert!(
-        prompt.contains("um so i guess we should call the vet about milo at some point"),
-        "the exemplar note demonstrating filler-preserving evidence is missing"
-    );
-    assert!(
-        prompt.contains(r#""evidence": "we should call the vet about milo at some point""#),
-        "the exemplar's evidence must keep \"milo\" lowercase and drop no words, or it stops \
-         demonstrating the rule it follows"
-    );
 }
 
 #[test]
