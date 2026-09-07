@@ -20,6 +20,17 @@ pipeline only ever visits a note it is asked about and the backlog sweep only
 fires after a *fully* successful pass. Everything below describes cleanup as it
 behaves when it is turned back on.
 
+Both passes re-read `LlmConfig::cleanup_wanted()` / `extract_wanted()` from
+the live config immediately before every store write, never from the snapshot
+`run_request` took when the request started. A pass can be switched off while
+its request is in the air — a long body is many sequential cleanup calls — and
+by the time the response lands `App()`'s opt-out effect has already marked the
+note `Skipped`. Writing anyway would resurrect the stage as `Failed`, or, on
+the success path, rewrite the user's body for a pass they explicitly opted out
+of, which is the one outcome here that toggling back cannot undo. An abandoned
+pass reports `NotAttempted`, not `Errored`: nothing was learned about the
+server, and an error would wrongly suppress the backlog sweep.
+
 Read `agent_docs/sticky_notes.md` first for the note windows themselves.
 
 ## The shape of it

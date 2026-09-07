@@ -30,6 +30,16 @@
       runs over `notes`. Worth deciding before it is switched back on, because
       it changes where the toggle belongs and whether `clean_state` is still
       the right home for the result.
+- [ ] **Re-enabling cleanup resurrects nothing.** While cleanup is off,
+      `App()` marks every non-`Done` note `Skipped`, including dictated notes
+      that were only ever `Pending` because the server happened to be down.
+      Turning cleanup back on does not undo that: `sweep_requests` retries
+      only `Failed`, so those notes sit at a quiet `Check` footer and need a
+      per-note press to ever run. Deliberate for now — skipping `Pending` is
+      exactly what stops the footer offering a "Clean up" affordance for a
+      pass that cannot run — but if cleanup comes back as a routine feature,
+      the toggle-on path probably wants to reset `Skipped` to `Pending` for
+      `Dictated` notes. Raised in review by muse.
 - [ ] **`failure_message` reports an unreachable host as a reachable one.**
       `src/llm/client.rs` checks `timed_out` before `connect_failed`, but
       reqwest sets `is_timeout()` for a *connect* timeout too — so a tailnet

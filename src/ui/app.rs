@@ -107,11 +107,20 @@ pub fn App() -> Element {
     // `llm::CleanupConfig::enabled`). With it off, notes carrying a `Failed`
     // from when it was on would keep reporting it forever: the pipeline only
     // ever visits a note it is asked about, and nothing asks about a pass that
-    // no longer runs. Idempotent, so one effect covers both startup and the
-    // moment the toggle flips. `peek` before `write` — a `Signal::write`
-    // notifies every sticky window even when nothing changed.
+    // no longer runs.
+    //
+    // Subscribes to `notes` as well as `config`, deliberately. Two writers add
+    // notes this effect would otherwise never see: the `+` buttons, which
+    // create a `Typed` note and send no pipeline request at all, and the sync
+    // tick, which replaces `notes.notes` wholesale with whatever the document
+    // hydrates to — including a note another machine failed to clean. Reading
+    // rather than peeking costs one extra pass and cannot loop: the effect's
+    // own write drives `has_cleanup_left_to_skip` to false, which is the fixed
+    // point. The guard is what makes that true, and it also keeps an unrelated
+    // config save from notifying every sticky window for nothing.
     use_effect(move || {
-        if !config.read().llm.cleanup.enabled && notes.peek().has_cleanup_left_to_skip() {
+        let wanted = config.read().llm.cleanup_wanted();
+        if !wanted && notes.read().has_cleanup_left_to_skip() {
             notes.write().skip_cleanup_on_every_note();
         }
     });

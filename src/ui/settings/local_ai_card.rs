@@ -164,7 +164,7 @@ pub fn LocalAiCard(props: LocalAiCardProps) -> Element {
             }
             div { class: "llm-note",
                 "Off by default \u{2014} it needs a second model this install does not fetch. \
-                 Task extraction runs either way."
+                 Task extraction is separate, and unaffected by this."
             }
 
             if props.cleanup_enabled {

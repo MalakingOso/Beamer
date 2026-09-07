@@ -205,6 +205,31 @@ fn a_terminal_outcome_is_not_a_success() {
 // its own test rather than folded into one parametrized case, so a
 // regression in any one of them fails with a name that says which path broke.
 
+// A pass abandoned mid-flight — the user switched it off while its request
+// was in the air. What matters is that this reports `NotAttempted` and not
+// `Errored`: nothing was learned about the server either way, and an
+// `Errored` here would wrongly suppress the backlog sweep for a request that
+// never actually failed.
+
+#[test]
+fn abandoning_a_pass_reports_nothing_attempted_rather_than_a_failure() {
+    let outcome = abandoned("cleanup", "1a078edd");
+    assert_eq!(outcome, RequestOutcome::NotAttempted);
+    assert_ne!(
+        outcome,
+        RequestOutcome::Errored,
+        "a pass the user switched off did not fail; calling it an error would \
+         suppress the sweep for every other note in the same request"
+    );
+}
+
+#[test]
+fn an_abandoned_pass_alongside_a_real_response_still_counts_as_a_success() {
+    // `Both` where extraction responded and cleanup was switched off part-way:
+    // the server demonstrably answered, so the sweep must still fire.
+    assert!(succeeded_from(&[abandoned("cleanup", "n"), RequestOutcome::Responded]));
+}
+
 #[test]
 fn no_outcomes_at_all_is_not_a_success() {
     // The shape `run_request` reports for `llm.enabled = false`: nothing was

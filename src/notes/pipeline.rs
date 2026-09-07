@@ -183,8 +183,11 @@ async fn run_request(
     if matches!(request.stages, Stages::Both | Stages::CleanOnly) {
         if cleanup_cfg.enabled {
             outcomes.push(
-                run_cleanup(&id, &cleanup_base_url, &cleanup_cfg, timeout, &mut notes, &mut status_log)
-                    .await,
+                run_cleanup(
+                    &id, &cleanup_base_url, &cleanup_cfg, timeout, config, &mut notes,
+                    &mut status_log,
+                )
+                .await,
             );
             if outcomes.last() == Some(&RequestOutcome::Terminal) {
                 terminal.push(Stage::Clean);
@@ -199,8 +202,8 @@ async fn run_request(
         if extract_cfg.enabled {
             outcomes.push(
                 run_extraction(
-                    &id, &extract_base_url, &extract_cfg, timeout, &mut notes, &mut tasks,
-                    &mut status_log,
+                    &id, &extract_base_url, &extract_cfg, timeout, config, &mut notes,
+                    &mut tasks, &mut status_log,
                 )
                 .await,
             );
@@ -214,6 +217,17 @@ async fn run_request(
     }
 
     Finished { note_id: id, swept, succeeded: succeeded_from(&outcomes), terminal }
+}
+
+/// A result that came back after the user switched its pass off. Writing it
+/// would undo `App()`'s opt-out effect, which by now has marked the note
+/// `Skipped` — as `Failed` on an error, or as `Done` plus a body rewrite the
+/// user explicitly opted out of. `NotAttempted` rather than `Errored`: nothing
+/// was learned about the server, and this must not look like a reason to
+/// suppress the backlog sweep.
+fn abandoned(stage: &str, id: &str) -> RequestOutcome {
+    tracing::info!("{} for note {} was abandoned: the pass was switched off mid-flight", stage, id);
+    RequestOutcome::NotAttempted
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
@@ -233,6 +247,7 @@ async fn run_cleanup(
     base_url: &str,
     cfg: &crate::llm::CleanupConfig,
     timeout: Duration,
+    config: Signal<Config>,
     notes: &mut Signal<NoteStore>,
     status_log: &mut Signal<StatusLog>,
 ) -> RequestOutcome {
@@ -248,6 +263,12 @@ async fn run_cleanup(
     let mut contacted_server = false;
 
     for run in &runs {
+        // Re-read the live config each iteration, not the snapshot
+        // `run_request` took: a long body is many sequential requests, and the
+        // user can switch the pass off part-way through them.
+        if !config.peek().llm.cleanup_wanted() {
+            return abandoned("cleanup", id);
+        }
         if run.trim().is_empty() {
             cleaned.push(None);
             continue;
@@ -260,6 +281,9 @@ async fn run_cleanup(
             }
             Ok(Cleaned::NothingToChange) => cleaned.push(None),
             Err(e) => {
+                if !config.peek().llm.cleanup_wanted() {
+                    return abandoned("cleanup", id);
+                }
                 notes.write().mark_clean_failed(id);
                 tracing::warn!("cleanup failed for note {}: {}", id, e);
                 log_status(status_log, LogLevel::Error, format!("Note cleanup failed: {e}"));
@@ -281,6 +305,13 @@ async fn run_cleanup(
         // offering a retry that always no-ops.
         notes.write().apply_cleanup(id, &sent, "");
         return RequestOutcome::NotAttempted;
+    }
+
+    // The last gate, and the one that matters most: past here `apply_cleanup`
+    // rewrites the user's body. Doing that after they switched the pass off
+    // is the one outcome of this race that cannot be undone by toggling back.
+    if !config.peek().llm.cleanup_wanted() {
+        return abandoned("cleanup", id);
     }
 
     // Unchanged passes an empty response, which `apply_cleanup` reads as "success, change nothing".
@@ -317,6 +348,7 @@ async fn run_extraction(
     base_url: &str,
     cfg: &crate::llm::ExtractConfig,
     timeout: Duration,
+    config: Signal<Config>,
     notes: &mut Signal<NoteStore>,
     tasks: &mut Signal<TaskStore>,
     status_log: &mut Signal<StatusLog>,
@@ -330,12 +362,20 @@ async fn run_extraction(
         notes.write().mark_analyzed(id);
         return RequestOutcome::NotAttempted;
     }
+    if !config.peek().llm.extract_wanted() {
+        return abandoned("extraction", id);
+    }
 
     // Passed in so validation gates stay testable without mocking the clock.
     let today = chrono::Local::now().date_naive();
 
     match extract::extract(base_url, cfg, &text, today, timeout).await {
         Ok(proposals) => {
+            if !config.peek().llm.extract_wanted() {
+                // Dropping the proposals is the point: rows written now would
+                // appear on the tasks page for a pass the user just retired.
+                return abandoned("extraction", id);
+            }
             let count = proposals.len();
             // Machine suffix for the new row ids (they sync keyed by id).
             let machine_id = notes.peek().machine_id().to_string();
@@ -374,6 +414,9 @@ async fn run_extraction(
             RequestOutcome::Responded
         }
         Err(e) => {
+            if !config.peek().llm.extract_wanted() {
+                return abandoned("extraction", id);
+            }
             notes.write().mark_extract_failed(id);
             tracing::warn!("extraction failed for note {}: {}", id, e);
             log_status(status_log, LogLevel::Error, format!("Task extraction failed: {e}"));

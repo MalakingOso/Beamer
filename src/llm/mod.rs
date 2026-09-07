@@ -147,6 +147,22 @@ impl LlmConfig {
     pub fn extract_base_url(&self) -> &str {
         stage_base_url(&self.extract.base_url, &self.base_url)
     }
+
+    /// Whether the cleanup pass is wanted right now. Both switches, because
+    /// `enabled` is a master gate over `cleanup.enabled`, not an alternative
+    /// to it — a caller that checks only one of them reports the wrong answer
+    /// for half the combinations. Lives here rather than at the call sites so
+    /// the pipeline's mid-flight re-check and `App()`'s opt-out effect cannot
+    /// drift apart.
+    pub fn cleanup_wanted(&self) -> bool {
+        self.enabled && self.cleanup.enabled
+    }
+
+    /// Whether the extraction pass is wanted right now. See
+    /// [`Self::cleanup_wanted`].
+    pub fn extract_wanted(&self) -> bool {
+        self.enabled && self.extract.enabled
+    }
 }
 
 impl Default for LlmConfig {
@@ -222,6 +238,28 @@ mod tests {
             "model_setup installs the extraction model and nothing else, so a default-on              cleanup pass reports a failure on every note for a server that was never              asked to serve s1-mini"
         );
         assert!(cfg.extract.enabled, "the two stages are toggled independently");
+    }
+
+    #[test]
+    fn the_master_switch_gates_each_stage_rather_than_replacing_it() {
+        let mut cfg = LlmConfig::default();
+        cfg.cleanup.enabled = true;
+        assert!(cfg.cleanup_wanted());
+        assert!(cfg.extract_wanted());
+
+        // Master off: neither stage runs, whatever its own switch says. A
+        // caller reading only `cleanup.enabled` here would run a pass the
+        // user has turned the whole feature off for.
+        cfg.enabled = false;
+        assert!(!cfg.cleanup_wanted());
+        assert!(!cfg.extract_wanted());
+
+        // Master on, stage off: the other stage is unaffected. This is the
+        // shipped default, and the whole point of the split.
+        cfg.enabled = true;
+        cfg.cleanup.enabled = false;
+        assert!(!cfg.cleanup_wanted());
+        assert!(cfg.extract_wanted());
     }
 
     #[test]
