@@ -244,3 +244,80 @@ fn a_note_id_carries_its_machine_suffix() {
     assert!(id.ends_with("-cafe"));
     assert_eq!(id, "19901234-0003-cafe");
 }
+
+#[test]
+fn set_all_open_closes_every_active_note_and_leaves_archived_flags_alone() {
+    let mut store = temp_store("hide_all");
+    let a = store.create("a".into(), NoteColor::Purple, NoteOrigin::Dictated);
+    let b = store.create("b".into(), NoteColor::Teal, NoteOrigin::Dictated);
+    let c = store.create("c".into(), NoteColor::Rose, NoteOrigin::Dictated);
+    store.archive(&c);
+    // `archive` always closes; force the flag open to prove the bulk path skips it.
+    store.set_open(&c, true);
+
+    assert!(store.any_active_open());
+
+    store.set_all_open(false);
+
+    assert!(!store.is_open(&a));
+    assert!(!store.is_open(&b));
+    assert!(!store.any_active_open());
+    assert!(
+        store.is_open(&c),
+        "archived notes are outside hide-all's reach — and symmetrically, show-all \
+         must never arm one to pop a window on restore"
+    );
+}
+
+#[test]
+fn set_all_open_reopens_every_active_note_but_never_an_archived_one() {
+    let mut store = temp_store("show_all");
+    let a = store.create("a".into(), NoteColor::Purple, NoteOrigin::Dictated);
+    let b = store.create("b".into(), NoteColor::Teal, NoteOrigin::Dictated);
+    store.set_open(&a, false);
+    store.set_open(&b, false);
+    store.archive(&b);
+
+    store.set_all_open(true);
+
+    assert!(store.is_open(&a));
+    assert!(
+        !store.is_open(&b),
+        "show-all must not reopen an archived note — and must not arm it either, \
+         or restoring it later would pop a window unasked"
+    );
+
+    store.restore(&b);
+    assert!(
+        !store.is_open(&b),
+        "restoring puts a note back on the board; it does not pop a window open"
+    );
+}
+
+#[test]
+fn set_all_open_on_an_empty_store_schedules_no_write() {
+    let mut store = temp_store("bulk_empty");
+    store.flush_if_dirty();
+
+    store.set_all_open(false);
+    store.set_all_open(true);
+
+    assert!(!store.is_dirty(), "with no notes there is nothing to persist");
+}
+
+#[test]
+fn set_all_open_never_moves_the_modified_timestamp() {
+    let mut store = temp_store("bulk_modified");
+    let id = store.create("hello".into(), NoteColor::Purple, NoteOrigin::Dictated);
+    let before = store.get(&id).unwrap().modified.clone();
+
+    store.set_all_open(false);
+    store.set_all_open(true);
+
+    assert_eq!(
+        store.get(&id).unwrap().modified,
+        before,
+        "bulk open/close is machine-local window state, like `set_open` — it must \
+         never outrank a real edit under a last-write-wins merge"
+    );
+}

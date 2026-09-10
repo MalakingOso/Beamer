@@ -70,6 +70,11 @@ pub fn NotesPage(props: NotesPageProps) -> Element {
 
     let active_total = use_memo(move || notes.read().active().len());
     let archived_total = use_memo(move || notes.read().archived().len());
+    // Drives the Hide-all/Show-all toggle: any open window means "hide".
+    let open_count = use_memo(move || {
+        let store = notes.read();
+        store.active().iter().filter(|n| store.is_open(&n.id)).count()
+    });
 
     let showing_archived = *show_archived.read();
     let shown = visible.read().len();
@@ -92,6 +97,33 @@ pub fn NotesPage(props: NotesPageProps) -> Element {
                             format!("{shown} of {}", active_total())
                         };
                         rsx! { span { class: "notes-count", "{label}" } }
+                    }
+                    // Bulk window control. Not a true minimize: notes skip the
+                    // taskbar on Windows and are undecorated everywhere, so a
+                    // minimized window would be unrecoverable except from here.
+                    // Closing through `set_all_open` keeps every note one board
+                    // click away instead. Hidden in the archived view, which it
+                    // does not act on.
+                    if !showing_archived && active_total() > 0 {
+                        if open_count() > 0 {
+                            button {
+                                class: "note-action-btn",
+                                title: "Close all note windows — the notes stay on the board",
+                                onclick: move |_| {
+                                    notes.write().set_all_open(false);
+                                },
+                                "Hide all"
+                            }
+                        } else {
+                            button {
+                                class: "note-action-btn",
+                                title: "Reopen every note",
+                                onclick: move |_| {
+                                    notes.write().set_all_open(true);
+                                },
+                                "Show all"
+                            }
+                        }
                     }
                     button {
                         class: "notes-new-btn",

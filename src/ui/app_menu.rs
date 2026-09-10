@@ -29,6 +29,7 @@ pub(super) fn setup_menu_handlers(
         let history_id = items.history.id().clone();
         let vocab_id = items.vocab.id().clone();
         let settings_id = items.settings.id().clone();
+        let hide_show_notes_id = items.hide_show_notes.id().clone();
         let paste_last_id = items.paste_last.id().clone();
         let check_updates_id = items.check_updates.id().clone();
         let quit_id = items.quit.id().clone();
@@ -57,6 +58,11 @@ pub(super) fn setup_menu_handlers(
                 current_page.set(Page::Settings);
                 window.set_visible(true);
                 window.set_focus();
+            } else if event.id == hide_show_notes_id {
+                // Same toggle as the board header, from anywhere: any open
+                // window means "hide". The reconciler closes or opens windows.
+                let hide = notes.read().any_active_open();
+                notes.write().set_all_open(!hide);
             } else if event.id == paste_last_id {
                 let text = last_injection.read().clone();
                 if text != "No injection yet" && !text.is_empty() {
@@ -92,6 +98,17 @@ pub(super) fn setup_menu_handlers(
                 window.set_focus();
             }
         }
+    });
+}
+
+/// Keep the tray item's label ahead of its action: "Hide All Notes" while any
+/// window is open, "Show All Notes" once all are closed. Reads `notes`, so it
+/// follows closes from anywhere (board toggle, per-window close, tray itself).
+pub(super) fn setup_notes_tray_label(items: &TrayMenuItems, notes: Signal<NoteStore>) {
+    let item = items.hide_show_notes.clone();
+    use_effect(move || {
+        let any_open = notes.read().any_active_open();
+        item.set_text(if any_open { "Hide All Notes" } else { "Show All Notes" });
     });
 }
 

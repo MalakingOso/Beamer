@@ -208,6 +208,7 @@ pub fn App() -> Element {
     app_setup::setup_windows_aumid_shortcut();
 
     app_menu::setup_menu_handlers(&items, window.clone(), current_page, last_injection, config, update_status, notes, tasks);
+    app_menu::setup_notes_tray_label(&items, notes);
     app_menu::setup_tray_click_handler(window.clone());
 
     let page = *current_page.read();

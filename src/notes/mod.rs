@@ -386,6 +386,28 @@ impl NoteStore {
         self.machine.set_open(id, open);
     }
 
+    /// Machine-local bulk open/close for every **active** note. Backs the
+    /// board's Hide-all/Show-all toggle; the reconciler opens or closes the
+    /// windows from these flags.
+    ///
+    /// Archived notes are skipped in both directions. Closing one would be
+    /// redundant (`archive` already did it); opening one would be wrong — a
+    /// restored note must not pop a window just because show-all ran while
+    /// it was archived.
+    pub fn set_all_open(&mut self, open: bool) {
+        let ids: Vec<String> =
+            self.notes.iter().filter(|n| !n.archived).map(|n| n.id.clone()).collect();
+        for id in ids {
+            self.set_open(&id, open);
+        }
+    }
+
+    /// Whether any active note currently has a window. Drives the tray
+    /// item's label and toggle direction (any open means "hide").
+    pub fn any_active_open(&self) -> bool {
+        self.notes.iter().filter(|n| !n.archived).any(|n| self.is_open(&n.id))
+    }
+
     pub fn archive(&mut self, id: &str) {
         let Some(note) = self.touch(id) else { return };
         note.archived = true;

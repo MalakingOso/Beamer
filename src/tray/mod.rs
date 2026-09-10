@@ -15,6 +15,7 @@ pub struct TrayMenuItems {
     pub history: MenuItem,
     pub vocab: MenuItem,
     pub settings: MenuItem,
+    pub hide_show_notes: MenuItem,
     pub paste_last: MenuItem,
     pub check_updates: MenuItem,
     pub quit: MenuItem,
@@ -27,6 +28,7 @@ pub fn build_tray_menu() -> (Menu, TrayMenuItems) {
     let history = MenuItem::new("History", true, None);
     let vocab = MenuItem::new("Vocab", true, None);
     let settings = MenuItem::new("Settings", true, None);
+    let hide_show_notes = MenuItem::new("Hide All Notes", true, None);
     let paste_last = MenuItem::new("Paste Last Transcript", true, None);
     let check_updates = MenuItem::new("Check for Updates", true, None);
     let quit = MenuItem::new("Quit", true, None);
@@ -37,6 +39,7 @@ pub fn build_tray_menu() -> (Menu, TrayMenuItems) {
         &vocab,
         &settings,
         &PredefinedMenuItem::separator(),
+        &hide_show_notes,
         &paste_last,
         &check_updates,
         &PredefinedMenuItem::separator(),
@@ -49,6 +52,7 @@ pub fn build_tray_menu() -> (Menu, TrayMenuItems) {
         history,
         vocab,
         settings,
+        hide_show_notes,
         paste_last,
         check_updates,
         quit,
