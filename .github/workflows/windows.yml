@@ -1,7 +1,8 @@
 name: Windows
 
 # The Windows target went months without compiling because nothing built it.
-# This runs on every push and pull request so that cannot happen again.
+# Auto builds are off for now. Run it by hand from the Actions tab
+# (or ask me to trigger it) when you want a Windows build.
 #
 # A native runner is deliberate. Cross-compiling from Linux is blocked by
 # `ring`, which arrives through `self_update` and whose build script wants MSVC
@@ -11,9 +12,6 @@ name: Windows
 # toolchain works.
 
 on:
-  push:
-    branches: [master, "feat/**"]
-  pull_request:
   workflow_dispatch:
 
 env:
