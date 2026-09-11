@@ -42,6 +42,7 @@ const MODEL_SIZE: u64 = 1_148_614_016;
 /// Must match `hooks.nsh`'s `K2H_TASK_NAME` exactly — two independent
 /// literals, not a shared constant, since one lives in Rust and the other in
 /// an NSIS script with no way to share a value across them.
+#[cfg(target_os = "windows")]
 const TASK_NAME: &str = "Beamer K2-Horizon Server";
 
 /// Drives the Local AI settings card's progress line.

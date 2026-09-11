@@ -1,12 +1,16 @@
 //! Recording-pill window hook for `App`. Runs once from `App()`'s render body.
 //! Linux uses an AppIndicator tray-icon swap instead (see `linux_integration.rs`).
 
+#[cfg(not(target_os = "linux"))]
 use dioxus::desktop::tao::dpi::{PhysicalPosition, PhysicalSize};
 #[cfg(target_os = "windows")]
 use dioxus::desktop::tao::platform::windows::WindowBuilderExtWindows;
+#[cfg(not(target_os = "linux"))]
 use dioxus::desktop::{Config as DesktopConfig, DesktopContext, WindowBuilder};
+#[cfg(not(target_os = "linux"))]
 use dioxus::prelude::*;
 
+#[cfg(not(target_os = "linux"))]
 use crate::config::Config;
 #[cfg(not(target_os = "linux"))]
 use crate::hotkey::CaptureMode;

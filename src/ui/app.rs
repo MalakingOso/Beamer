@@ -11,7 +11,11 @@ use crate::notes::task_store::TaskStore;
 use crate::notes::NoteStore;
 use crate::orchestrator::{self, RecordingState};
 use crate::update::UpdateStatus;
-use crate::ui::{app_menu, app_pill, app_setup, app_splash};
+use crate::ui::{app_menu, app_setup, app_splash};
+// Linux swaps the tray icon instead of opening a pill window, so nothing in
+// `app_pill` compiles there (see the gated call site below).
+#[cfg(not(target_os = "linux"))]
+use crate::ui::app_pill;
 use crate::ui::sticky_windows;
 #[cfg(target_os = "linux")]
 use crate::ui::linux_integration;
@@ -63,6 +67,9 @@ pub fn App() -> Element {
     // "fresh install" from "upgrade of an existing install". `Ok(false)`
     // only: an `Err` (can't tell) is treated as "not fresh", the same
     // conservative call `Config::load()` itself documents for the same stat.
+    // Gated to match its only reader below: on every other arch nothing
+    // consumes it, and an ungated `let` is a dead binding under `-D warnings`.
+    #[cfg(target_arch = "aarch64")]
     let fresh_install = matches!(Config::config_path().try_exists(), Ok(false));
     let config = use_signal(|| Config::load().unwrap_or_default());
     let download_status = use_signal(crate::model_setup::DownloadStatus::default);
