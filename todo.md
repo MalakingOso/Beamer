@@ -168,11 +168,20 @@ worth its complexity yet.
 
 ## Pending manual actions
 
-- [ ] **Log out to deploy GNOME extension v6.** Bumped 2026-08-24 to deploy the
-      pill-waveform change from 7f83eeb, which had sat undeployed since it was
-      committed. Settings → the injection card offers the update; click it,
-      then log out. Confirm with the `GetVersion` check in
-      `agent_docs/sticky_notes.md` — expect `(uint32 6,)`.
+- [ ] **Verify the desktop hotkey grab on real hardware.** None of this is
+      provable from tests. With `journalctl --user -f -o cat /usr/bin/gnome-shell`
+      open: (1) press and release the chord and check for
+      `beamer: hotkey 0 released (mutter)`; if it never appears, hold mode
+      over the grab is broken. (2) `RUST_LOG=beamer=debug dx serve`: one
+      `RecordStart` per press, one `RecordStop` per release, and Ctrl+Space in
+      a text field no longer types a space. (3) Hold the chord, release Ctrl
+      *first*: expect `released (modifiers)` and exactly one `RecordStop`.
+      (4) Over RDP, both the plain hold and the Ctrl-first release (the
+      modifier poll assumes `global.get_pointer()` sees gnome-remote-desktop's
+      virtual keyboard; unverified). (5) Lock and unlock, press again. (6)
+      Change the hotkey in Settings: old chord dead, new one live. (7) Pick a
+      chord GNOME already binds: the grab log shows `false` for that slot and
+      evdev still fires it. (8) Quit Beamer: Ctrl+Space types a space again.
 
 ## Low Priority
 - [ ] `debug_logging` toggle saves to config but has no runtime effect — consider wiring it to control injection trace logging

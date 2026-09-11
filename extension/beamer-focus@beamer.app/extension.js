@@ -1,6 +1,9 @@
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
+import Meta from 'gi://Meta';
+import Shell from 'gi://Shell';
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
 import { BeamerIndicator } from './indicator.js';
@@ -19,7 +22,33 @@ import { BeamerIndicator } from './indicator.js';
 // pure behaviour tweak that adds no method. v6 is exactly that: the pill
 // waveform change in 7f83eeb, which sat undeployed because v5 shipped it
 // without a bump.
-const HELPER_VERSION = 6;
+//
+// v7 added SetHotkeys and the Hotkey*/Helper* signals: the dictation chord
+// grabbed inside Mutter, so input injected by gnome-remote-desktop (which
+// never touches /dev/input) still reaches Beamer.
+const HELPER_VERSION = 7;
+
+// Release events are looked up with the modifier state *at release time*, so
+// letting go of Ctrl before Space never fires `accelerator-deactivated`. While
+// a hold is live, poll the seat's modifiers and end it when the chord's
+// modifiers drop. Only runs between press and release.
+const HELD_POLL_MS = 50;
+
+const MODIFIER_MASKS = {
+    '<Control>': Clutter.ModifierType.CONTROL_MASK,
+    '<Alt>': Clutter.ModifierType.MOD1_MASK,
+    '<Shift>': Clutter.ModifierType.SHIFT_MASK,
+};
+
+/// Clutter modifier mask an accelerator string asks for.
+function requiredModifiers(accel) {
+    let mask = 0;
+    for (const [token, bit] of Object.entries(MODIFIER_MASKS)) {
+        if (accel.includes(token))
+            mask |= bit;
+    }
+    return mask;
+}
 
 // Typing pace: batches keep long transcripts fast (~500 chars/s) while giving
 // slow event loops (Electron apps) time to drain between batches.
@@ -65,6 +94,18 @@ const DBUS_XML = `
       <arg type="u" direction="out" name="width"/>
       <arg type="u" direction="out" name="height"/>
     </method>
+    <method name="SetHotkeys">
+      <arg type="as" direction="in" name="accelerators"/>
+      <arg type="ab" direction="out" name="grabbed"/>
+    </method>
+    <signal name="HotkeyActivated">
+      <arg type="u" name="index"/>
+    </signal>
+    <signal name="HotkeyDeactivated">
+      <arg type="u" name="index"/>
+    </signal>
+    <signal name="HelperEnabled"/>
+    <signal name="HelperDisabled"/>
   </interface>
 </node>`;
 
@@ -82,11 +123,30 @@ export default class BeamerFocusExtension extends Extension {
         this._typeSource = 0;
         this._typeInvocation = null;
         this._indicator = null;
+        // action id -> { index, required, held }
+        this._hotkeys = new Map();
+        this._heldSource = 0;
+        this._ownerWatch = 0;
         this._dbus = Gio.DBusExportedObject.wrapJSObject(DBUS_XML, this);
         this._dbus.export(Gio.DBus.session, '/app/beamer/FocusProvider');
+        this._acceleratorIds = [
+            global.display.connect('accelerator-activated',
+                (_display, action) => this._onHotkey(action, true)),
+            global.display.connect('accelerator-deactivated',
+                (_display, action) => this._onHotkey(action, false)),
+        ];
+        // No session-modes in metadata, so this runs at every unlock as well
+        // as login. Beamer re-pushes its chords when it sees this.
+        this._dbus.emit_signal('HelperEnabled', new GLib.Variant('()', []));
     }
 
     disable() {
+        // Before unexport: a signal needs the object still on the bus.
+        this._dbus?.emit_signal('HelperDisabled', new GLib.Variant('()', []));
+        for (const id of this._acceleratorIds ?? [])
+            global.display.disconnect(id);
+        this._acceleratorIds = [];
+        this._ungrabHotkeys();
         if (this._typeSource) {
             GLib.source_remove(this._typeSource);
             this._typeSource = 0;
@@ -278,5 +338,111 @@ export default class BeamerFocusExtension extends Extension {
             return [false, 0, 0, 0, 0];
         const r = win.get_frame_rect();
         return [true, r.x, r.y, r.width, r.height];
+    }
+
+    // ── Hotkey grab ──────────────────────────────────────────────────────────
+    //
+    // Beamer's own listener reads /dev/input, which never sees input that
+    // gnome-remote-desktop injects inside Mutter. Grabbing the chord here
+    // catches both. A grabbed chord is consumed: the focused app never sees it.
+
+    /// Replace every grab with `accels` (index = Beamer binding slot, '' =
+    /// leave that slot ungrabbed). Returns which slots Mutter accepted; a
+    /// `false` slot stays on Beamer's evdev listener.
+    ///
+    /// Async-return variant only to learn the caller's bus name: the grabs are
+    /// dropped when it vanishes, or a crashed Beamer would leave the chord
+    /// swallowed system-wide until the next log out.
+    SetHotkeysAsync(params, invocation) {
+        const [accels] = params;
+        this._ungrabHotkeys();
+        const flags = Meta.KeyBindingFlags.IGNORE_AUTOREPEAT |
+            // Without this Mutter never runs the handler for the release, so
+            // `accelerator-deactivated` never fires and hold mode can't end.
+            Meta.KeyBindingFlags.TRIGGER_RELEASE;
+        const grabbed = accels.map((accel, index) => {
+            if (!accel)
+                return false;
+            const action = global.display.grab_accelerator(accel, flags);
+            if (action === Meta.KeyBindingAction.NONE) {
+                // Unparseable, or already bound by GNOME or another grabber.
+                log(`beamer: could not grab "${accel}"; evdev keeps slot ${index}`);
+                return false;
+            }
+            Main.wm.allowKeybinding(
+                Meta.external_binding_name_for_action(action), Shell.ActionMode.ALL);
+            this._hotkeys.set(action,
+                { index, required: requiredModifiers(accel), held: false });
+            return true;
+        });
+        if (this._hotkeys.size > 0) {
+            this._ownerWatch = Gio.bus_watch_name(Gio.BusType.SESSION,
+                invocation.get_sender(), Gio.BusNameWatcherFlags.NONE,
+                null, () => this._ungrabHotkeys());
+        }
+        invocation.return_value(new GLib.Variant('(ab)', [grabbed]));
+    }
+
+    _ungrabHotkeys() {
+        for (const action of this._hotkeys.keys()) {
+            global.display.ungrab_accelerator(action);
+            Main.wm.allowKeybinding(
+                Meta.external_binding_name_for_action(action), Shell.ActionMode.NONE);
+        }
+        this._hotkeys.clear();
+        if (this._heldSource) {
+            GLib.source_remove(this._heldSource);
+            this._heldSource = 0;
+        }
+        if (this._ownerWatch) {
+            Gio.bus_unwatch_name(this._ownerWatch);
+            this._ownerWatch = 0;
+        }
+    }
+
+    _onHotkey(action, pressed) {
+        // The signal fires for every external grab (media keys too).
+        const hotkey = this._hotkeys.get(action);
+        if (!hotkey)
+            return;
+        if (!pressed) {
+            this._releaseHotkey(hotkey, 'mutter');
+            return;
+        }
+        // Emitted even if already held: Beamer dedupes on its side, and a
+        // press must never be lost to a release this side missed.
+        hotkey.held = true;
+        this._dbus.emit_signal('HotkeyActivated',
+            new GLib.Variant('(u)', [hotkey.index]));
+        this._watchHeld();
+    }
+
+    /// Exactly one HotkeyDeactivated per hold, whichever path sees it first.
+    _releaseHotkey(hotkey, via) {
+        if (!hotkey.held)
+            return;
+        hotkey.held = false;
+        // `via` tells the two release paths apart in the journal.
+        log(`beamer: hotkey ${hotkey.index} released (${via})`);
+        this._dbus.emit_signal('HotkeyDeactivated',
+            new GLib.Variant('(u)', [hotkey.index]));
+    }
+
+    _watchHeld() {
+        if (this._heldSource)
+            return;
+        this._heldSource = GLib.timeout_add(GLib.PRIORITY_DEFAULT, HELD_POLL_MS, () => {
+            const [, , mods] = global.get_pointer();
+            let anyHeld = false;
+            for (const hotkey of this._hotkeys.values()) {
+                if (hotkey.held && (mods & hotkey.required) !== hotkey.required)
+                    this._releaseHotkey(hotkey, 'modifiers');
+                anyHeld ||= hotkey.held;
+            }
+            if (anyHeld)
+                return GLib.SOURCE_CONTINUE;
+            this._heldSource = 0;
+            return GLib.SOURCE_REMOVE;
+        });
     }
 }

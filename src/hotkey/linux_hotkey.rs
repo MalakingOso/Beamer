@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use evdev::{Device, EventSummary, KeyCode};
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::hotkey::gnome_grab::{self, DesktopOwned, GrabHandle};
 use crate::hotkey::{
     build_bindings, matching_binding, BindingConfig, BindingState, HotkeyConfig, HotkeyEvent,
     Modifiers, VK_LWIN, MAX_BINDINGS,
@@ -15,14 +16,47 @@ use crate::hotkey::{
 /// (or re-enumerated after suspend/Bluetooth reconnect) get listeners.
 const DEVICE_RESCAN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
-struct HookState {
+/// Press state shared by the evdev listeners and the GNOME desktop grab, so
+/// both feed one state machine (`on_trigger`).
+pub(super) struct HookState {
     bindings: Arc<Mutex<Vec<BindingConfig>>>,
     reset_flag: Arc<AtomicBool>,
+    /// Per binding: the GNOME extension holds a live grab for it, so its
+    /// presses come from `on_grab_event` and evdev's copies are ignored.
+    /// Per-binding rather than global so a Super-only or refused chord
+    /// stays on evdev.
+    desktop_owned: DesktopOwned,
     tx: UnboundedSender<HotkeyEvent>,
     ctrl_held: bool,
     alt_held: bool,
     shift_held: bool,
     binding_state: [BindingState; MAX_BINDINGS],
+}
+
+impl HookState {
+    pub(super) fn new(
+        bindings: Arc<Mutex<Vec<BindingConfig>>>,
+        reset_flag: Arc<AtomicBool>,
+        desktop_owned: DesktopOwned,
+        tx: UnboundedSender<HotkeyEvent>,
+    ) -> Self {
+        Self {
+            bindings,
+            reset_flag,
+            desktop_owned,
+            tx,
+            ctrl_held: false,
+            alt_held: false,
+            shift_held: false,
+            binding_state: [BindingState::default(); MAX_BINDINGS],
+        }
+    }
+
+    fn is_desktop_owned(&self, idx: usize) -> bool {
+        self.desktop_owned
+            .get(idx)
+            .is_some_and(|owned| owned.load(Ordering::Relaxed))
+    }
 }
 
 /// Whether a device looks like it can produce hotkey chords. Deliberately
@@ -139,14 +173,10 @@ fn evdev_key_to_vk(key: KeyCode) -> Option<u32> {
     })
 }
 
-fn handle_key_event(key: KeyCode, value: i32, state: &mut HookState) {
-    // evdev value: 0=release, 1=press, 2=repeat (ignored).
-    let is_press = value == 1;
-    let is_release = value == 0;
-    if !is_press && !is_release {
-        return;
-    }
-
+/// Apply a config edit, if one is pending. Both input paths call this before
+/// acting, or an edit made while only the grab is firing (remoted in over
+/// RDP, where evdev sees nothing) would never end the in-flight recording.
+fn apply_pending_reset(state: &mut HookState) {
     if state.reset_flag.swap(false, Ordering::Relaxed) {
         // A config edit resets both bindings, not just one. Any in-flight
         // recording ends first (mirrors ll_hook.rs): without this a toggle
@@ -158,6 +188,17 @@ fn handle_key_event(key: KeyCode, value: i32, state: &mut HookState) {
         }
         state.binding_state = [BindingState::default(); MAX_BINDINGS];
     }
+}
+
+pub(super) fn handle_key_event(key: KeyCode, value: i32, state: &mut HookState) {
+    // evdev value: 0=release, 1=press, 2=repeat (ignored).
+    let is_press = value == 1;
+    let is_release = value == 0;
+    if !is_press && !is_release {
+        return;
+    }
+
+    apply_pending_reset(state);
 
     match key {
         KeyCode::KEY_LEFTCTRL | KeyCode::KEY_RIGHTCTRL => state.ctrl_held = is_press,
@@ -192,9 +233,55 @@ fn handle_key_event(key: KeyCode, value: i32, state: &mut HookState) {
     };
     let Some(idx) = idx else { return };
 
-    let binding = &bindings[idx];
-    let mode = binding.mode;
-    let is_toggle = binding.config.is_toggle;
+    // Presses of a grabbed chord come from the grab alone. Taking evdev's copy
+    // too would race it: a quick tap can land evdev's press *and* release
+    // before the grab's D-Bus press arrives, and a toggle would flip twice.
+    // Releases still pass: a stray one is a no-op (`trigger_held` is clear),
+    // and it ends a local hold if the grab's release is ever lost.
+    if is_press && state.is_desktop_owned(idx) {
+        return;
+    }
+    on_trigger(idx, is_press, state);
+}
+
+/// Press/release from the GNOME desktop grab. Mirrors evdev's ownership rule
+/// from the other side: presses count only while the grab owns the binding.
+pub(super) fn on_grab_event(idx: usize, is_press: bool, state: &mut HookState) {
+    apply_pending_reset(state);
+    if is_press && !state.is_desktop_owned(idx) {
+        return;
+    }
+    on_trigger(idx, is_press, state);
+}
+
+/// The desktop grab is gone (screen lock, extension disabled): hand every
+/// binding it owned back to evdev. A hold it started ends here, because its
+/// release would have come through the grab. A latched toggle stays latched,
+/// so a screen lock mid-note doesn't cut the note off; the next press from
+/// either path turns it off.
+pub(super) fn release_desktop_bindings(state: &mut HookState) {
+    for idx in 0..MAX_BINDINGS {
+        if !state.desktop_owned[idx].swap(false, Ordering::Relaxed) {
+            continue;
+        }
+        let bs = &mut state.binding_state[idx];
+        bs.trigger_held = false;
+        if bs.armed {
+            bs.armed = false;
+            tracing::info!("Hotkey triggered: RecordStop (desktop grab released)");
+            let _ = state.tx.send(HotkeyEvent::RecordStop);
+        }
+    }
+}
+
+/// The press/release state machine both input paths share. `trigger_held`
+/// makes a repeated press (or a second path's copy) a no-op.
+pub(super) fn on_trigger(idx: usize, is_press: bool, state: &mut HookState) {
+    let (mode, is_toggle) = {
+        let bindings = state.bindings.lock().unwrap();
+        let Some(binding) = bindings.get(idx) else { return };
+        (binding.mode, binding.config.is_toggle)
+    };
     let bs = &mut state.binding_state[idx];
 
     if is_press {
@@ -231,12 +318,16 @@ fn handle_key_event(key: KeyCode, value: i32, state: &mut HookState) {
 pub struct HotkeyHandle {
     bindings: Arc<Mutex<Vec<BindingConfig>>>,
     reset_flag: Arc<AtomicBool>,
+    grab: GrabHandle,
 }
 
 impl HotkeyHandle {
     pub fn update_configs(&self, inject: HotkeyConfig, note: Option<HotkeyConfig>) {
-        *self.bindings.lock().unwrap() = build_bindings(inject, note);
+        let bindings = build_bindings(inject, note);
+        let accels = gnome_grab::accelerators(&bindings);
+        *self.bindings.lock().unwrap() = bindings;
         self.reset_flag.store(true, Ordering::Relaxed);
+        self.grab.push(accels);
     }
 }
 
@@ -247,18 +338,21 @@ pub fn start_ll_hook(
     note: Option<HotkeyConfig>,
     tx: UnboundedSender<HotkeyEvent>,
 ) -> HotkeyHandle {
-    let bindings = Arc::new(Mutex::new(build_bindings(inject, note)));
+    let initial = build_bindings(inject, note);
+    let accels = gnome_grab::accelerators(&initial);
+    let bindings = Arc::new(Mutex::new(initial));
     let reset_flag = Arc::new(AtomicBool::new(false));
+    let desktop_owned = DesktopOwned::default();
 
-    let state = Arc::new(Mutex::new(HookState {
-        bindings: bindings.clone(),
-        reset_flag: reset_flag.clone(),
+    let state = Arc::new(Mutex::new(HookState::new(
+        bindings.clone(),
+        reset_flag.clone(),
+        desktop_owned.clone(),
         tx,
-        ctrl_held: false,
-        alt_held: false,
-        shift_held: false,
-        binding_state: [BindingState::default(); MAX_BINDINGS],
-    }));
+    )));
+    // Alongside evdev, not instead of it: RDP input never reaches /dev/input,
+    // and evdev keeps any chord the desktop can't grab.
+    let grab = gnome_grab::start(accels, state.clone(), desktop_owned);
 
     let mut known: HashSet<PathBuf> = HashSet::new();
     let keyboards = find_keyboard_devices(&mut known);
@@ -303,7 +397,7 @@ pub fn start_ll_hook(
             .expect("Failed to spawn keyboard hotplug watcher thread");
     }
 
-    HotkeyHandle { bindings, reset_flag }
+    HotkeyHandle { bindings, reset_flag, grab }
 }
 
 /// Read one keyboard until it disappears; then drop its path from `known`.

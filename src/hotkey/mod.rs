@@ -183,6 +183,8 @@ mod ll_hook;
 pub use ll_hook::{start_ll_hook, HotkeyHandle};
 
 #[cfg(not(target_os = "windows"))]
+mod gnome_grab;
+#[cfg(not(target_os = "windows"))]
 mod linux_hotkey;
 #[cfg(not(target_os = "windows"))]
 #[allow(unused_imports)]
