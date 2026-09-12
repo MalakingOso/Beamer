@@ -1,6 +1,6 @@
 [package]
 name = "beamer"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
 
 [[bin]]
@@ -62,7 +62,12 @@ futures-util = "0.3"
 image = { version = "0.25", default-features = false, features = ["png", "ico"] }
 rodio = { version = "0.20", default-features = false, features = ["mp3"] }
 reqwest = { version = "0.12", default-features = false, features = ["multipart", "native-tls", "json", "stream"] }
-self_update = { version = "0.42", features = ["archive-zip"] }
+# "archive-zip" alone pulls in the `zip` crate with no compression codec at
+# all (self_update disables its defaults); both CI's `zip -j` (Linux) and
+# `Compress-Archive` (Windows) produce Deflate-compressed entries, so without
+# "compression-zip-deflate" every self-update download fails to extract with
+# "Compression method not supported".
+self_update = { version = "0.42", features = ["archive-zip", "compression-zip-deflate"] }
 sha2 = "0.10.9"
 automerge = "0.11"
 

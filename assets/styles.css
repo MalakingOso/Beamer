@@ -348,6 +348,11 @@ body {
   font-size: 13px;
   color: var(--fg-secondary);
   min-width: 80px;
+  /* Some card rows put a runtime error string here (update/download
+     failures), which can be arbitrarily long and contain unbreakable runs
+     like URLs. Without this, such text overflows the card instead of
+     wrapping — same fix as .log-msg below. */
+  word-break: break-word;
 }
 
 .card-label-hint {
@@ -544,6 +549,8 @@ body {
   font-weight: 500;
   cursor: pointer;
   font-family: inherit;
+  /* Never let a long sibling (e.g. a wrapped error message) squeeze this. */
+  flex-shrink: 0;
   transition: background var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease);
 }
 
@@ -1731,6 +1738,9 @@ body {
 
 .llm-status {
   font-size: 12px;
+  /* K2-Horizon setup failures interpolate a raw error string here — can be
+     long, can contain a URL. Wrap it instead of letting it overflow. */
+  word-break: break-word;
 }
 
 .llm-status.ok { color: var(--success); }
@@ -1786,4 +1796,6 @@ body {
   font-size: 12px;
   color: var(--fg-muted);
   font-family: "DM Mono", "Cascadia Code", monospace;
+  /* Carries the raw WebSocket disconnect reason, unbounded length. */
+  word-break: break-word;
 }
