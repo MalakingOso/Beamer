@@ -136,9 +136,9 @@ mod tests {
         {"id":"gemma-4-E2B_q4_0-it","object":"model","owned_by":"llamacpp",
          "status":{"value":"unloaded","args":["--host","127.0.0.1"]},
          "architecture":{"input_modalities":["text"]},"source":"models_dir"},
-        {"id":"s1-mini-q4_k_m","object":"model",
+        {"id":"gemma-4-E4B_q4_0-it","object":"model",
          "status":{"value":"loaded","args":[]},
-         "meta":{"n_ctx":8192,"size":478268416}}
+         "meta":{"n_ctx":8192,"size":5153960752}}
       ],
       "object": "list"
     }"#;
@@ -150,7 +150,7 @@ mod tests {
             models,
             vec![
                 ModelInfo { id: "gemma-4-E2B_q4_0-it".into(), status: "unloaded".into() },
-                ModelInfo { id: "s1-mini-q4_k_m".into(), status: "loaded".into() },
+                ModelInfo { id: "gemma-4-E4B_q4_0-it".into(), status: "loaded".into() },
             ]
         );
     }

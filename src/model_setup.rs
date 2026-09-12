@@ -59,8 +59,8 @@ pub enum DownloadStatus {
     Ready,
 }
 
-/// Same convention as the existing Gemma/S1-mini models
-/// (`agent_docs/local_inference.md`), independent of where Beamer itself is
+/// Same convention as the existing models (`agent_docs/local_inference.md`),
+/// independent of where Beamer itself is
 /// installed — see the module doc and `hooks.nsh` for why this must be a
 /// fixed path rather than something under the app's own install directory.
 fn model_path() -> PathBuf {

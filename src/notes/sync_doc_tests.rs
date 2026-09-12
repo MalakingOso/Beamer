@@ -36,6 +36,8 @@ const FIXTURE: &str = include_str!("../../tests/fixtures/notes-14.json");
 /// The fixture with the machine-local keys removed, which is what the mirror
 /// looks like once they have been lifted out. `Note` stopped serializing them
 /// two tasks ago, so this is the only honest thing to compare against.
+/// `clean_state` goes too: the cleanup pass was removed, so the key loads
+/// (ignored) and is dropped on the next export.
 fn fixture_without_window_keys() -> serde_json::Value {
     let mut value: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
     for note in value["notes"].as_array_mut().unwrap() {
@@ -43,6 +45,7 @@ fn fixture_without_window_keys() -> serde_json::Value {
         note.remove("pos");
         note.remove("size");
         note.remove("open");
+        note.remove("clean_state");
     }
     value
 }
@@ -162,7 +165,7 @@ fn an_existing_notes_json_round_trips_through_the_document_and_back_out_unchange
     assert_eq!(
         written,
         fixture_without_window_keys(),
-        "the round trip through the document must lose nothing but the machine-local keys"
+        "the round trip must lose nothing but the machine-local keys and the removed stage key"
     );
     assert!(
         !std::fs::read_to_string(dir.join("notes.json")).unwrap().contains("\"open\""),
@@ -192,26 +195,30 @@ fn the_json_mirror_is_an_export_and_is_never_read_back() {
 }
 
 #[test]
-fn a_superseded_cleanup_still_leaves_the_users_own_text_in_the_document() {
-    let dir = temp_dir("cleanup_cas");
+fn reconcile_drops_the_removed_cleanup_stage_key_from_older_documents() {
+    use super::sync_doc::{child_map, put_str, NOTES_KEY};
+    use automerge::ReadDoc;
+
+    let dir = temp_dir("clean_state_drop");
     let mut m = Machine::open(&dir);
     let id = m.notes.create("call the vet".into(), NoteColor::Purple, NoteOrigin::Dictated);
     m.flush();
 
-    // The body captured when the request went out, then the user types while
-    // the model is thinking.
-    let sent_with = "call the vet".to_string();
-    m.notes.set_body(&id, "call the vet about Biscuit".into());
-
-    let outcome = m.notes.apply_cleanup(&id, &sent_with, "Call the vet.");
+    // Simulate a pre-strip document carrying the removed key.
+    let handle = m.notes.sync_doc();
+    {
+        let mut doc = handle.lock();
+        let root = doc.root_map(NOTES_KEY).unwrap();
+        let obj = child_map(doc.doc_mut(), &root, &id).unwrap();
+        put_str(doc.doc_mut(), &obj, "clean_state", "failed").unwrap();
+    }
     m.flush();
 
-    assert_eq!(outcome, super::lifecycle::StageOutcome::Superseded);
-    let reloaded = Machine::open(&dir).notes;
-    assert_eq!(
-        reloaded.get(&id).unwrap().body,
-        "call the vet about Biscuit",
-        "character-merging a model's wholesale rewrite against a mid-flight edit would give \
-         text that is neither. The compare-and-swap stays, and the user's edit wins"
+    let doc = handle.lock();
+    let root = doc.root_map_if_present(NOTES_KEY).unwrap();
+    let (_, obj) = doc.doc().get(&root, id.as_str()).unwrap().unwrap();
+    assert!(
+        doc.doc().get(&obj, "clean_state").unwrap().is_none(),
+        "the removed stage key must not linger in the shared document"
     );
 }

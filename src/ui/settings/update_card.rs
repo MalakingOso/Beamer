@@ -2,7 +2,8 @@ use dioxus::prelude::*;
 
 use crate::notes::task_store::TaskStore;
 use crate::notes::NoteStore;
-use crate::ui::components::{Card, Toggle};
+use crate::ui::components::Toggle;
+use crate::ui::settings::layout::SubSection;
 use crate::update::{self, UpdateStatus};
 
 #[derive(Props, Clone, PartialEq)]
@@ -21,7 +22,7 @@ pub fn UpdateCard(props: UpdateCardProps) -> Element {
     let mut tasks = props.tasks;
 
     rsx! {
-        Card { title: "Updates".to_string(),
+        SubSection { label: "Updates".to_string(),
             div { class: "card-row",
                 span { class: "card-label", "Current version" }
                 span { class: "card-value", "v{update::current_version()}" }

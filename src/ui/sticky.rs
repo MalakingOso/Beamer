@@ -91,9 +91,10 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
     {
         let id = id.clone();
         // Detected via the in-flight signal, not the note's own fields: a
-        // retry that fails the same way it failed before leaves `clean_state`
-        // unchanged (`Failed` -> `Failed`), so the note itself carries no
-        // detectable transition. Passing through `in_flight` on every retry
+        // retry that fails the same way it failed before leaves
+        // `extract_state` unchanged (`Failed` -> `Failed`), so the note
+        // itself carries no detectable transition. Passing through `in_flight`
+        // on every retry
         // does. Mount is the separate second case: a note opened
         // already-Failed never crosses that edge in this window, so without
         // it the text would show forever (see `should_flash_error`).
@@ -107,7 +108,7 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
             let is_mount = !mounted.peek().to_owned();
             mounted.set(true);
             let failed = notes.peek().get(&id).is_some_and(|n| {
-                n.clean_state == StageState::Failed || n.extract_state == StageState::Failed
+                n.extract_state == StageState::Failed
             });
             if !sticky_footer::should_flash_error(is_mount, just_finished, running, failed) {
                 return;
@@ -175,9 +176,9 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
     let chips_id = id.clone();
     let pass_id = id.clone();
 
-    // Keyed to the stage fields, not the note's origin, so a superseded pass stays retryable.
+    // Keyed to the pass, not the note's origin, so a failed pass stays retryable.
     let in_flight = passes_in_flight.read().contains(&id);
-    let footer = sticky_footer::footer(note.clean_state, note.extract_state, in_flight);
+    let footer = sticky_footer::footer(note.extract_state, in_flight);
 
     rsx! {
         div { class: "{color_class}",
@@ -251,7 +252,7 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
                     },
                     title: "{footer.tooltip}",
                     onclick: move |_| {
-                        passes.send(PipelineRequest::retry(pass_id.clone(), footer.stages));
+                        passes.send(PipelineRequest::new(pass_id.clone()));
                     },
                     if footer.icon == FooterIcon::Check {
                         IconCheck { size: 13 }

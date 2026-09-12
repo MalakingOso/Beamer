@@ -1,7 +1,8 @@
 use dioxus::prelude::*;
 
-use crate::ui::components::{Card, Toggle};
+use crate::ui::components::Toggle;
 use crate::ui::settings::hotkey_picker::{CaptureModeRadio, HotkeyPicker};
+use crate::ui::settings::layout::SubSection;
 
 /// Chord proposed when note capture is switched on. Not the serde default
 /// (which stays empty so no chord is stolen by a config file appearing).
@@ -29,7 +30,7 @@ pub fn RecordingCard(props: RecordingCardProps) -> Element {
     let note_enabled = !props.note_hotkey.trim().is_empty();
 
     rsx! {
-        Card { title: "Recording".to_string(),
+        SubSection { label: "Recording".to_string(),
             div { class: "card-row card-row-top",
                 span { class: "card-label", "Hotkey" }
                 HotkeyPicker {

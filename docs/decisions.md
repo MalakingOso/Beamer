@@ -163,3 +163,23 @@ binding on evdev exactly as before. One behaviour differs between the paths:
 through the grab a hold ends when *any* chord key goes up (Mutter can't match a
 release once Ctrl is gone, so the extension watches the modifiers), where
 evdev ends it only on the trigger key. See `agent_docs/text_injection.md`.
+
+## Cleanup pass deleted outright (2026-09-12)
+
+The opt-in cleanup pass is gone. ElevenLabs already returns punctuated,
+capitalized text, so a transcript normalizer had nothing to fix, and every
+fresh install paid for the attempt with a red footer label for a model its
+server was never told to serve. Keeping it opt-in only hid that cost; the
+pass earned no place on a sticky either way.
+
+Deletion spans the whole stack: `src/llm/cleanup.rs` and `CleanupConfig`, the
+`[llm.cleanup]` config section, the Local AI card toggle, the s1-mini section
+of `deploy/llama-models.ini`, and `licenses/S1-mini-LICENSE.txt`. Notes
+written while cleanup existed load fine without it (the stale `clean_state`
+key is ignored on load and dropped on the next flush, in JSON and in the
+sync document alike).
+
+The shared client code stays. `chat.rs`, its error classification and the
+footer failure message all serve extraction too, so the `failure_message`
+roadmap bullet (unreachable hosts misreported as reachable) survives on
+that code. It was never cleanup-specific.

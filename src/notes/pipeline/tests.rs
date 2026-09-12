@@ -15,14 +15,13 @@ use super::*;
 use crate::notes::{Note, NoteColor, NoteOrigin, StageState};
 use std::collections::HashSet;
 
-fn note(id: &str, clean: StageState, extract: StageState) -> Note {
+fn note(id: &str, extract: StageState) -> Note {
     Note {
         id: id.to_string(),
         created: String::new(),
         modified: String::new(),
         raw: String::new(),
         body: String::new(),
-        clean_state: clean,
         extract_state: extract,
         origin: NoteOrigin::default(),
         color: NoteColor::Purple,
@@ -52,31 +51,26 @@ fn archived(mut n: Note) -> Note {
 }
 
 #[test]
-fn a_new_note_asks_for_both_stages() {
-    let req = PipelineRequest::for_new_note("abc");
+fn a_new_note_asks_for_a_pass() {
+    let req = PipelineRequest::new("abc");
     assert_eq!(req.note_id, "abc");
-    assert_eq!(
-        req.stages,
-        Stages::Both,
-        "dictation is the one path where both passes run unasked"
-    );
     assert!(!req.swept, "a dictated note's own pass is never itself a sweep");
 }
 
 #[test]
-fn requests_are_compared_by_note_and_stages() {
+fn requests_are_compared_by_note() {
     // The in-flight set keys on `note_id` alone, deliberately: a second
-    // request for a note already being worked on is a duplicate whatever
-    // stages it names, because both would race on the same CAS.
-    let a = PipelineRequest::retry("n", Stages::Both);
-    let b = PipelineRequest::retry("n", Stages::CleanOnly);
+    // request for a note already being worked on is a duplicate, because
+    // both would race writing the same suggestion rows.
+    let a = PipelineRequest::new("n");
+    let b = PipelineRequest { note_id: "n".into(), swept: true };
     assert_ne!(a, b);
     assert_eq!(a.note_id, b.note_id);
 }
 
 #[test]
 fn retry_requests_are_never_swept() {
-    let req = PipelineRequest::retry("n", Stages::Both);
+    let req = PipelineRequest::new("n");
     assert!(!req.swept, "the footer pressing retry is a person, not the sweep");
 }
 
@@ -85,39 +79,25 @@ fn retry_requests_are_never_swept() {
 #[test]
 fn nothing_failed_yields_nothing_to_sweep() {
     let notes = store(vec![
-        note("a", StageState::Done, StageState::Done),
-        note("b", StageState::Pending, StageState::Skipped),
+        note("a", StageState::Done),
+        note("b", StageState::Skipped),
     ]);
     assert!(sweep_requests(&notes, &HashSet::new()).is_empty());
 }
 
 #[test]
-fn a_failed_cleanup_alone_asks_for_clean_only() {
-    let notes = store(vec![note("a", StageState::Failed, StageState::Done)]);
+fn a_failed_pass_is_swept() {
+    let notes = store(vec![note("a", StageState::Failed)]);
     let reqs = sweep_requests(&notes, &HashSet::new());
-    assert_eq!(reqs, vec![PipelineRequest { note_id: "a".into(), stages: Stages::CleanOnly, swept: true }]);
-}
-
-#[test]
-fn a_failed_extraction_alone_asks_for_extract_only() {
-    let notes = store(vec![note("a", StageState::Done, StageState::Failed)]);
-    let reqs = sweep_requests(&notes, &HashSet::new());
-    assert_eq!(reqs, vec![PipelineRequest { note_id: "a".into(), stages: Stages::ExtractOnly, swept: true }]);
-}
-
-#[test]
-fn both_stages_failed_asks_for_both() {
-    let notes = store(vec![note("a", StageState::Failed, StageState::Failed)]);
-    let reqs = sweep_requests(&notes, &HashSet::new());
-    assert_eq!(reqs, vec![PipelineRequest { note_id: "a".into(), stages: Stages::Both, swept: true }]);
+    assert_eq!(reqs, vec![PipelineRequest { note_id: "a".into(), swept: true }]);
 }
 
 #[test]
 fn every_swept_request_carries_the_swept_flag() {
     let notes = store(vec![
-        note("a", StageState::Failed, StageState::Done),
-        note("b", StageState::Done, StageState::Failed),
-        note("c", StageState::Failed, StageState::Failed),
+        note("a", StageState::Failed),
+        note("b", StageState::Failed),
+        note("c", StageState::Failed),
     ]);
     let reqs = sweep_requests(&notes, &HashSet::new());
     assert_eq!(reqs.len(), 3);
@@ -125,30 +105,26 @@ fn every_swept_request_carries_the_swept_flag() {
 }
 
 #[test]
-fn a_mixed_backlog_asks_each_note_only_for_what_it_needs() {
+fn a_mixed_backlog_sweeps_only_the_failed_notes() {
     let notes = store(vec![
-        note("clean-only", StageState::Failed, StageState::Done),
-        note("healthy", StageState::Done, StageState::Done),
-        note("extract-only", StageState::Skipped, StageState::Failed),
-        note("both", StageState::Failed, StageState::Failed),
+        note("failed", StageState::Failed),
+        note("healthy", StageState::Done),
+        note("pending", StageState::Pending),
+        note("skipped", StageState::Skipped),
     ]);
     let reqs = sweep_requests(&notes, &HashSet::new());
-    let by_id = |id: &str| reqs.iter().find(|r| r.note_id == id).map(|r| r.stages);
-    assert_eq!(by_id("clean-only"), Some(Stages::CleanOnly));
-    assert_eq!(by_id("healthy"), None);
-    assert_eq!(by_id("extract-only"), Some(Stages::ExtractOnly));
-    assert_eq!(by_id("both"), Some(Stages::Both));
-    assert_eq!(reqs.len(), 3);
+    assert_eq!(reqs.len(), 1);
+    assert_eq!(reqs[0].note_id, "failed");
 }
 
 #[test]
-fn an_archived_notes_failed_stage_is_not_swept() {
+fn an_archived_notes_failed_pass_is_not_swept() {
     // Archiving is the user saying they are done with the note. Without this
-    // filter a `Failed` stage on an archived note would be retried forever,
+    // filter a `Failed` pass on an archived note would be retried forever,
     // once per success, for as long as the app runs.
     let notes = store(vec![
-        archived(note("gone", StageState::Failed, StageState::Failed)),
-        note("active", StageState::Failed, StageState::Done),
+        archived(note("gone", StageState::Failed)),
+        note("active", StageState::Failed),
     ]);
     let reqs = sweep_requests(&notes, &HashSet::new());
     assert_eq!(reqs.len(), 1);
@@ -156,45 +132,14 @@ fn an_archived_notes_failed_stage_is_not_swept() {
 }
 
 #[test]
-fn a_terminal_stage_is_not_swept() {
+fn a_terminal_failure_is_not_swept() {
     // A failure that needs a config or server change first (wrong model
     // name, broken preset) would fail identically on every sweep. The footer
     // still offers a manual retry; the sweep just leaves it alone.
-    let notes = store(vec![note("a", StageState::Failed, StageState::Done)]);
-    let terminal: HashSet<(String, Stage)> =
-        [("a".to_string(), Stage::Clean)].into_iter().collect();
+    let notes = store(vec![note("a", StageState::Failed)]);
+    let terminal: HashSet<String> = ["a".to_string()].into_iter().collect();
     assert!(sweep_requests(&notes, &terminal).is_empty());
 }
-
-#[test]
-fn a_sweep_narrows_when_only_one_stage_is_terminal() {
-    // The terminal stage is skipped but the retryable one still gets its
-    // retry: terminal-ness is per stage, not per note.
-    let notes = store(vec![note("a", StageState::Failed, StageState::Failed)]);
-    let terminal: HashSet<(String, Stage)> =
-        [("a".to_string(), Stage::Clean)].into_iter().collect();
-    let reqs = sweep_requests(&notes, &terminal);
-    assert_eq!(
-        reqs,
-        vec![PipelineRequest { note_id: "a".into(), stages: Stages::ExtractOnly, swept: true }]
-    );
-}
-
-#[test]
-fn a_terminal_outcome_is_not_a_success() {
-    assert!(!succeeded_from(&[RequestOutcome::Terminal]));
-    assert!(!succeeded_from(&[RequestOutcome::Responded, RequestOutcome::Terminal]));
-}
-
-// ─── succeeded_from ────────────────────────────────────────────────────────
-//
-// `succeeded_from` is what decides whether a finished pass counts as
-// evidence the server is reachable. The bug this replaces was a running
-// `bool` that started `true` and only ever got pulled down by an error, so a
-// pass that made zero requests still read as a success. Every case below is
-// a real code path in `run_request`/`run_cleanup`/`run_extraction`, named in
-// its own test rather than folded into one parametrized case, so a
-// regression in any one of them fails with a name that says which path broke.
 
 // A pass abandoned mid-flight — the user switched it off while its request
 // was in the air. What matters is that this reports `NotAttempted` and not
@@ -204,7 +149,7 @@ fn a_terminal_outcome_is_not_a_success() {
 
 #[test]
 fn abandoning_a_pass_reports_nothing_attempted_rather_than_a_failure() {
-    let outcome = abandoned("cleanup", "1a078edd");
+    let outcome = abandoned("extraction", "1a078edd");
     assert_eq!(outcome, RequestOutcome::NotAttempted);
     assert_ne!(
         outcome,
@@ -212,68 +157,6 @@ fn abandoning_a_pass_reports_nothing_attempted_rather_than_a_failure() {
         "a pass the user switched off did not fail; calling it an error would \
          suppress the sweep for every other note in the same request"
     );
-}
-
-#[test]
-fn an_abandoned_pass_alongside_a_real_response_still_counts_as_a_success() {
-    // `Both` where extraction responded and cleanup was switched off part-way:
-    // the server demonstrably answered, so the sweep must still fire.
-    assert!(succeeded_from(&[abandoned("cleanup", "n"), RequestOutcome::Responded]));
-}
-
-#[test]
-fn no_outcomes_at_all_is_not_a_success() {
-    // The shape `run_request` reports for `llm.enabled = false`: nothing was
-    // attempted, so `succeeded_from` never even runs, but the helper itself
-    // must also treat "nothing to fold" as no evidence.
-    assert!(!succeeded_from(&[]));
-}
-
-#[test]
-fn a_single_not_attempted_stage_is_not_a_success() {
-    // Three different real code paths collapse to this one outcome list:
-    // a `CleanOnly` request with `llm.cleanup.enabled = false` (the
-    // stage-disabled branch in `run_request`), a whitespace-only note where
-    // `run_cleanup`'s blank fast path never calls `cleanup::clean`, and a
-    // blank-text note where `run_extraction`'s fast path marks it analyzed
-    // without calling `extract::extract`. None of them made a request.
-    assert!(!succeeded_from(&[RequestOutcome::NotAttempted]));
-}
-
-#[test]
-fn both_stages_not_attempted_is_not_a_success() {
-    // A `Both` request where both stages are individually disabled in
-    // config, or a `Both` request against a blank note whose extraction
-    // also found nothing to send.
-    assert!(!succeeded_from(&[RequestOutcome::NotAttempted, RequestOutcome::NotAttempted]));
-}
-
-#[test]
-fn a_single_response_is_a_success() {
-    assert!(succeeded_from(&[RequestOutcome::Responded]));
-}
-
-#[test]
-fn a_response_alongside_a_not_attempted_stage_is_still_a_success() {
-    // `Both`, with one stage disabled and the other actually contacting the
-    // server: the disabled stage contributes no evidence, but the other
-    // stage's response is real evidence, and it must not be diluted away.
-    assert!(succeeded_from(&[RequestOutcome::Responded, RequestOutcome::NotAttempted]));
-}
-
-#[test]
-fn a_single_error_is_not_a_success() {
-    assert!(!succeeded_from(&[RequestOutcome::Errored]));
-}
-
-#[test]
-fn an_error_alongside_a_response_is_not_a_success() {
-    // `Both`, where cleanup got a response but extraction errored (or vice
-    // versa). Folding this to `true` because *a* stage responded would let a
-    // half-broken pass sweep the rest of the backlog; folding to `false`
-    // costs nothing, since the errored stage is itself now `Failed` and will
-    // be picked up by `sweep_requests` on a later, genuinely clean success.
-    assert!(!succeeded_from(&[RequestOutcome::Responded, RequestOutcome::Errored]));
 }
 
 // ─── should_sweep ──────────────────────────────────────────────────────────

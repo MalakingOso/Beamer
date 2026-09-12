@@ -15,8 +15,8 @@ Windows system-tray dictation app. Captures mic audio, transcribes via cloud API
   coroutine (`pipeline.rs`), task suggestions (`task.rs`, `task_store.rs`),
   calendar export (`ics.rs`)
 - `src/llm/` — Client for the standalone llama.cpp server (Beamer never spawns
-  it). Cleanup (`cleanup.rs`) and extraction (`extract.rs`) over `chat.rs`;
-  `prompts.rs` holds both models' input contracts.
+  it). Task extraction (`extract.rs`) over `chat.rs`; `prompts.rs` holds the
+  extraction prompt.
   ⚠️ **No crate-rooted paths in this directory** — `src/bin/task_eval.rs`
   `#[path]`-includes it, and there is no `src/lib.rs`.
 - `src/tray/` — System tray icon + menu
@@ -60,7 +60,7 @@ cargo run --bin task_eval -- --limit 20   # Measure extraction against your own 
 - `agent_docs/dioxus_architecture.md` — Threading model, multi-window, tray integration
 - `agent_docs/design_system.md` — Color tokens, typography, component patterns
 - `agent_docs/sticky_notes.md` — Note windows, Wayland placement, cross-window state (CRITICAL for multi-window work)
-- `agent_docs/local_inference.md` — The two model passes, the pipeline coroutine, and the failures that return HTTP 200 (CRITICAL before touching `src/llm/`)
+- `agent_docs/local_inference.md` — The extraction pass, the pipeline coroutine, and the failures that return HTTP 200 (CRITICAL before touching `src/llm/`)
 - `agent_docs/sync.md` — Cross-machine sync design (automerge doc, live sync client)
 - `agent_docs/running_on_bearcave.md` — Deploying/running Beamer on the Windows laptop against callisto's models
 - `docs/decisions.md` — The "why" behind major shipped features, one paragraph each

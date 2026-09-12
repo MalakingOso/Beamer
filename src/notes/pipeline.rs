@@ -1,4 +1,4 @@
-//! The model-pass pipeline: one App-scoped coroutine that cleans and analyses notes.
+//! The model-pass pipeline: one App-scoped coroutine that extracts tasks from notes.
 //! Owned by `App()` because Dioxus cancels a task with its owning scope — a pass
 //! started from a sticky window would die silently with the window.
 //! ⚠️ Dioxus `spawn`, never `tokio::spawn`: `Signal`'s arena is thread-local.
@@ -14,9 +14,7 @@ use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
 
 use crate::config::Config;
-use crate::llm::cleanup::{self, Cleaned};
 use crate::llm::extract;
-use crate::notes::lifecycle::StageOutcome;
 use crate::notes::task::{Proposal, TaskKind};
 use crate::notes::task_store::TaskStore;
 use crate::notes::NoteStore;
@@ -25,36 +23,21 @@ use crate::ui::status_log::{log_status, LogLevel, StatusLog};
 /// The sweep's pure decision logic, split out to keep this file under 500 lines.
 #[path = "pipeline/sweep.rs"]
 mod sweep;
-use sweep::{should_sweep, succeeded_from, sweep_requests, RequestOutcome};
-
-/// Which stages a request asks for. Separate from "pending": retry may
-/// legitimately re-run a stage that already succeeded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Stages {
-    /// Cleanup, then extraction against whatever cleanup left. The automatic path.
-    Both,
-    CleanOnly,
-    ExtractOnly,
-}
+use sweep::{should_sweep, sweep_requests, RequestOutcome};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PipelineRequest {
     pub note_id: String,
-    pub stages: Stages,
     /// Set only by the backlog sweep. A swept completion never triggers another
     /// sweep, or one failing note would re-sweep the backlog forever.
     pub swept: bool,
 }
 
 impl PipelineRequest {
-    /// What a freshly dictated note asks for.
-    pub fn for_new_note(note_id: impl Into<String>) -> Self {
-        Self { note_id: note_id.into(), stages: Stages::Both, swept: false }
-    }
-
-    /// What the footer's retry affordance asks for. Never swept.
-    pub fn retry(note_id: impl Into<String>, stages: Stages) -> Self {
-        Self { note_id: note_id.into(), stages, swept: false }
+    /// What a freshly dictated note and the footer's retry affordance ask for.
+    /// Never swept.
+    pub fn new(note_id: impl Into<String>) -> Self {
+        Self { note_id: note_id.into(), swept: false }
     }
 }
 
@@ -75,11 +58,11 @@ pub fn use_pipeline(
 
     let coroutine = use_coroutine(move |mut rx: UnboundedReceiver<PipelineRequest>| async move {
         let in_flight: Rc<RefCell<HashSet<String>>> = Rc::new(RefCell::new(HashSet::new()));
-        // (note, stage) pairs whose last failure was terminal: the footer
-        // still offers a manual retry, but the sweep leaves them alone until
-        // one succeeds. In-memory only — a restart re-attempts once, then the
-        // set rebuilds itself from the fresh failures.
-        let terminal: Rc<RefCell<HashSet<(String, Stage)>>> = Rc::new(RefCell::new(HashSet::new()));
+        // Notes whose last failure was terminal: the footer still offers a
+        // manual retry, but the sweep leaves them alone until one succeeds.
+        // In-memory only — a restart re-attempts once, then the set rebuilds
+        // itself from the fresh failures.
+        let terminal: Rc<RefCell<HashSet<String>>> = Rc::new(RefCell::new(HashSet::new()));
         let mut in_flight_signal = in_flight_signal;
         let mut running = FuturesUnordered::new();
 
@@ -103,11 +86,9 @@ pub fn use_pipeline(
                     if finished.succeeded {
                         // A success clears the terminal record: whatever was
                         // misconfigured evidently is not anymore.
-                        terminal.borrow_mut().retain(|(id, _)| *id != finished.note_id);
-                    } else {
-                        for stage in &finished.terminal {
-                            terminal.borrow_mut().insert((finished.note_id.clone(), *stage));
-                        }
+                        terminal.borrow_mut().remove(&finished.note_id);
+                    } else if finished.terminal {
+                        terminal.borrow_mut().insert(finished.note_id.clone());
                     }
 
                     // A succeeded request is itself the evidence the server is
@@ -135,11 +116,11 @@ struct Finished {
     note_id: String,
     swept: bool,
     succeeded: bool,
-    /// Stages whose failure was terminal (see `RequestOutcome::Terminal`).
-    terminal: Vec<Stage>,
+    /// Whether the failure was terminal (see `RequestOutcome::Terminal`).
+    terminal: bool,
 }
 
-/// Run one note's requested stages.
+/// Run one note's extraction pass.
 async fn run_request(
     request: PipelineRequest,
     config: Signal<Config>,
@@ -151,172 +132,59 @@ async fn run_request(
     let swept = request.swept;
 
     // One snapshot up front. `peek`, not `read`: no reactive scope here.
-    let (enabled, cleanup_base_url, extract_base_url, timeout, cleanup_cfg, extract_cfg) = {
+    let (enabled, extract_base_url, timeout, extract_cfg) = {
         let cfg = config.peek();
         (
             cfg.llm.enabled,
-            cfg.llm.cleanup_base_url().to_string(),
             cfg.llm.extract_base_url().to_string(),
             Duration::from_millis(cfg.llm.request_timeout_ms),
-            cfg.llm.cleanup.clone(),
             cfg.llm.extract.clone(),
         )
     };
 
     if !enabled {
-        // `mark_*_skipped` never overwrites `Done`, so these are safe without
-        // a Pending guard — and a `Failed` stage going quiet with the feature
-        // is correct, not a loss: the sweep must not keep retrying a pass
-        // nobody wants run.
-        let mut store = notes.write();
-        store.mark_clean_skipped(&id);
-        store.mark_extract_skipped(&id);
+        // `mark_extract_skipped` never overwrites `Done`, so this is safe
+        // without a Pending guard — and a `Failed` pass going quiet with the
+        // feature is correct, not a loss: the sweep must not keep retrying a
+        // pass nobody wants run.
+        notes.write().mark_extract_skipped(&id);
         // Not `succeeded`: nothing attempted, so no evidence the server is reachable.
-        return Finished { note_id: id, swept, succeeded: false, terminal: Vec::new() };
+        return Finished { note_id: id, swept, succeeded: false, terminal: false };
     }
 
-    // One `RequestOutcome` per named stage, folded by `succeeded_from`, so
-    // "disabled"/"nothing to send" can't conflate with "responded".
-    let mut outcomes: Vec<RequestOutcome> = Vec::with_capacity(2);
-    let mut terminal: Vec<Stage> = Vec::new();
-
-    if matches!(request.stages, Stages::Both | Stages::CleanOnly) {
-        if cleanup_cfg.enabled {
-            outcomes.push(
-                run_cleanup(
-                    &id, &cleanup_base_url, &cleanup_cfg, timeout, config, &mut notes,
-                    &mut status_log,
-                )
-                .await,
-            );
-            if outcomes.last() == Some(&RequestOutcome::Terminal) {
-                terminal.push(Stage::Clean);
-            }
-        } else {
-            notes.write().mark_clean_skipped(&id);
-            outcomes.push(RequestOutcome::NotAttempted);
-        }
+    if !extract_cfg.enabled {
+        notes.write().mark_extract_skipped(&id);
+        return Finished { note_id: id, swept, succeeded: false, terminal: false };
     }
 
-    if matches!(request.stages, Stages::Both | Stages::ExtractOnly) {
-        if extract_cfg.enabled {
-            outcomes.push(
-                run_extraction(
-                    &id, &extract_base_url, &extract_cfg, timeout, config, &mut notes,
-                    &mut tasks, &mut status_log,
-                )
-                .await,
-            );
-            if outcomes.last() == Some(&RequestOutcome::Terminal) {
-                terminal.push(Stage::Extract);
-            }
-        } else {
-            notes.write().mark_extract_skipped(&id);
-            outcomes.push(RequestOutcome::NotAttempted);
-        }
-    }
+    let outcome = run_extraction(
+        &id, &extract_base_url, &extract_cfg, timeout, config, &mut notes,
+        &mut tasks, &mut status_log,
+    )
+    .await;
 
-    Finished { note_id: id, swept, succeeded: succeeded_from(&outcomes), terminal }
+    // "Disabled"/"nothing to send" can't conflate with "responded": only an
+    // actual response counts as success.
+    Finished {
+        note_id: id,
+        swept,
+        succeeded: outcome == RequestOutcome::Responded,
+        terminal: outcome == RequestOutcome::Terminal,
+    }
 }
 
-/// A result that came back after the user switched its pass off. Writing it
-/// would undo `App()`'s opt-out effect, which by now has marked the note
-/// `Skipped` — as `Failed` on an error, or as `Done` plus a body rewrite the
-/// user explicitly opted out of. `NotAttempted` rather than `Errored`: nothing
-/// was learned about the server, and this must not look like a reason to
-/// suppress the backlog sweep.
+/// A result that came back after the user switched the pass off. Writing it
+/// would record `Failed` on an error, or `Done` plus task rows on success,
+/// for a pass the user explicitly opted out of. `NotAttempted` rather than
+/// `Errored`: nothing was learned about the server, and this must not look
+/// like a reason to suppress the backlog sweep.
 fn abandoned(stage: &str, id: &str) -> RequestOutcome {
     tracing::info!("{} for note {} was abandoned: the pass was switched off mid-flight", stage, id);
     RequestOutcome::NotAttempted
 }
 
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
-enum Stage {
-    Clean,
-    Extract,
-}
-
-/// Clean one note with a single call, then compare-and-swap against the
-/// original body, so a mid-pass edit still supersedes. An error aborts the
-/// pass with nothing applied. `NotAttempted` when no call went out (missing
-/// note, or a blank body).
-async fn run_cleanup(
-    id: &str,
-    base_url: &str,
-    cfg: &crate::llm::CleanupConfig,
-    timeout: Duration,
-    config: Signal<Config>,
-    notes: &mut Signal<NoteStore>,
-    status_log: &mut Signal<StatusLog>,
-) -> RequestOutcome {
-    // The compare-and-swap baseline: the result applies only against exactly this string.
-    let Some(sent) = notes.peek().get(id).map(|n| n.body.clone()) else {
-        return RequestOutcome::NotAttempted;
-    };
-
-    if sent.trim().is_empty() {
-        // Blank body: nothing was sent, so this is success with no rewrite
-        // rather than a pass that stays `Pending` forever offering a retry
-        // that always no-ops.
-        notes.write().apply_cleanup(id, &sent, "");
-        return RequestOutcome::NotAttempted;
-    }
-    if !config.peek().llm.cleanup_wanted() {
-        return abandoned("cleanup", id);
-    }
-
-    let cleaned = match cleanup::clean(base_url, cfg, &sent, timeout).await {
-        Ok(Cleaned::Rewritten(text)) => Some(text),
-        Ok(Cleaned::NothingToChange) => None,
-        Err(e) => {
-            if !config.peek().llm.cleanup_wanted() {
-                return abandoned("cleanup", id);
-            }
-            notes.write().mark_clean_failed(id);
-            tracing::warn!("cleanup failed for note {}: {}", id, e);
-            log_status(status_log, LogLevel::Error, format!("Note cleanup failed: {e}"));
-            // Terminal failures (bad model name, broken preset) are still
-            // `Failed` in the store, but retrying them unchanged can only
-            // fail the same way, so the sweep leaves them alone.
-            return if e.is_retryable() {
-                RequestOutcome::Errored
-            } else {
-                RequestOutcome::Terminal
-            };
-        }
-    };
-
-    // The last gate, and the one that matters most: past here `apply_cleanup`
-    // rewrites the user's body. Doing that after they switched the pass off
-    // is the one outcome of this race that cannot be undone by toggling back.
-    if !config.peek().llm.cleanup_wanted() {
-        return abandoned("cleanup", id);
-    }
-
-    // Unchanged passes an empty response, which `apply_cleanup` reads as "success, change nothing".
-    let text = cleaned.unwrap_or_default();
-
-    match notes.write().apply_cleanup(id, &sent, &text) {
-        StageOutcome::Applied => {
-            if text.is_empty() {
-                tracing::info!("cleanup found nothing to change in note {}", id);
-            } else {
-                tracing::info!("cleanup rewrote note {}", id);
-            }
-        }
-        StageOutcome::Superseded => {
-            // The user typed mid-pass; their text wins and the stage stays Pending.
-            tracing::info!("cleanup for note {} was superseded by an edit", id);
-        }
-        StageOutcome::NoteGone => {
-            tracing::debug!("note {} disappeared during cleanup", id);
-        }
-    }
-    RequestOutcome::Responded
-}
-
-/// Same outcome contract as `run_cleanup`. Blank text is `NotAttempted`:
-/// `extract::extract` is never called, so nothing about reachability was learned.
+/// Blank text is `NotAttempted`: `extract::extract` is never called, so
+/// nothing about reachability was learned.
 async fn run_extraction(
     id: &str,
     base_url: &str,
@@ -327,8 +195,7 @@ async fn run_extraction(
     tasks: &mut Signal<TaskStore>,
     status_log: &mut Signal<StatusLog>,
 ) -> RequestOutcome {
-    // Read the post-cleanup body: cleaned, or `raw`/the user's edit on the other
-    // outcomes.
+    // Read the note body: the transcript, or the user's own edit.
     let Some(text) = notes.peek().get(id).map(|n| n.body.clone()) else {
         return RequestOutcome::NotAttempted;
     };

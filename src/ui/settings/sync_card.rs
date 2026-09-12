@@ -5,7 +5,8 @@
 use dioxus::prelude::*;
 
 use crate::notes::sync_client::SyncStatus;
-use crate::ui::components::{Card, Toggle};
+use crate::ui::components::Toggle;
+use crate::ui::settings::layout::SubSection;
 
 #[derive(Props, Clone, PartialEq)]
 pub struct SyncCardProps {
@@ -33,7 +34,7 @@ pub fn SyncCard(props: SyncCardProps) -> Element {
     let line = describe_status(&props.url, &props.started_url, &props.status.read());
 
     rsx! {
-        Card { title: "Sync".to_string(),
+        SubSection { label: "Sync".to_string(),
             div { class: "card-row",
                 span { class: "card-label", "Sync notes between two machines" }
                 Toggle {

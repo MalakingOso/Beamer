@@ -3,8 +3,8 @@
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// One field per stage: cleanup can fail while extraction succeeds.
-/// `Skipped` means deliberately not run; `Pending` means not run yet.
+/// Extraction progress. `Skipped` means deliberately not run;
+/// `Pending` means not run yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StageState {
@@ -95,11 +95,9 @@ pub struct Note {
     pub modified: String,
     /// Verbatim transcript or typed text. Never rewritten.
     pub raw: String,
-    /// Display text. Equals `raw` until a cleanup pass replaces it.
+    /// Display text. Equals `raw` until the user edits it.
     pub body: String,
     /// `#[serde(default)]` so older `notes.json` files (single `"state"` key) still load.
-    #[serde(default)]
-    pub clean_state: StageState,
     #[serde(default)]
     pub extract_state: StageState,
     #[serde(default)]

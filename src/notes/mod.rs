@@ -19,7 +19,6 @@ pub mod edit;
 pub mod flush;
 pub mod ics;
 mod legacy;
-/// Public so `StageOutcome` is nameable from the model-pass callers.
 pub mod lifecycle;
 mod machine;
 mod model;
@@ -276,7 +275,6 @@ impl NoteStore {
             modified: now,
             body: raw.clone(),
             raw,
-            clean_state: StageState::Pending,
             extract_state: StageState::Pending,
             origin,
             color,
@@ -393,8 +391,8 @@ impl NoteStore {
         Self::newest_first(self.notes.iter().filter(|n| n.archived).collect())
     }
 
-    /// Active notes matching `query`, newest first. Searches `raw` too (cleanup can
-    /// rewrite away spoken words).
+    /// Active notes matching `query`, newest first. Searches `raw` too (the
+    /// verbatim transcript keeps words an edit may remove).
     pub fn search(&self, query: &str) -> Vec<&Note> {
         let needle = query.trim().to_lowercase();
         if needle.is_empty() {

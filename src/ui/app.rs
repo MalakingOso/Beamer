@@ -59,7 +59,7 @@ pub fn App() -> Element {
     let rec_state = use_signal(RecordingState::default);
     let last_injection = use_signal(|| "No injection yet".to_string());
     let history = use_signal(TranscriptionHistory::load);
-    let mut notes = use_signal(NoteStore::load);
+    let notes = use_signal(NoteStore::load);
     // After the notes, from the same automerge document (the note store owns the handle).
     let tasks = use_signal(|| TaskStore::load_beside(&notes.peek()));
     // Taken *before* `Config::load()`, which creates the file as a side
@@ -99,31 +99,9 @@ pub fn App() -> Element {
     #[cfg(target_os = "linux")]
     linux_integration::setup_linux_integration(rec_state, active_mode, config);
 
-    // Model passes live here, not in the requesting window: `App()`'s scope
+    // The model pass lives here, not in the requesting window: `App()`'s scope
     // outlives every sticky, so closing a note mid-pass cannot cancel it.
     let (note_passes, note_passes_in_flight) = pipeline::use_pipeline(config, notes, tasks, status_log);
-
-    // Cleanup is opt-in and toggled independently of extraction (see
-    // `llm::CleanupConfig::enabled`). With it off, notes carrying a `Failed`
-    // from when it was on would keep reporting it forever: the pipeline only
-    // ever visits a note it is asked about, and nothing asks about a pass that
-    // no longer runs.
-    //
-    // Subscribes to `notes` as well as `config`, deliberately. Two writers add
-    // notes this effect would otherwise never see: the `+` buttons, which
-    // create a `Typed` note and send no pipeline request at all, and the sync
-    // tick, which replaces `notes.notes` wholesale with whatever the document
-    // hydrates to — including a note another machine failed to clean. Reading
-    // rather than peeking costs one extra pass and cannot loop: the effect's
-    // own write drives `has_cleanup_left_to_skip` to false, which is the fixed
-    // point. The guard is what makes that true, and it also keeps an unrelated
-    // config save from notifying every sticky window for nothing.
-    use_effect(move || {
-        let wanted = config.read().llm.cleanup_wanted();
-        if !wanted && notes.read().has_cleanup_left_to_skip() {
-            notes.write().skip_cleanup_on_every_note();
-        }
-    });
 
     let coroutine = use_coroutine(move |rx: UnboundedReceiver<HotkeyEvent>| {
         orchestrator::run(

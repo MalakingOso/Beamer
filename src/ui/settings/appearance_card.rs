@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 
-use crate::ui::components::{Card, Toggle};
+use crate::ui::components::Toggle;
+use crate::ui::settings::layout::SubSection;
 
 #[derive(Props, Clone, PartialEq)]
 pub struct AppearanceCardProps {
@@ -13,7 +14,7 @@ pub struct AppearanceCardProps {
 #[component]
 pub fn AppearanceCard(props: AppearanceCardProps) -> Element {
     rsx! {
-        Card { title: "Appearance".to_string(),
+        SubSection { label: "Appearance".to_string(),
             div { class: "card-row",
                 span { class: "card-label", "Recording pill" }
                 Toggle {

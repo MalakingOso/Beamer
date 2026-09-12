@@ -1,7 +1,7 @@
 //! `POST /v1/chat/completions` against the standalone llama.cpp server.
 //! The body carries model, messages and nothing else: sampling and the thinking
-//! switch live server-side in `deploy/llama-models.ini`. Both models answer
-//! HTTP 200 when misconfigured, so a test pins that Beamer sends no sampling
+//! switch live server-side in `deploy/llama-models.ini`. A misconfigured model
+//! answers HTTP 200 anyway, so a test pins that Beamer sends no sampling
 //! parameters.
 
 use std::time::Duration;
@@ -180,8 +180,8 @@ mod tests {
 
     fn sample_request() -> ChatRequest {
         ChatRequest {
-            model: "s1-mini-q4_k_m".into(),
-            messages: vec![Message::system("be a normalizer"), Message::user("um so hello")],
+            model: "gemma-4-E4B_q4_0-it".into(),
+            messages: vec![Message::system("extract tasks"), Message::user("um so hello")],
             response_format: None,
         }
     }

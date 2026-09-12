@@ -1,4 +1,4 @@
-//! Stage 2 — task extraction. Model-agnostic: no branch here reads which
+//! Task extraction. Model-agnostic: no branch here reads which
 //! model is configured. A precision problem: a fabricated
 //! task poisons a list nobody then trusts, so every check here assumes the
 //! model misbehaves. Parse-time gates: fences tolerated, evidence must ground

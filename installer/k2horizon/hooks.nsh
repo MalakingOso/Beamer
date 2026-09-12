@@ -116,7 +116,7 @@ Section "un.K2HorizonCleanup"
   Pop $0
 
   RMDir /r "${K2H_RUNTIME_DIR}"
-  ; The model itself, not the whole models\beamer\ directory — Gemma/S1-mini
+  ; The model itself, not the whole models\beamer\ directory — other
   ; GGUFs may also live there. Decision 11 ("uninstall removes everything")
   ; is scoped to what this feature itself put on disk.
   Delete "$PROFILE\models\beamer\K2-Horizon-0.9B-Q8_0.gguf"

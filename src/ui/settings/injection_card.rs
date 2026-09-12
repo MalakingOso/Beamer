@@ -1,5 +1,5 @@
 use dioxus::prelude::*;
-use crate::ui::components::Card;
+use crate::ui::settings::layout::SubSection;
 
 #[component]
 pub fn InjectionCard() -> Element {
@@ -21,7 +21,7 @@ pub fn InjectionCard() -> Element {
     let mut show_fallbacks = use_signal(|| false);
 
     rsx! {
-        Card { title: "Text Injection".to_string(),
+        SubSection { label: "Text Injection".to_string(),
             // GNOME focus helper — the primary injection path; only on GNOME Wayland
             {
                 let is_gnome_wayland = std::env::var("XDG_CURRENT_DESKTOP")

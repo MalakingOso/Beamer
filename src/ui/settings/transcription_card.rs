@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 
-use crate::ui::components::{language_options, Card, Select, Toggle};
+use crate::ui::components::{language_options, Select, Toggle};
+use crate::ui::settings::layout::SubSection;
 
 #[derive(Props, Clone, PartialEq)]
 pub struct TranscriptionCardProps {
@@ -24,7 +25,7 @@ pub fn TranscriptionCard(props: TranscriptionCardProps) -> Element {
     let is_voxtral = props.backend == "voxtral" || props.backend == "voxtral_batch";
 
     rsx! {
-        Card { title: "Transcription".to_string(),
+        SubSection { label: "Transcription".to_string(),
             div { class: "card-row",
                 span { class: "card-label", "Backend" }
                 Select {

@@ -38,7 +38,6 @@ pub fn reconcile(sync: &mut SyncDoc, notes: &[Note], unreadable: &[String]) -> R
         put_str(doc, &obj, "modified", &note.modified)?;
         put_str(doc, &obj, "raw", &note.raw)?;
         put_text(doc, &obj, "body", &note.body)?; // character-merged, see `sync_doc::put_text`
-        merge_stage(doc, &obj, "clean_state", note.clean_state)?;
         merge_stage(doc, &obj, "extract_state", note.extract_state)?;
         put_str(doc, &obj, "origin", &enum_name(&note.origin))?;
         put_str(doc, &obj, "color", &enum_name(&note.color))?;
@@ -47,6 +46,11 @@ pub fn reconcile(sync: &mut SyncDoc, notes: &[Note], unreadable: &[String]) -> R
         // documents so it does not linger in the shared corpus.
         if doc.get(&obj, "attachments")?.is_some() {
             doc.delete(&obj, "attachments")?;
+        }
+        // The cleanup pass was removed: drop the stage key left behind by
+        // older documents for the same reason.
+        if doc.get(&obj, "clean_state")?.is_some() {
+            doc.delete(&obj, "clean_state")?;
         }
     }
     Ok(())
@@ -105,7 +109,6 @@ fn read_note(doc: &AutoCommit, obj: &ObjId, key: &str) -> Option<Note> {
         modified: get_str(doc, obj, "modified")?,
         raw: get_str(doc, obj, "raw")?,
         body: get_text(doc, obj, "body")?,
-        clean_state: read_enum::<StageState>(doc, obj, "clean_state"),
         extract_state: read_enum::<StageState>(doc, obj, "extract_state"),
         origin: read_enum::<NoteOrigin>(doc, obj, "origin"),
         color: read_enum_or(doc, obj, "color", NoteColor::Purple),

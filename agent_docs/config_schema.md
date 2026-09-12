@@ -57,10 +57,7 @@ default_color = "random"     # random | purple | violet | amber | teal | rose | 
                              # An unrecognised value falls back to "purple"
 
 [llm]
-enabled = true                       # Master switch for both on-device passes.
-                                     # Cleanup has its own switch below and is
-                                     # off by default; extraction is what this
-                                     # one really turns on
+enabled = true                       # Master switch for the on-device extraction pass
 base_url = "http://127.0.0.1:8080"   # Beamer never spawns or configures the
                                      # server, only talks to it. Can point at a
                                      # tailnet host, e.g.
@@ -73,15 +70,14 @@ request_timeout_ms = 60000           # Generous on purpose. A CPU-only
                                      # `reasoning_effort: low`) measured
                                      # 1.3-12.4s/note on a real batch; 15s was
                                      # the tail, not headroom. A timeout means
-                                     # "not cleaned"/"not analyzed", never
-                                     # "note lost"
+                                     # "not analyzed", never "note lost"
 connect_timeout_ms = 5000            # How long to wait for the connection
                                      # itself to open, separate from the total
                                      # request timeout above. Short on purpose:
                                      # over a tailnet, a sleeping remote
                                      # machine should fail in seconds rather
                                      # than hang for the whole generous request
-                                     # timeout on every single text run.
+                                     # timeout on every single note.
                                      # Measured RTT to a laptop over Tailscale
                                      # was 13-289ms (mdev 109, WiFi power
                                      # saving), so 5s leaves real margin.
@@ -93,37 +89,13 @@ connect_timeout_ms = 5000            # How long to wait for the connection
                                      # immediately. The Local AI settings card
                                      # says so.
 
-[llm.cleanup]                        # "S1-mini" by "Superwhisper"
-enabled = false              # ⚠️ OFF by default, and toggled independently of
-                             # [llm] enabled above. `model_setup` installs the
-                             # extraction model and nothing else, so a
-                             # default-on cleanup pass asks every fresh install
-                             # for a model its server was never told to serve —
-                             # and the note footer then reports "Cleanup
-                             # failed" on every note for a pass the user never
-                             # asked for. An explicit `true` on disk still
-                             # wins; turning it back on needs an s1-mini
-                             # preset on the server first. `App()` marks the
-                             # stage Skipped on every note while this is off,
-                             # so an old backlog of failures goes quiet
-model = "s1-mini-q4_k_m"     # Server-side model id (the GGUF filename stem),
-                             # NOT a path. Must match an id from GET /v1/models
-base_url = ""                # Optional override of the shared [llm] base_url,
-                             # for this stage only. Empty/absent means "same
-                             # server as everything else" (the common case).
-styling = "semi-formal"      # casual | semi-casual | semi-formal | formal
-structure = "lists"          # prose | lists
-context = "general"          # general | email
-
 [llm.extract]                # NANI-Nithin/K2-Horizon-0.9B-GGUF, Q8_0
 enabled = true
 model = "K2-Horizon-0.9B-Q8_0"
-base_url = ""                # Optional per-stage override — see llm.cleanup's
-                             # base_url above. This is what lets extraction run
-                             # on a different host than cleanup. Kept for when
-                             # cleanup comes back; with cleanup off, both
-                             # stages want the same local server and this can
-                             # stay empty. See agent_docs/running_on_bearcave.md.
+base_url = ""                # Optional override of the shared [llm] base_url,
+                             # for extraction only. Empty/absent means "same
+                             # server as everything else" (the common case).
+                             # See agent_docs/running_on_bearcave.md.
 min_confidence = 0.5         # Below this a suggestion is not shown at all,
                              # and is not written to tasks.json either — a row
                              # nobody sees is not a labelled example.
@@ -159,14 +131,11 @@ per-model settings, including idle shutdown and the required thinking-control
 flags for each model, live in `deploy/llama-models.ini` (callisto) or
 `deploy/llama-models-bearcave.ini` (bearcave).
 
-`[llm.cleanup]` and `[llm.extract]` can each override `base_url` for that
-stage alone (`LlmConfig::cleanup_base_url()` / `extract_base_url()` in
-`src/llm/mod.rs`), falling back to the shared `[llm] base_url` when unset.
-This is what makes cleanup and extraction able to run on different hosts —
-e.g. bearcave, where cleanup stays on callisto over Tailscale but extraction
-runs on a local, CPU-only server (see `agent_docs/running_on_bearcave.md`). An
-existing config that only ever set the shared `base_url` is unaffected: both
-stages keep resolving to it exactly as before this split existed.
+`[llm.extract]` can override `base_url` for extraction alone
+(`LlmConfig::extract_base_url()` in `src/llm/mod.rs`), falling back to the
+shared `[llm] base_url` when unset. An existing config that only ever set the
+shared `base_url` is unaffected: extraction keeps resolving to it exactly as
+before this override existed.
 
 `base_url` moving from `127.0.0.1` to a tailnet host is why the two timeouts
 are split rather than one. The far end can be asleep (a laptop, a desktop
@@ -182,12 +151,6 @@ Model files are **not** downloaded by Beamer. They are fetched manually into
 per-model idle clock, so a background health check pins the ~3 GB extraction
 model in VRAM permanently, with no error and no symptom. Beamer probes on
 button press and once when the settings page opens, nowhere else.
-
-⚠️ `[llm.cleanup]` carries a licence obligation, not just a config. `s1-mini`
-is Apache 2.0 plus a binding additional term requiring the model to be
-identified as `"S1-mini" by "Superwhisper"` — that exact capitalization. The
-string lives in `src/llm/mod.rs` as `MODEL_CREDIT`, is rendered in the Local AI
-settings card, and is pinned by an exact-equality test.
 
 ## API Keys
 

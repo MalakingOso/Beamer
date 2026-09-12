@@ -3,9 +3,10 @@
 use dioxus::prelude::*;
 
 use crate::llm::client::{self, ModelInfo};
-use crate::llm::{MODEL_CREDIT, MIN_CONNECT_TIMEOUT_MS};
+use crate::llm::MIN_CONNECT_TIMEOUT_MS;
 use crate::model_setup::{self, DownloadStatus};
-use crate::ui::components::{Card, Select, Toggle};
+use crate::ui::components::{Select, Toggle};
+use crate::ui::settings::layout::SubSection;
 
 #[derive(Clone, PartialEq)]
 enum Probe {
@@ -23,16 +24,10 @@ pub struct LocalAiCardProps {
     /// Connect timeout, separate from the request timeout. Baked into the HTTP
     /// client at startup, so edits take effect after a restart (see the note).
     pub connect_timeout_ms: u64,
-    /// Transcript cleanup, toggled on its own: it needs a second model the
-    /// installer never fetches, so it is off unless the user asks for it.
-    pub cleanup_enabled: bool,
-    pub cleanup_model: String,
     pub extract_model: String,
     pub on_enabled_change: EventHandler<bool>,
     pub on_base_url_change: EventHandler<String>,
     pub on_connect_timeout_ms_change: EventHandler<u64>,
-    pub on_cleanup_enabled_change: EventHandler<bool>,
-    pub on_cleanup_model_change: EventHandler<String>,
     pub on_extract_model_change: EventHandler<String>,
     /// K2-Horizon's first-run download/setup state — `Idle` except on a
     /// fresh, bundled aarch64 install. See `crate::model_setup`.
@@ -71,7 +66,7 @@ pub fn LocalAiCard(props: LocalAiCardProps) -> Element {
     };
 
     rsx! {
-        Card { title: "Local AI".to_string(),
+        SubSection { label: "Local AI".to_string(),
             div { class: "card-row",
                 span { class: "card-label", "Enable on-device AI" }
                 Toggle {
@@ -156,39 +151,6 @@ pub fn LocalAiCard(props: LocalAiCardProps) -> Element {
             }
 
             div { class: "card-row",
-                span { class: "card-label", "Clean up dictated transcripts" }
-                Toggle {
-                    value: props.cleanup_enabled,
-                    ontoggle: move |v: bool| props.on_cleanup_enabled_change.call(v),
-                }
-            }
-            div { class: "llm-note",
-                "Off by default \u{2014} it needs a second model this install does not fetch. \
-                 Task extraction is separate, and unaffected by this."
-            }
-
-            if props.cleanup_enabled {
-                div { class: "card-row",
-                    span { class: "card-label", "Cleanup model" }
-                    if served.is_empty() {
-                        input {
-                            class: "input input-mono",
-                            value: "{props.cleanup_model}",
-                            onchange: move |e: Event<FormData>| {
-                                props.on_cleanup_model_change.call(e.value().to_string());
-                            },
-                        }
-                    } else {
-                        Select {
-                            value: props.cleanup_model.clone(),
-                            options: model_options(&served, &props.cleanup_model),
-                            onchange: move |v: String| props.on_cleanup_model_change.call(v),
-                        }
-                    }
-                }
-            }
-
-            div { class: "card-row",
                 span { class: "card-label", "Extraction model" }
                 if served.is_empty() {
                     input {
@@ -243,13 +205,6 @@ pub fn LocalAiCard(props: LocalAiCardProps) -> Element {
                 },
             }
 
-            // The licence binds the credit to the model actually being used;
-            // with cleanup off, s1-mini is never loaded.
-            if props.cleanup_enabled {
-                div { class: "llm-credit",
-                    "Cleanup uses {MODEL_CREDIT}."
-                }
-            }
         }
     }
 }

@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 
-use crate::ui::components::{Card, MaskedInput};
+use crate::ui::components::MaskedInput;
+use crate::ui::settings::layout::SubSection;
 
 #[derive(Props, Clone, PartialEq)]
 pub struct ApiKeysCardProps {
@@ -13,7 +14,7 @@ pub struct ApiKeysCardProps {
 #[component]
 pub fn ApiKeysCard(props: ApiKeysCardProps) -> Element {
     rsx! {
-        Card { title: "API Keys".to_string(),
+        SubSection { label: "API Keys".to_string(),
             div { class: "card-row",
                 span { class: "card-label", "ElevenLabs" }
                 MaskedInput {

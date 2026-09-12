@@ -2,31 +2,31 @@
 
 A second global hotkey dictates into a **sticky note** on the desktop instead of
 injecting into the focused field. All three phases are built: capture, persist,
-place and find (1); an S1-mini cleanup pass (2); and task suggestions the user
-accepts or dismisses (3).
+place and find (1); the extraction pass wiring (2); and task suggestions the
+user accepts or dismisses (3).
 
 This document is about the **windows** — placement, cross-window state, and the
-things about Wayland that look broken and are not. The two model passes have
-their own document.
+things about Wayland that look broken and are not. The model pass has its
+own document.
 
 - Model passes: **`agent_docs/local_inference.md`** — read it before touching
   `src/llm/` or `src/notes/pipeline.rs`.
 - Design history: `docs/decisions.md` ("Sticky notes, all three phases")
 
-## Note state is two fields, not one
+## Note state is one field
 
-`NoteState` is gone. A note carries `clean_state` and `extract_state`, each a
-`StageState { Pending, Done, Failed, Skipped }`, because a note can legitimately
-be cleanup-failed *and* extraction-succeeded at once — a failed cleanup is meant
-to leave extraction to run against `raw`. One linear enum could not say that,
-and a successful extraction would erase the record a retry affordance keys off.
+`NoteState` is gone. A note carries `extract_state`, a
+`StageState { Pending, Done, Failed, Skipped }`, because extraction either ran
+or it did not, and the footer retry keys off the record. A plain bool could
+not say that, and a successful pass must never erase the record a retry
+affordance keys off.
 
 `Skipped` is not `Pending`. `Pending` has something to retry; `Skipped` means
 the user turned the pass off, and the footer offers nothing for it.
 
 Migration was free and must stay free: `Note` has no `deny_unknown_fields`, so
-an older `notes.json` carrying `"state": "raw"` loads with the stale key ignored
-and both new fields defaulting to `Pending`.
+an older `notes.json` carrying `"state": "raw"` or `"clean_state"` loads with
+the stale keys ignored and the remaining field defaulting to `Pending`.
 
 `NoteOrigin` records whether a note was dictated or typed. It is passed
 explicitly to `create` rather than defaulted, because it is corpus provenance
@@ -34,19 +34,17 @@ and a silent default is exactly what corrupts a corpus.
 
 ⚠️ **Only `notes/lifecycle.rs` writes a stage result.** Its methods are machine
 writes: none bump `modified` (that is user-facing ordering) and none touch
-`raw`. `apply_cleanup` is a compare-and-swap on the body captured at send time —
-**body equality, not a timestamp**, because `set_color` bumps `modified` for
-something that is not an edit. `set_open` used to be in that list too; since
-Task 7 it is machine-local and does not touch `modified` at all. See
+`raw`. `set_open` used to bump `modified` for something that is not an edit;
+since Task 7 it is machine-local and does not touch `modified` at all. See
 "Machine-local state" below.
 
 ## The footer: three icons, and a fading failure
 
-`src/ui/sticky_footer.rs`'s `footer()` decides the glyph from three inputs, not
-two: `clean_state`, `extract_state`, and now whether a pass for this note is
-in flight *right now*. In flight outranks everything, including a stale
-`Failed` from a prior attempt — a retry actually running must never still show
-the last attempt's failure text.
+`src/ui/sticky_footer.rs`'s `footer()` decides the glyph from two inputs, not
+one: `extract_state`, and whether a pass for this note is in flight *right
+now*. In flight outranks everything, including a stale `Failed` from a prior
+attempt (a retry actually running must never still show the last attempt's
+failure text).
 
 "In flight" is **not** `StageState` — there is deliberately no `Running`
 variant, since `StageState` is persisted into the automerge doc and a
@@ -61,8 +59,8 @@ threaded down through `setup_sticky_windows` / `StickyNoteProps` alongside
 The failed-state red text (`.sticky-pass-error`) auto-hides itself ~7s after
 appearing, in `sticky.rs`, independent of whether the sweep has actually
 retried the note yet — this is a presentational fix, not a retry-policy
-change. It cannot key off `note.clean_state`/`extract_state` directly: those
-fields are backed by a `use_memo` that dedups by `Note`'s `PartialEq`, so a
+change. It cannot key off `note.extract_state` directly: that
+field is backed by a `use_memo` that dedups by `Note`'s `PartialEq`, so a
 retry that fails the *same way twice in a row* produces an identical `Note`
 and never triggers a re-render. The timer instead watches the in-flight
 signal's own true→false transition for this note (a plain `Signal` write is
@@ -71,13 +69,8 @@ opened already-`Failed` never crosses that edge in its window, so mount is a
 second trigger: it gets one timed display too, or the text would show
 forever. Both cases are one pure predicate,
 `sticky_footer::should_flash_error`, pinned by tests there. Once the
-text hides, the asterisk and its retry affordance stay exactly as before —
-only the words go quiet.
-
-`apply_cleanup`'s compare-and-swap (`notes/lifecycle.rs`) also resets a stale
-`Failed` back to `Pending` on `Superseded`: a retry response landing after a
-mid-flight edit is not evidence of anything actually broken, and leaving
-`Failed` in place would make the footer lie indefinitely.
+text hides, the asterisk and its retry affordance stay exactly as before
+(only the words go quiet).
 
 ## Read this first: extensions do not hot-reload on Wayland
 
@@ -144,8 +137,8 @@ the document's old per-note `attachments` map deleted on reconcile and the
 typed or dictated into a note stays plain text; linkifying inside a
 `<textarea>` is not possible without replacing the editor.
 
-⚠️ **`raw` stays the verbatim transcript.** Cleanup may rewrite `body`, never
-`raw`.
+⚠️ **`raw` stays the verbatim transcript.** Only the user's own edits ever
+rewrite `body`, never `raw`.
 
 ## Notes are resized by the client, and the size is remembered
 
@@ -449,10 +442,6 @@ it. See `agent_docs/config_schema.md` and `deploy/`.
 per-model idle clock, so a background health check pins the ~3 GB extraction
 model in VRAM permanently — no error, no symptom. On button press and once when
 the settings page opens, nowhere else.
-
-⚠️ `MODEL_CREDIT` in `src/llm/mod.rs` is a **licence condition**. `s1-mini` is
-Apache 2.0 plus a binding term requiring the exact string
-`"S1-mini" by "Superwhisper"`. Pinned by an exact-equality test.
 
 ## Manual QA checklist
 

@@ -1,35 +1,24 @@
 # Local inference — `src/llm/` and the note pipeline
 
-Beamer runs two on-device model passes over a dictated note: **cleanup**
-rewrites the transcript, **extraction** proposes tasks. This document is about
-how they are wired and, mostly, about the ways they fail *without saying so* —
-which is nearly all of them.
+Beamer runs one on-device model pass over a dictated note: **extraction**
+proposes tasks. This document is about how it is wired and, mostly, about the
+ways it fails *without saying so*, which is nearly all of them.
 
-⚠️ **Cleanup is off by default and toggled on its own** (`[llm.cleanup]
-enabled`, its own switch on the Local AI settings card). Only extraction ships
-working: `model_setup` installs K2-Horizon and nothing else, so a default-on
-cleanup pass asks a server for s1-mini that was never told to serve it, fails,
-and puts "Cleanup failed" on the note footer for a pass nobody asked for. The
-two stages were already independent in the store (`clean_state` /
-`extract_state` are separate fields, and a failed cleanup still runs
-extraction); this makes them independent in the config and the UI too. While
-cleanup is off, `App()` runs `NoteStore::skip_cleanup_on_every_note`, which
-downgrades any leftover `Failed`/`Pending` cleanup stage to `Skipped` — without
-it a failure recorded while cleanup was on stays on disk forever, because the
-pipeline only ever visits a note it is asked about and the backlog sweep only
-fires after a *fully* successful pass. Everything below describes cleanup as it
-behaves when it is turned back on.
+There used to be a second pass that rewrote the transcript before extraction
+ran. It is gone, deleted across code, config, UI, preset and licence (see
+`docs/decisions.md`, 2026-09-12). ElevenLabs already returns punctuated,
+capitalized text, so the pass was normalizing words that needed no
+normalizing, and every fresh install paid for the attempt with a red footer
+label for a model its server was never told to serve. Extraction is the pass
+that earns its place on a sticky.
 
-Both passes re-read `LlmConfig::cleanup_wanted()` / `extract_wanted()` from
-the live config immediately before every store write, never from the snapshot
-`run_request` took when the request started. A pass can be switched off while
-its request is in the air — a long body is many sequential cleanup calls — and
-by the time the response lands `App()`'s opt-out effect has already marked the
-note `Skipped`. Writing anyway would resurrect the stage as `Failed`, or, on
-the success path, rewrite the user's body for a pass they explicitly opted out
-of, which is the one outcome here that toggling back cannot undo. An abandoned
-pass reports `NotAttempted`, not `Errored`: nothing was learned about the
-server, and an error would wrongly suppress the backlog sweep.
+Extraction re-reads `LlmConfig::extract_wanted()` from the live config
+immediately before every store write, never from the snapshot `run_request`
+took when the request started. A pass can be switched off while its request
+is in the air. Writing anyway would record `Failed` on an error, or
+suggestions on success, for a pass the user explicitly opted out of. An
+abandoned pass reports `NotAttempted`, not `Errored`: nothing was learned
+about the server, and an error would wrongly suppress the backlog sweep.
 
 Read `agent_docs/sticky_notes.md` first for the note windows themselves.
 
@@ -39,38 +28,33 @@ Read `agent_docs/sticky_notes.md` first for the note windows themselves.
 dictation ──> sink::do_note_capture ──> flush to disk ──> pipeline request
                                                               │
                           notes::pipeline (a coroutine in App())
-                                    │
-                    ┌───────────────┴───────────────┐
-              llm::cleanup                     llm::extract
-              (s1-mini, plain text)            (K2-Horizon, json_object)
-                    │                                │
-              apply_cleanup (CAS)            replace_suggestions
-                    │                                │
-                notes.json                       tasks.json
+                                              │
+                                       llm::extract
+                                  (K2-Horizon, json_object)
+                                              │
+                                    replace_suggestions
+                                              │
+                                          tasks.json
 ```
 
 | Module | Job |
 |---|---|
-| `llm/mod.rs` | `LlmConfig`, `MODEL_CREDIT`. Config only. |
+| `llm/mod.rs` | `LlmConfig`. Config only. |
 | `llm/client.rs` | `GET /v1/models`. On-demand probe, nothing else. |
 | `llm/chat.rs` | `POST /v1/chat/completions`, and the `ChatError` classification. |
-| `llm/prompts.rs` | `CLEANUP_SYSTEM` (a wire format) and `extract_system(today)` (a policy). |
-| `llm/cleanup.rs` | Stage 1. Builds the request; decides what a response *means*. |
-| `llm/extract.rs` | Stage 2. Fence stripping, evidence grounding, confidence floor. |
-| `notes/blocks.rs` | The placeholder-token grammar. Pure. **Everything below depends on it.** |
-| `notes/pipeline.rs` | The coroutine that runs both, segments the body, and writes the results back. |
-| `notes/lifecycle.rs` | The only code allowed to write a stage result to a note. |
+| `llm/prompts.rs` | `extract_system(today)` (a policy). |
+| `llm/extract.rs` | Fence stripping, evidence grounding, confidence floor. |
+| `notes/pipeline.rs` | The coroutine that runs extraction and writes the results back. |
+| `notes/lifecycle.rs` | The only code allowed to write the extraction result to a note. |
 | `bin/task_eval.rs` | Measures extraction against the user's own accepted/dismissed rows. |
 
 **Beamer never spawns the server.** It runs standalone and Beamer's entire
-connection surface is a per-stage `base_url` (`LlmConfig::cleanup_base_url()` /
-`extract_base_url()`, each falling back to the shared `[llm] base_url` when
-unset — see `agent_docs/config_schema.md`). The two stages can point at
-different servers: on bearcave, cleanup stays on callisto over Tailscale
-(`deploy/llama-beamer.service`) while extraction runs locally, CPU-only,
-against `deploy/llama-models-bearcave.ini` — see
-`agent_docs/running_on_bearcave.md`. Elsewhere the two still default to the
-same box (`deploy/llama-beamer.service`) exactly as before this split.
+connection surface is the shared `[llm] base_url` plus an extract-only
+override (`LlmConfig::extract_base_url()`, falling back to the shared value
+when unset; see `agent_docs/config_schema.md`). On bearcave, extraction runs
+locally, CPU-only, against `deploy/llama-models-bearcave.ini` (see
+`agent_docs/running_on_bearcave.md`). Elsewhere it defaults to the same box
+(`deploy/llama-beamer.service`).
 
 `llama-server` has no authentication of its own, so it stays bound to
 `127.0.0.1:8080` even when a client on another machine needs to reach it.
@@ -93,9 +77,8 @@ bins — but it is why `llm::extract::ProposedTask` exists separately from
 
 `src/notes/mod.rs` is **not** includable the same way: it reaches for
 `crate::config::Config` to find its storage path. `task_eval` includes only the
-leaf modules (`notes/model.rs`, `notes/task.rs`, `notes/blocks.rs` — all three
-free of crate-rooted paths) and reads the two JSON files with its own envelope
-structs.
+leaf modules (`notes/model.rs`, `notes/task.rs` — both free of crate-rooted
+paths) and reads the two JSON files with its own envelope structs.
 
 The tests for `prompts.rs` and `extract.rs` live in `prompts/tests.rs` and
 `extract/tests.rs`, reached by `#[path]` from their parents. **The same rule
@@ -107,20 +90,14 @@ Every item here returns HTTP 200 with a plausible body.
 
 ### 1. Thinking is on unless the preset turns it off — and K2-Horizon has no off
 
-Both models reason by default and neither was trained to skip it entirely.
+Every model here reasons by default.
 
-- **S1-mini** inherits Qwen3's template. With thinking on it emits `<think>`
-  and stops after about three tokens. Do **not** substitute `reasoning-budget 0`
-  — the model card says output degrades. It also needs greedy decoding forced,
-  because the GGUF carries `temp 0.6 / top_p 0.95 / top_k 20` inherited from
-  Qwen3-0.6B. Its switch is `chat_template_kwargs.enable_thinking: false`, and
-  it works: the template reads that flag.
-- **K2-Horizon-0.9B** does not. Its chat template reads
+- **K2-Horizon-0.9B** does not take a plain off switch. Its chat template reads
   `chat_template_kwargs.reasoning_effort` directly and opens the assistant turn
   with one of three tags — `high` (default) → `<ifm|think>`, `medium` →
   `<ifm|think_fast>`, `low` → `<ifm|think_faster>` — unconditionally. There is
   no fourth branch for "off": `enable_thinking: false` (the generic llama.cpp
-  kill switch, and what S1-mini uses) is a **silent no-op** here, since the
+  kill switch) is a **silent no-op** here, since the
   template never reads that name at all. `low` is what
   `deploy/llama-models-bearcave.ini` sets — the fastest of the three, not a
   disabled state.
@@ -133,16 +110,16 @@ bearcave), and Beamer sends no sampling or template parameters of its own —
 see below. That makes the preset the single owner, and a gap in it a gap
 everywhere.
 
-> **The Gemma version of this was a live bug until 2026-08-22.** Only s1-mini
-> had the setting; Gemma had been reasoning on every request since the preset
-> was written. Nothing showed it — the status is 200, the JSON is valid, and
+> **The Gemma version of this was a live bug until 2026-08-22.** Only the
+> cleanup model had the setting; Gemma had been reasoning on every request
+> since the preset was written. Nothing showed it — the status is 200, the JSON is valid, and
 > the extracted tasks are byte-identical either way. Measured, same prompt and
 > note: **306 predicted tokens / 4069 ms with thinking on, 64 tokens / 842 ms
 > with it off.** Only the clock differs, which is why it survived so long.
 
 `ChatError::ThinkingEnabled` exists for exactly this: empty `content` beside
 non-empty `reasoning_content`. Without it the symptom arrives as an inscrutable
-parse error, or — worse for cleanup — as "the model cleaned it to nothing".
+parse error.
 It does **not** fire for K2-Horizon at any effort level: at `high` both
 `content` and `reasoning_content` fill (so `content` is never empty); at
 `medium`/`low`, `reasoning_content` is simply absent from the response, so
@@ -186,95 +163,6 @@ needs the memory. Probe on button press and once when the settings page opens.
 Nowhere else — and specifically not before a request that was going to be made
 anyway. Connection-refused is fast and already well classified.
 
-### 4. An empty cleanup response is success
-
-Say "um, uh, so" into a note and S1-mini correctly returns an **empty string**;
-there was nothing to normalize. Treating that as failure is merely wrong;
-treating it as a rewrite is destructive, because it blanks the only record of
-what was said. `body` stays equal to `raw` and `clean_state` becomes `Done`.
-
-Pinned at both layers — `cleanup::resolve` and `lifecycle::apply_cleanup` —
-because the intuitive implementation gets it backwards.
-
-### 5. S1-mini's input is a wire format, not a prompt
-
-The publisher documents that a reworded system prompt or an out-of-set control
-value produces garbled output. So `prompts::control_line` takes **only enums**:
-there is no `&str` path by which an untrained value could reach the model, and
-an unrecognised config value falls back to the trained default rather than
-being passed through.
-
-Trained sets: `Styling` ∈ {casual, semi-casual, semi-formal, formal},
-`Structure` ∈ {prose, lists}, `Context` ∈ {general, email}.
-
-> **`structure = "lists"` rarely produces lists.** Measured on a filler-heavy
-> three-item note, S1-mini returned prose: *"So I need to call the vet about
-> Milo, and also send Tuesday's invoice, and I guess pick up the dry cleaning
-> at some point."* The model is conservative about bullets. This is why
-> markdown rendering inside the note's `<textarea>` is a non-issue in practice
-> rather than a deferred problem — list markers are rare, not merely unstyled.
-
-### 6. A placeholder token in the body is out-of-distribution input
-
-A note holding an image carries a `[[beamer:<id>]]` line in its `body` (see
-`agent_docs/sticky_notes.md`). `body` is what cleanup is handed and what it
-overwrites wholesale, and s1-mini has never seen a token like that. The result
-is failure mode 5 by another route: garbled text, HTTP 200, plausible body.
-
-**So a token is never sent. Not escaped, not quoted — removed.**
-
-```
-body ──blocks::parse──> [Text a][Attach x][Text b]
-                           │                  │
-                      clean(a)            clean(b)     <- two calls, no tokens
-                           └── blocks::reassemble ──┐
-                                                    ▼
-        apply_cleanup(id, expected = the ORIGINAL FULL body, reassembled)
-```
-
-Six rules, in `pipeline::run_cleanup`. Each one preserves an existing behaviour
-rather than adding one:
-
-1. `sent` is still the **whole** body, so the compare-and-swap is unchanged and
-   an edit mid-pass still supersedes.
-2. Each `Block::Text` run is cleaned independently by the existing
-   `cleanup::clean`. Runs go over **verbatim** — `cleanup_user_message` is not
-   touched, so the control line is still the wire format it always was.
-3. A blank run is not sent at all and passes through.
-4. A run answering `NothingToChange`, or with an empty reply, keeps its
-   original text. `reassemble` cannot make a run empty, which is what keeps
-   `apply_cleanup`'s `!cleaned.trim().is_empty()` guard meaningful.
-5. If every run had nothing to change, the pass reports that and the body is
-   not rewritten.
-6. **A note with no attachments yields exactly one run** — one call carrying
-   the whole body, today's behaviour, reproduced *by construction*. There is no
-   fast-path flag that could get out of step.
-
-An HTTP error on any run **aborts the pass**: `mark_clean_failed`, nothing
-applied. Half a cleaned note is worse than an uncleaned one, and the footer's
-retry re-runs the whole thing.
-
-Cost is one call per run — 0.225 s each measured, so a note with two images is
-about 0.7 s. Serial on purpose: concurrency here buys a fraction of a second
-and risks reordering the answers.
-
-**Extraction** gets `blocks::plain_text(&body)` — the same tokens removed. That
-also means an `evidence` span can never contain token text, because
-`is_grounded` checks against the string that was actually sent.
-
-The invariant is pinned at the pure layer, in `blocks`'s tests: a two-image body
-yields three text runs and **no run contains `[[beamer:`**. `cleanup::clean` is
-HTTP, so the call count itself is not unit-testable — but the wire is guarded at
-runtime: `chat::complete` scans every outgoing message and emits a
-`tracing::warn!` if one carries a token. There is no other symptom, so it warns
-rather than merely logging. Under `RUST_LOG=beamer=debug` each request also logs
-its model, message count and total size, so a segmented pass is visible as three
-lines rather than one.
-
-⚠️ `chat.rs` spells `[[beamer:` out as a literal, because `src/llm/**` may not
-reach `notes::blocks`. `blocks`'s own test pins that literal — that is what
-catches the two drifting apart.
-
 ## Extraction is a precision problem
 
 A fabricated task is worse than a missed one: a list nobody trusts cannot be
@@ -309,8 +197,8 @@ nobody is ever shown is not a labelled example, and letting it reach
 
 ## The prompt
 
-`extract_system(today)` is tunable — unlike `CLEANUP_SYSTEM` — but its *shape*
-is not. Its current shape (`EXTRACT_BODY` in `src/llm/prompts.rs`) asks for a
+`extract_system(today)` is tunable, but its *shape* is not. Its current shape
+(`EXTRACT_BODY` in `src/llm/prompts.rs`) asks for a
 `scan` array before `tasks`: one entry per clause in the note that names any
 action, by anyone, each carrying `subject_is_speaker` (true only for the
 note's own author) and `category` (one of eight, including `fact` — which
@@ -363,9 +251,7 @@ number** ("Sunday, 23 August 2026 (2026-08-23)"), because asking a language
 model to compute a weekday from an ISO date is asking it to be wrong.
 
 ⚠️ **The date goes in the *system* message.** The note is still sent byte for
-byte as the user message, and a test pins that. ⚠️ **Safe here and only here** —
-Gemma is a general instruct model. The same move against s1-mini is failure
-mode 5; cleanup's prompt is not touched.
+byte as the user message, and a test pins that.
 
 Three new fields per proposal:
 
@@ -421,11 +307,10 @@ the grounding gate, and a click before anything leaves the app. Extend
 
 ## Trigger policy
 
-- **Dictated notes** clean and analyse automatically. You asked for correction,
-  and you cannot proofread speech as you produce it.
-- **Typed notes** do neither unasked. Rewriting text somebody deliberately typed
-  is presumptuous, and S1-mini is a *transcript* normalizer — typed prose is
-  outside its training distribution.
+- **Dictated notes** analyse automatically. You cannot proofread speech as you
+  produce it, and a task nobody proposes is a task nobody does.
+- **Typed notes** do not analyse unasked. Proposing tasks for text somebody
+  deliberately typed is a guess about intent nobody asked for.
 
 This is **structural, not a runtime check**, for the *first* automatic pass on
 a fresh note. That decision lives at exactly one site, `sink::do_note_capture`,
@@ -433,25 +318,24 @@ which is reachable only from dictation. A typed note has no path to that line.
 Keep it that way rather than adding an `if origin == Dictated` somewhere: the
 check would be forgettable and the topology is not.
 
-Either pass can be re-run from the note's footer, which reads the two stage
-fields rather than the note's origin. Keying it to origin leaves a dead end: a
-dictated note whose cleanup was superseded by an edit has spent its automatic
-trigger and would have no way back.
+Extraction can be re-run from the note's footer, which reads `extract_state`
+rather than the note's origin. Keying it to origin leaves a dead end: a
+dictated note that already ran its automatic pass has spent its trigger and
+would have no way back.
 
 ⚠️ **A second, different kind of automatic trigger exists: the backlog sweep**
 (`pipeline::sweep_requests`, described in full under "Failure handling"
 below). It is not gated by origin at all, and that is deliberate rather than
-an oversight. `sink::do_note_capture` decides *whether a note gets cleaned and
-analysed in the first place*, and that decision does stay origin-gated exactly
+an oversight. `sink::do_note_capture` decides *whether a note gets analysed
+in the first place*, and that decision does stay origin-gated exactly
 as described above. The sweep does something narrower: it re-sends a request
-that already exists, for a stage that already reached `Failed`, once a later
-success proves the server is reachable again. A typed note that reached
-`Failed` by way of a footer press is swept the same as a dictated one. The
-user already asked once, by pressing retry; the sweep is only carrying that
-same ask forward, not inventing a new automatic pass on text nobody asked to
-have touched. If that distinction ever stops holding, i.e. if the sweep starts
-running passes a note never had a human ask for, the origin gate belongs on
-`sweep_requests` too.
+for extraction that already reached `Failed`, once a later success proves the
+server is reachable again. A typed note that reached `Failed` by way of a
+footer press is swept the same as a dictated one. The user already asked once,
+by pressing retry; the sweep is only carrying that same ask forward, not
+inventing a new automatic pass on text nobody asked to have touched. If that
+distinction ever stops holding, i.e. if the sweep starts running passes a note
+never had a human ask for, the origin gate belongs on `sweep_requests` too.
 
 ## The pipeline coroutine
 
@@ -467,79 +351,59 @@ In-flight requests are driven together by a `FuturesUnordered` **inside the
 coroutine's single future**, not by spawning a task each. A serial loop would
 let one hung request stall every later note for the full `request_timeout_ms`;
 spawning per request would put scope ownership back in question for no gain.
-Duplicate requests for a note already in flight are dropped — two passes would
-race on the same compare-and-swap and the loser's work would be discarded.
+Duplicate requests for a note already in flight are dropped: two passes would
+race on the same suggestions and the loser's work would be discarded.
 
-### The compare-and-swap
-
-`sticky.rs` writes `body` on **every keystroke**. Cleanup therefore captures the
-body at send time and `lifecycle::apply_cleanup` applies the result only if the
-body still equals it. Otherwise the user typed while the model was thinking,
-their edit wins, and the pass returns `Superseded` having changed *nothing* —
-not even `clean_state`, so the footer still offers a retry.
-
-⚠️ The guard is **body equality, not a `modified` timestamp**. `set_color` and
-`set_open` bump `modified` for things that are not edits, so a timestamp guard
-would reject perfectly valid results.
-
-Extraction needs no such guard: chips carry their own evidence, so a stale
-suggestion is visibly stale rather than silently wrong.
+Extraction needs no compare-and-swap guard: chips carry their own evidence, so
+a stale suggestion is visibly stale rather than silently wrong.
 
 ## Failure handling
 
 The governing rule: **a failure never costs the user words.** The note is
 created and flushed to disk *before* any model is contacted, so a server that
-is down, a model file that is missing or a busy GPU all degrade to "the note is
-not cleaned yet", never to a lost note.
+is down, a model file that is missing or a busy GPU all degrade to "the note
+has no suggestions yet", never to a lost note.
 
-| Outcome | `clean_state` | Effect |
+| Outcome | `extract_state` | Effect |
 |---|---|---|
-| Rewritten | `Done` | `body` replaced, `raw` untouched |
-| Empty / unchanged response | `Done` | nothing changes |
-| Superseded by an edit | `Pending` | nothing changes; footer still offers it |
-| Network, non-2xx, timeout | `Failed` | `body` stays; footer shows a red label |
+| Suggestions proposed | `Done` | chips updated |
+| No tasks found | `Done` | nothing changes |
+| Network, non-2xx, timeout | `Failed` | footer shows a red label |
 | `llm.enabled = false` | `Skipped` | only if the stage had never run |
 | Backlog sweep, after a later success | `Failed` -> retried | see below |
 
-Extraction is independent: a failed cleanup still runs extraction, against
-`body` — which equals `raw` when cleanup failed, and equals the user's own text
-when it was superseded. `Skipped` never overwrites `Done`, so asking for a pass
-while the feature is off cannot erase the record that it once ran.
+`Skipped` never overwrites `Done`, so asking for a pass while the feature is
+off cannot erase the record that it once ran.
 
 ### The backlog sweep
 
-Before the remote server (a tailnet host that can be asleep), a `Failed` note
-just sat there until the user noticed the red label and pressed the footer.
-That is fine for a single note failing once, and wrong for a tailnet host that
-was briefly unreachable during a run of several notes: nobody wants to click
-retry five times because their remote machine happened to be asleep when they
-first dictated.
+Before the sweep, a `Failed` note just sat there until the user noticed the
+red label and pressed the footer. That is fine for a single note failing once,
+and wrong for a server that was briefly unreachable during a run of several
+notes: nobody wants to click retry five times because their machine happened
+to be busy when they first dictated.
 
 `use_pipeline` (`src/notes/pipeline.rs`) now sweeps the backlog itself: when a
 pass finishes and succeeded, it also re-sends a `PipelineRequest` for every
-non-archived note whose `clean_state` or `extract_state` is `Failed`, asking
-each one only for the stages that actually failed (`sweep_requests`). This
-includes the note that just finished: `in_flight.remove` (`pipeline.rs:122`)
-runs before the sweep (`pipeline.rs:130`), so a `CleanOnly` retry that
-succeeds while `extract_state` is still `Failed` will sweep that same note for
-`ExtractOnly`. Archived notes are excluded on purpose: archiving is the user
-saying they are done with a note, and a `Failed` stage on one is not backlog
-to keep spending requests on. The existing `in_flight` set still dedupes, so
-this cannot storm the server with duplicate requests, and a swept request is
-marked `swept: true` so *its own* completion never triggers a further sweep.
-Without that guard, a note that keeps genuinely failing would re-sweep the
-whole backlog forever, once per success, on every failed note in the app.
+non-archived note whose `extract_state` is `Failed` (`sweep_requests`). This
+includes the note that just finished: `in_flight` removal (`pipeline.rs:84`)
+runs before the sweep (`pipeline.rs:96`), so a retry that succeeds still
+sweeps that same note if its extraction is somehow still `Failed`. Archived
+notes are excluded on purpose: archiving is the user saying they are done with
+a note, and a `Failed` stage on one is not backlog to keep spending requests
+on. The existing `in_flight` set still dedupes, so this cannot storm the
+server with duplicate requests, and a swept request is marked `swept: true` so
+*its own* completion never triggers a further sweep. Without that guard, a
+note that keeps genuinely failing would re-sweep the whole backlog forever,
+once per success, on every failed note in the app.
 
 **"Succeeded" means a response actually arrived.** A pass can finish
-having contacted the server zero times: the stage was disabled, the whole
+having contacted the server zero times: the pass was disabled, the whole
 feature was disabled, the note vanished before a request could go out, or
-there was nothing to send (a blank note, an attachment-only body with no text
-runs). None of those prove the server is up, so none of them count. A pass is
-folded to `succeeded` only when at least one of its stages actually got a
-response (`RequestOutcome::Responded` in `src/notes/pipeline/sweep.rs`) and
-none errored; the fold is a pure function, `succeeded_from`, kept separate
-from the stage-running code specifically so this rule is unit-testable
-without a server.
+there was nothing to send (a blank note). None of those prove the server is
+up, so none of them count. `succeeded` is a direct comparison against
+`RequestOutcome::Responded` (`src/notes/pipeline/sweep.rs`): with one pass,
+no fold is left to write.
 
 **This does not violate the never-poll rule.** The rule is about a timer: a
 periodic `GET /v1/models` that runs whether or not anyone asked for anything,
@@ -554,19 +418,17 @@ Errors surface through `StatusLog` as well as `RUST_LOG`.
 
 ## Models on disk
 
-`s1-mini` is an official **QAT / publisher** build. `K2-Horizon-0.9B` is a
-third-party GGUF quant (`NANI-Nithin/K2-Horizon-0.9B-GGUF`, Q8_0) of IFM's
-BF16 release — llama.cpp upstream cannot even load it (see "The standalone
-server's own build" below), so there is no publisher GGUF to prefer. Neither
-`mmproj` (vision) file is needed — Beamer's use is text-only.
+`K2-Horizon-0.9B` is a third-party GGUF quant
+(`NANI-Nithin/K2-Horizon-0.9B-GGUF`, Q8_0) of IFM's BF16 release: llama.cpp
+upstream cannot even load it (see "The standalone server's own build" below),
+so there is no publisher GGUF to prefer. No `mmproj` (vision) file is needed,
+as Beamer's use is text-only.
 
 | File | Size | Role | Where it lives |
 |---|---|---|---|
-| `s1-mini-q4_k_m.gguf` | 462 MiB | Stage 1 cleanup. 94.8% token accuracy on 7,519 held-out cases, measured on **this** quant — do not substitute f16. | callisto |
-| `K2-Horizon-0.9B-Q8_0.gguf` | 1.15 GiB | Stage 2 extraction. | bearcave (`%USERPROFILE%\models\beamer\`) |
+| `K2-Horizon-0.9B-Q8_0.gguf` | 1.15 GiB | Task extraction. | bearcave (`%USERPROFILE%\models\beamer\`) |
 
-Licences are in `licenses/`; required attribution is in `README.md` (see
-"Licence obligation" below). K2-Horizon's licence terms are **unresolved as of
+Licences are in `licenses/`. K2-Horizon's licence terms are **unresolved as of
 this writing** — see the provenance note in `licenses/K2-Horizon-LICENSE.txt`.
 
 **Gemma 4 (the previous extraction model) is retired from bearcave's default,
@@ -601,7 +463,7 @@ measurement" below.
 K2-Horizon's architecture (`K2HorizonForCausalLM`) is not in upstream
 llama.cpp at all — the model fails to load, full stop. Bearcave's extraction
 server is therefore built from **`MBZUAI-IFM/llama.cpp`, branch
-`model/K2Horizon`**, not the upstream tree callisto's cleanup server uses.
+`model/K2Horizon`**, not the upstream tree callisto's server uses.
 That fork also needed a tokenizer patch: K2-Horizon's pretokenizer regex
 carries a `\uXXXX` escape that MSVC's `std::regex`/`std::wregex` cannot parse,
 so `unicode_regex_split_custom_k2_horizon()` was added to `src/unicode.cpp`
@@ -649,7 +511,7 @@ full walkthrough. Three things worth knowing if touching this code:
   and never populated there) from a compile error to a harmless warning,
   verified both ways.
 
-### callisto's cleanup server
+### callisto's server
 
 The server is `deploy/llama-beamer.service` on callisto, not spawned by
 Beamer. Backend is **SYCL, not Vulkan** — measured **2.35x** Vulkan at prompt
@@ -716,8 +578,6 @@ backend, `reasoning_effort: low` unless noted.
 
 | Thing | Measured |
 |---|---|
-| S1-mini cleans a filler-heavy ~25-word note (callisto) | **109 ms** |
-| S1-mini cleans a ~60-word note (callisto) | 225 ms |
 | Gemma E4B extraction, thinking **off** (callisto) | **0.13–3.0 s**, typically ~1.1 s |
 | Gemma E4B extraction, thinking **on** (callisto) | 4.1 s for identical output |
 | Wake Gemma from sleep (callisto) | 1.68 s |
@@ -759,20 +619,14 @@ the axis that mattered for it was quant and reasoning effort instead (below).
   complete miss (zero tasks) on another — a different, worse class of problem
   than a wrong judgment call. Q8_0 remains the quant used.
 
-## Licence obligation
-
-`MODEL_CREDIT` in `src/llm/mod.rs` is not a courtesy. `superwhisper/s1-mini` is
-Apache 2.0 **plus a binding additional term** requiring the model to be
-identified as `"S1-mini" by "Superwhisper"` — that exact capitalization. It is
-pinned by an exact-equality test whose comment explains that the risk is not
-malice but tidiness.
+## Licence note
 
 ⚠️ **K2-Horizon-0.9B's licence terms are unresolved, not confirmed-permissive.**
 `IFM/K2-Horizon-0.9B`'s own metadata pairs an `apache-2.0` SPDX tag with
 `license_name: internal-only` and a `license_link` pointing at a `LICENSE`
 file that does not exist in the repository (checked 2026-09-04). That
-combination is the same shape S1-mini uses to signal an actual additional
-term, not a plain-Apache repo. The GGUF quant used here
+combination is the same shape that has signaled a binding additional term
+before, not a plain-Apache repo. The GGUF quant used here
 (`NANI-Nithin/K2-Horizon-0.9B-GGUF`) just defers back to the same missing
 file. `licenses/K2-Horizon-LICENSE.txt` carries the canonical Apache 2.0 text
 as the best available floor and a full provenance note — re-check the source

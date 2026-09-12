@@ -82,6 +82,16 @@ recommends = ["syncthing"]
 # (`cargo build --release --bin sync_server` first).
 [bundle.deb.files]
 "usr/bin/sync_server" = "target/release/sync_server"
+# The GNOME Shell extension sources Settings → Injection installs from.
+# `install::gnome_extension::locate_source_dir` probes
+# `<exe>/../share/beamer/extension/<uuid>`, which is this destination once
+# the package lands in /usr. One entry per file: `dx bundle` copies files,
+# not directories. `tests/packaging.rs` fails if a file is added to the
+# extension dir without an entry here.
+"usr/share/beamer/extension/beamer-focus@beamer.app/extension.js" = "extension/beamer-focus@beamer.app/extension.js"
+"usr/share/beamer/extension/beamer-focus@beamer.app/indicator.js" = "extension/beamer-focus@beamer.app/indicator.js"
+"usr/share/beamer/extension/beamer-focus@beamer.app/metadata.json" = "extension/beamer-focus@beamer.app/metadata.json"
+"usr/share/beamer/extension/beamer-focus@beamer.app/stylesheet.css" = "extension/beamer-focus@beamer.app/stylesheet.css"
 # The systemd user unit for the sync server. Without this the package installs
 # the binary and `systemctl --user enable beamer-sync` reports the unit does
 # not exist, which is what happened on the first install. /usr/lib/systemd/user

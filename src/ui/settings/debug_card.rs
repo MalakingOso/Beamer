@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 
-use crate::ui::components::{Card, Toggle};
+use crate::ui::components::Toggle;
+use crate::ui::settings::layout::SubSection;
 use crate::ui::status_log::{LogLevel, StatusLog};
 
 #[derive(Props, Clone, PartialEq)]
@@ -17,7 +18,7 @@ pub fn DebugCard(props: DebugCardProps) -> Element {
     let entries: Vec<_> = log.entries.iter().rev().collect();
 
     rsx! {
-        Card { title: "Debug".to_string(),
+        SubSection { label: "Debug".to_string(),
             div { class: "card-row",
                 span { class: "card-label", "Debug logging" }
                 Toggle {

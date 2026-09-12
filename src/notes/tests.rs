@@ -35,7 +35,6 @@ fn create_returns_a_unique_id_and_seeds_body_from_raw() {
     let note = store.get(&a).unwrap();
     assert_eq!(note.raw, "call the vet");
     assert_eq!(note.body, "call the vet", "body starts as a copy of raw");
-    assert_eq!(note.clean_state, StageState::Pending);
     assert_eq!(note.extract_state, StageState::Pending);
     assert_eq!(
         note.origin, NoteOrigin::Dictated,
@@ -55,7 +54,7 @@ fn set_body_never_touches_raw() {
     assert_eq!(note.body, "Call the vet.");
     assert_eq!(
         note.raw, "um so call the vet",
-        "raw is the only record of what was actually said and must survive cleanup"
+        "raw is the only record of what was actually said and must survive an edit"
     );
 }
 
@@ -168,7 +167,7 @@ fn set_open_on_a_missing_note_is_a_no_op() {
 fn search_matches_what_was_said_not_just_what_is_displayed() {
     let mut store = temp_store("search");
     let id = store.create("um so call the vet about biscuit".into(), NoteColor::Purple, NoteOrigin::Dictated);
-    // A cleanup pass rewrote the body and dropped the filler word.
+    // An edit rewrote the body and dropped the filler word.
     store.set_body(&id, "Call the vet about Biscuit.".into());
 
     assert_eq!(store.search("biscuit").len(), 1, "matching must be case-insensitive");
@@ -176,7 +175,7 @@ fn search_matches_what_was_said_not_just_what_is_displayed() {
     assert_eq!(
         store.search("um so").len(),
         1,
-        "raw is searched too, cleanup can remove the very words you remember saying"
+        "raw is searched too, an edit can remove the very words you remember saying"
     );
     assert!(store.search("mortgage").is_empty());
 }

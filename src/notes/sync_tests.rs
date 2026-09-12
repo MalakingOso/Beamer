@@ -286,28 +286,28 @@ fn a_concurrent_failure_does_not_regress_a_synced_done() {
 
     let mut a = Machine::open(&a_dir);
     let note_id = a.notes.create("call the vet".into(), NoteColor::Teal, NoteOrigin::Dictated);
-    a.notes.apply_cleanup(&note_id, "call the vet", "Call the vet.");
+    a.notes.mark_analyzed(&note_id);
     a.flush();
 
     // B receives the done note, then its own retry fails against it.
     std::fs::copy(a.document(), b_dir.join("notes.automerge")).unwrap();
     let mut b = Machine::open(&b_dir);
     assert_eq!(
-        b.notes.get(&note_id).unwrap().clean_state,
+        b.notes.get(&note_id).unwrap().extract_state,
         StageState::Done,
         "the laptop sees the completed pass"
     );
-    b.notes.mark_clean_failed(&note_id);
+    b.notes.mark_extract_failed(&note_id);
     b.flush();
 
     // The shared record still says done: B's failure was real (its own store
     // still says so), but success is monotonic — a transient failure must not
     // regress it with no evidence either way.
-    assert_eq!(b.notes.get(&note_id).unwrap().clean_state, StageState::Failed);
+    assert_eq!(b.notes.get(&note_id).unwrap().extract_state, StageState::Failed);
     carry_document(&b, &a);
     a.flush();
     assert_eq!(
-        a.notes.get(&note_id).unwrap().clean_state,
+        a.notes.get(&note_id).unwrap().extract_state,
         StageState::Done,
         "merging B's failure must not undo A's completed pass"
     );
@@ -329,24 +329,24 @@ fn a_deliberate_skip_propagates_while_done_stays_put() {
 
     std::fs::copy(a.document(), b_dir.join("notes.automerge")).unwrap();
     let mut b = Machine::open(&b_dir);
-    // What the pipeline does on a Pending note while the stage is disabled.
-    b.notes.mark_clean_skipped(&note_id);
-    assert_eq!(b.notes.get(&note_id).unwrap().clean_state, StageState::Skipped);
+    // What the pipeline does on a Pending note while the pass is disabled.
+    b.notes.mark_extract_skipped(&note_id);
+    assert_eq!(b.notes.get(&note_id).unwrap().extract_state, StageState::Skipped);
     b.flush();
 
     carry_document(&b, &a);
     a.flush();
     assert_eq!(
-        a.notes.get(&note_id).unwrap().clean_state,
+        a.notes.get(&note_id).unwrap().extract_state,
         StageState::Skipped,
-        "a stage that never ran stays visibly off after the merge"
+        "a pass that never ran stays visibly off after the merge"
     );
 
     // And the reverse: a completed pass is immune to a later skip.
-    a.notes.apply_cleanup(&note_id, "call the vet", "Call the vet.");
-    a.notes.mark_clean_skipped(&note_id);
+    a.notes.mark_analyzed(&note_id);
+    a.notes.mark_extract_skipped(&note_id);
     assert_eq!(
-        a.notes.get(&note_id).unwrap().clean_state,
+        a.notes.get(&note_id).unwrap().extract_state,
         StageState::Done,
         "disabling the feature must not rewrite a completed pass"
     );

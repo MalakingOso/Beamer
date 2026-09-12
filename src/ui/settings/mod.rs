@@ -3,6 +3,7 @@ pub mod appearance_card;
 pub mod debug_card;
 pub mod hotkey_picker;
 pub mod injection_card;
+pub mod layout;
 pub mod local_ai_card;
 pub mod recording_card;
 pub mod sync_card;
@@ -15,6 +16,7 @@ use self::api_keys_card::ApiKeysCard;
 use self::appearance_card::AppearanceCard;
 use self::debug_card::DebugCard;
 use self::injection_card::InjectionCard;
+use self::layout::SettingsGroup;
 use self::local_ai_card::LocalAiCard;
 use self::recording_card::RecordingCard;
 use self::sync_card::SyncCard;
@@ -65,6 +67,7 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
 
     rsx! {
         div { class: "content",
+            SettingsGroup { title: "Dictation".to_string(),
             RecordingCard {
                 hotkey: config.read().recording.hotkey.clone(),
                 mode: config.read().recording.mode.clone(),
@@ -104,15 +107,16 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
             }
 
             InjectionCard {}
+            }
 
+            SettingsGroup { title: "Intelligence".to_string(),
             ApiKeysCard {
                 elevenlabs_key: elevenlabs_key.read().clone(),
                 on_elevenlabs_change: move |key: String| {
-                    // Saved immediately, like every other field on this page,
-                    // instead of waiting for the footer button. A key typed
-                    // in and left there used to vanish on close with no
-                    // warning, since nothing else on the page hints that
-                    // this one field needs a separate save.
+                    // Saved immediately, like every other field on this page. A
+                    // key typed in and left there used to vanish on close with
+                    // no warning, since nothing else on the page hinted that
+                    // this one field needed a separate save.
                     crate::config::save_api_key("elevenlabs_api_key", &key);
                     elevenlabs_key.set(key);
                 },
@@ -128,8 +132,6 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                 base_url: config.read().llm.base_url.clone(),
                 request_timeout_ms: config.read().llm.request_timeout_ms,
                 connect_timeout_ms: config.read().llm.connect_timeout_ms,
-                cleanup_enabled: config.read().llm.cleanup.enabled,
-                cleanup_model: config.read().llm.cleanup.model.clone(),
                 extract_model: config.read().llm.extract.model.clone(),
                 on_enabled_change: move |v: bool| {
                     save_config(config, |c| c.llm.enabled = v);
@@ -140,18 +142,14 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                 on_connect_timeout_ms_change: move |ms: u64| {
                     save_config(config, |c| c.llm.connect_timeout_ms = ms);
                 },
-                on_cleanup_enabled_change: move |v: bool| {
-                    save_config(config, |c| c.llm.cleanup.enabled = v);
-                },
-                on_cleanup_model_change: move |m: String| {
-                    save_config(config, |c| c.llm.cleanup.model = m);
-                },
                 on_extract_model_change: move |m: String| {
                     save_config(config, |c| c.llm.extract.model = m);
                 },
                 download_status: props.download_status,
             }
+            }
 
+            SettingsGroup { title: "Sync & Updates".to_string(),
             SyncCard {
                 url: config.read().sync.url.clone(),
                 status: props.sync_client.status,
@@ -161,6 +159,18 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                 },
             }
 
+            UpdateCard {
+                update_status: props.update_status,
+                auto_check_updates: config.read().appearance.auto_check_updates,
+                on_auto_check_toggle: move |v: bool| {
+                    save_config(config, |c| c.appearance.auto_check_updates = v);
+                },
+                notes: props.notes,
+                tasks: props.tasks,
+            }
+            }
+
+            SettingsGroup { title: "System".to_string(),
             AppearanceCard {
                 pill_enabled: config.read().appearance.pill_enabled,
                 on_pill_toggle: move |v: bool| {
@@ -182,16 +192,6 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                 },
             }
 
-            UpdateCard {
-                update_status: props.update_status,
-                auto_check_updates: config.read().appearance.auto_check_updates,
-                on_auto_check_toggle: move |v: bool| {
-                    save_config(config, |c| c.appearance.auto_check_updates = v);
-                },
-                notes: props.notes,
-                tasks: props.tasks,
-            }
-
             DebugCard {
                 last_injection: last_injection.read().clone(),
                 debug_logging: config.read().injection.debug_logging,
@@ -200,21 +200,6 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                 },
                 status_log: props.status_log,
             }
-
-            div { class: "footer",
-                button {
-                    class: "btn btn-primary",
-                    onclick: move |_| {
-                        let cfg = config.read().clone();
-                        if let Err(e) = cfg.save() {
-                            tracing::error!("Failed to save config: {}", e);
-                        }
-                        crate::config::save_api_key("elevenlabs_api_key", &elevenlabs_key.read());
-                        crate::config::save_api_key("mistral_api_key", &mistral_key.read());
-                        tracing::info!("Settings saved");
-                    },
-                    "Save Changes"
-                }
             }
         }
     }

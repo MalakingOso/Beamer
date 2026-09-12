@@ -62,7 +62,7 @@ pub(super) async fn do_note_capture(
     // Request model passes only after the flush, so no downstream failure can
     // cost the user words. This is the only site that triggers a pass, and it
     // is reachable only from dictation — typed notes are never rewritten unasked.
-    note_passes.send(PipelineRequest::for_new_note(&id));
+    note_passes.send(PipelineRequest::new(&id));
 
     Some(id)
 }

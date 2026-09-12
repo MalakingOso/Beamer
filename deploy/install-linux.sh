@@ -61,6 +61,26 @@ cp -r "$assets_src/." "$lib_dir/assets/"
 echo "Installed beamer to $bin_dir/beamer"
 echo "Installed assets to $lib_dir/assets/"
 
+# --- Install GNOME extension sources -----------------------------------------
+#
+# Settings → Injection installs the helper from these files:
+# `install::gnome_extension::locate_source_dir` probes
+# <exe>/../share/beamer/extension/<uuid>, i.e. ~/.local/share/... for this
+# layout. Without them the Install button fails outside a checkout, where
+# the ./extension fallback no longer resolves.
+
+ext_uuid="beamer-focus@beamer.app"
+ext_src="extension/$ext_uuid"
+ext_dst="$HOME/.local/share/beamer/extension/$ext_uuid"
+if [ -f "$ext_src/metadata.json" ]; then
+    rm -rf "$ext_dst"
+    mkdir -p "$ext_dst"
+    cp -r "$ext_src/." "$ext_dst/"
+    echo "Installed extension sources to $ext_dst/"
+else
+    echo "warning: $ext_src/metadata.json not found; skipping extension sources." >&2
+fi
+
 # --- Optional: sync_server ---------------------------------------------------
 #
 # Only one machine should run this — see deploy/beamer-sync.service.
