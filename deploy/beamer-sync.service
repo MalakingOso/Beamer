@@ -4,11 +4,11 @@
 # Disabled by default. This unit exists so an owner who wants sync can turn it
 # on with one command; nothing here enables it automatically.
 #
-# Install:
-#   mkdir -p ~/.config/systemd/user
-#   ln -sf ~/Programming/Beamer/deploy/beamer-sync.service ~/.config/systemd/user/
-#   systemctl --user daemon-reload
-#   systemctl --user enable --now beamer-sync
+# Install: run deploy/install-linux.sh and answer yes to the sync_server
+# prompt. It copies this file to ~/.config/systemd/user/beamer-sync.service,
+# rewriting ExecStart to the per-user sync_server path it just installed —
+# don't symlink this file directly, that would keep the /usr/bin path below
+# and point at a binary a .deb install may not even have left in place.
 #   systemctl --user status beamer-sync
 #   journalctl --user -u beamer-sync -f
 #

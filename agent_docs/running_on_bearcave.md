@@ -34,6 +34,36 @@ Cleanup (S1-mini) stays on callisto: it was never the bottleneck, and moving
 it would mean building and running *two* local servers instead of one. See
 `agent_docs/local_inference.md` and `docs/decisions.md` for the full story.
 
+## Linux install location
+
+callisto runs Beamer from `~/.local/bin/beamer` + `~/.local/lib/Beamer/assets/`,
+installed via `deploy/install-linux.sh` — never `/usr/bin`, which is where the
+`.deb` puts it. A `.deb` install needs root to write `/usr/bin`, and
+`self-replace` (the crate behind the in-app updater) creates its swap
+tempfile in the same directory as the running exe before renaming over it, so
+a non-root Beamer at `/usr/bin/beamer` can download an update and then fail
+to install it. `~/.local/bin` is a directory `berkley` already owns.
+
+`/usr/bin/beamer` (from an earlier `.deb` install) is intentionally left in
+place, unlaunched, permanent dead weight. Do **not** `dpkg -r beamer` to
+clean it up: that package also owns `/usr/bin/sync_server` and
+`/usr/lib/systemd/user/beamer-sync.service`, and removing it would take down
+whichever of those is actually running.
+
+sync_server is opt-in per machine via a prompt in `deploy/install-linux.sh`,
+not installed by default — only the one always-on machine (callisto) should
+run it. It writes a user unit at `~/.config/systemd/user/beamer-sync.service`,
+which overrides the `.deb`'s `/usr/lib/systemd/user/beamer-sync.service` of
+the same name; there's no separate "old unit" to disable, just `systemctl
+--user restart beamer-sync` to pick up the new binary path once installed.
+
+⚠️ **Known gap: the self-update zip is binary-only.** A future release that
+changes `assets/styles-*.css` or the icon (manganis content-hashes the
+filenames) will self-update the binary but leave stale or missing files in
+`~/.local/lib/Beamer/assets/` — the app would come up unstyled. Not worth
+solving for a two-machine setup; re-running `deploy/install-linux.sh` from a
+fresh checkout fixes it.
+
 ## Install
 
 Grab the installer from the latest green run:
@@ -111,9 +141,10 @@ why, and for the tokenizer patch that build needed.
    hand before running `dx bundle`, copying from wherever you built or
    staged the fork's `llama-server.exe` + DLLs) — and places them at
    `%LOCALAPPDATA%\Beamer\llama-k2horizon\` at install time. This is a fixed
-   per-user path independent of whether the install itself was per-user or
-   per-machine (`install_mode = "Both"`): Beamer runs `asInvoker` and can't
-   write into `Program Files` later, so the runtime and the model
+   per-user path chosen for the same reason the installer itself is now
+   `install_mode = "CurrentUser"`-only (see "Linux install location" below):
+   Beamer runs `asInvoker` and can't write into `Program Files` later, so the
+   runtime and the model
    (`%USERPROFILE%\models\beamer\K2-Horizon-0.9B-Q8_0.gguf`, same as before)
    both live outside the app's own install directory on purpose.
 2. The same install step registers the Scheduled Task, **dormant** (no

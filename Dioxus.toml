@@ -31,7 +31,11 @@ silent = true
 sidebar_image = "installer/welcome.bmp"
 header_image = "installer/header.bmp"
 installer_icon = "assets/icon.ico"
-install_mode = "Both"
+# Per-user only: Beamer runs asInvoker and never elevates, so a per-machine
+# (Program Files) install is a write-permission wall waiting to happen the
+# moment a self-update tries to swap the binary in place. See
+# agent_docs/running_on_bearcave.md.
+install_mode = "CurrentUser"
 display_language_selector = false
 start_menu_folder = "Beamer"
 # `!include`d once, at global script scope, between the generated install

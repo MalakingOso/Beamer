@@ -63,9 +63,12 @@ pub fn apply_update_blocking() -> Result<()> {
 /// Like the tray Quit handler this `process::exit`s, skipping destructors and
 /// the flush tick — callers must flush the note stores first.
 pub fn restart_app() -> ! {
-    let exe = std::env::current_exe().expect("Failed to get current exe path");
+    // Not `current_exe()`: on Linux the update just renamed a new binary over
+    // this process's own path, and a fresh query resolves to the old,
+    // now-unlinked inode (`<path> (deleted)`). Use the path cached at launch.
+    let exe = crate::launch_exe_path();
     crate::release_single_instance();
-    match std::process::Command::new(&exe).spawn() {
+    match std::process::Command::new(exe).spawn() {
         Ok(child) => tracing::info!("Relaunched Beamer as pid {}", child.id()),
         Err(e) => tracing::error!("Failed to relaunch {:?}: {}", exe, e),
     }

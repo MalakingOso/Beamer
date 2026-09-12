@@ -41,6 +41,17 @@ pub(crate) const WINDOWS_APP_USER_MODEL_ID: &str = "com.beamer.app";
 #[cfg(not(target_os = "windows"))]
 pub(crate) const APP_ID: &str = "beamer";
 
+/// The executable path as of process launch, cached before anything can
+/// replace the binary underneath us.
+///
+/// On Linux, `self-replace` renames a new binary over the running one during
+/// an update; the old inode survives (still mapped, still executing) but
+/// loses its last link, so a *fresh* `current_exe()` call after that point
+/// resolves to `<path> (deleted)` via `/proc/self/exe`. `restart_app` must
+/// reuse this cached value instead of re-querying `current_exe()`, or it
+/// tries to spawn that deleted path and silently fails to relaunch.
+static LAUNCH_EXE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -50,6 +61,9 @@ fn main() {
         .init();
 
     tracing::info!("Beamer starting...");
+
+    // Before anything (in particular, any update) can touch the binary on disk.
+    let _ = LAUNCH_EXE.set(std::env::current_exe().expect("Failed to get current exe path"));
 
     // Before any window/toast exists so all are attributed to Beamer.
     #[cfg(target_os = "windows")]
@@ -115,6 +129,11 @@ fn ensure_single_instance() -> bool {
     {
         ensure_single_instance_lockfile()
     }
+}
+
+/// The executable path cached at launch. See [`LAUNCH_EXE`].
+pub(crate) fn launch_exe_path() -> &'static std::path::Path {
+    LAUNCH_EXE.get().expect("LAUNCH_EXE not set: called before main()")
 }
 
 /// Give up the single-instance guard. Must precede spawning a successor (see
