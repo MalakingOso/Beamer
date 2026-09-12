@@ -90,6 +90,7 @@ tokio::task::spawn_blocking(|| {
 | Discord | Electron, custom input | SendInput |
 | Word | Rich text, UIA works well | UIA SetValue |
 | Notepad | Older Win11 redesign reportedly buffered/dropped batched SendInput; verified working 2026-09 | SendInput runs first regardless (no per-app routing exists); see §1 above |
+| Beamer itself (sticky notes, Settings) | Own windows are webviews with controlled textareas: each keystroke round-trips JS→Rust→JS, so synthetic typing at hundreds of chars/s overwrites text still in flight and drops characters (other apps keep up fine) | Dispatch skips keystroke backends (SendInput / gnome / wtype / ydotool) when the focused window is ours and lets the atomic clipboard paste carry it in one input event; see `foreground_is_self` in `src/injection/mod.rs` |
 
 ## Debug Logging
 

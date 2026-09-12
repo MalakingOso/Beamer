@@ -111,6 +111,25 @@ fn make_unicode_input(char_code: u16, key_up: bool) -> INPUT {
     }
 }
 
+/// True when the foreground window belongs to this process — our own sticky
+/// notes, settings, or board. Checked in the dispatch path, never in
+/// `available()`: the Settings card queries availability while our own window
+/// is focused, and must still report SendInput as working.
+pub(crate) fn foreground_is_self() -> bool {
+    use windows::Win32::System::Threading::GetCurrentProcessId;
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.is_invalid() {
+            return false;
+        }
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        pid != 0 && pid == GetCurrentProcessId()
+    }
+}
+
 fn get_foreground_process_name() -> Option<String> {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{

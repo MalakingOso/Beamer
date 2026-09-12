@@ -155,6 +155,14 @@ pub fn is_terminal(app_id: &str) -> bool {
     TERMINAL_APP_IDS.iter().any(|id| app_id.eq_ignore_ascii_case(id))
 }
 
+/// True when the app id is Beamer itself. Substring, unlike `is_terminal`:
+/// our Wayland `app_id` is pinned to `beamer` (`set_gtk_prgname`), the bundle
+/// id is `com.beamer.app`, and the extension matches the same way
+/// (`id.includes('beamer')`). Nothing else on a desktop contains it.
+pub fn is_self(app_id: &str) -> bool {
+    app_id.to_ascii_lowercase().contains("beamer")
+}
+
 fn call_extension() -> Result<String, zbus::Error> {
     call_helper(100, "GetFocusedAppId", ())
 }
@@ -163,6 +171,12 @@ fn call_extension() -> Result<String, zbus::Error> {
 /// failed, nothing focused) — callers fall back to defaults.
 pub fn focused_app_id() -> Option<String> {
     map_call_result(call_extension())
+}
+
+/// True when the focused window is one of ours. `None` (unknown focus) is
+/// not self — an unattributed target keeps the normal chain.
+pub fn focused_is_self() -> bool {
+    focused_app_id().is_some_and(|id| is_self(&id))
 }
 
 fn map_call_result(result: Result<String, zbus::Error>) -> Option<String> {
@@ -208,6 +222,22 @@ mod tests {
         assert!(!is_terminal("org.mozilla.firefox"));
         assert!(!is_terminal(""));
         assert!(!is_terminal("thunderbird")); // contains "term"; must not match
+    }
+
+    #[test]
+    fn beamer_own_app_ids_count_as_self() {
+        assert!(is_self("beamer"));
+        assert!(is_self("Beamer"));
+        assert!(is_self("com.beamer.app"));
+    }
+
+    #[test]
+    fn other_app_ids_are_not_self() {
+        assert!(!is_self("firefox"));
+        assert!(!is_self("code"));
+        assert!(!is_self("org.gnome.Console"));
+        assert!(!is_self("thunderbird"));
+        assert!(!is_self(""));
     }
 
     #[test]

@@ -153,6 +153,34 @@ mod sanitize_tests {
     }
 }
 
+#[cfg(test)]
+mod self_target_tests {
+    use super::is_keystroke_backend;
+
+    #[test]
+    fn synthetic_typing_backends_count_as_keystroke() {
+        #[cfg(target_os = "windows")]
+        {
+            assert!(is_keystroke_backend("sendinput"));
+            assert!(!is_keystroke_backend("clipboard"));
+            assert!(!is_keystroke_backend("uia"));
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert!(is_keystroke_backend("gnome"));
+            assert!(is_keystroke_backend("wtype"));
+            assert!(is_keystroke_backend("ydotool"));
+            assert!(!is_keystroke_backend("clipboard"));
+        }
+    }
+
+    #[test]
+    fn unknown_backend_names_are_never_keystroke() {
+        assert!(!is_keystroke_backend("dotool"));
+        assert!(!is_keystroke_backend(""));
+    }
+}
+
 // ─── Registry ─────────────────────────────────────────────────────────────────
 
 /// All backends for this platform. `paste_shortcut` is the loaded
@@ -226,12 +254,57 @@ pub async fn inject_text(text: &str, backends: &[String], paste_shortcut: &str) 
 /// plain `std` mutex (poison-tolerant), never an async one.
 static DISPATCH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Keystroke-synthesis backends: fast synthetic key events, which our own
+/// controlled webview textareas cannot keep up with (see `inject_text_blocking`).
+fn is_keystroke_backend(name: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        name == "sendinput"
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        matches!(name, "gnome" | "wtype" | "ydotool")
+    }
+}
+
+/// True when the focused window is one of ours (any platform). Checked in the
+/// dispatch path, never in any backend's `available()`: the Settings card
+/// queries availability while our own window is focused, and must still
+/// report every backend honestly.
+fn foreground_is_self() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        sendinput::foreground_is_self()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        focus::focused_is_self()
+    }
+}
+
 fn inject_text_blocking(text: &str, backend_names: &[String], paste_shortcut: &str) -> Result<InjectionResult> {
     let _guard = DISPATCH_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let all = all_backends(paste_shortcut);
     let mut errors = Vec::new();
 
+    // Our own windows are webviews with controlled textareas: every keystroke
+    // round-trips JS→Rust→JS through the IPC bridge, so synthetic typing at
+    // hundreds of chars/s overwrites text still in flight and drops
+    // characters (other apps keep up fine). Skip keystroke synthesis and let
+    // the atomic clipboard paste carry it in one input event instead. The
+    // focus lookup is skipped entirely for clipboard-only chains.
+    let self_target =
+        backend_names.iter().any(|n| is_keystroke_backend(n)) && foreground_is_self();
+    if self_target {
+        tracing::info!("injection target is Beamer itself — skipping keystroke backends");
+    }
+
     for name in backend_names {
+        if self_target && is_keystroke_backend(name) {
+            tracing::info!("{} skipped: target is Beamer itself", name);
+            errors.push(format!("{} skipped: target is Beamer itself", name));
+            continue;
+        }
         if let Some(backend) = all.iter().find(|b| b.name() == name.as_str()) {
             match backend.available() {
                 Ok(()) => match backend.inject(text) {
