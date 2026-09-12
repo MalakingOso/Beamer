@@ -16,6 +16,7 @@ use crate::notes::task_store::TaskStore;
 use crate::notes::{Note, NoteStore};
 use crate::ui::sticky_windows::StickyRegistry;
 
+mod calendar;
 mod group;
 mod rows;
 use group::TaskGroup;

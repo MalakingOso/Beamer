@@ -1542,14 +1542,165 @@ body {
   max-width: 220px;
 }
 
-.task-due-input {
-  padding: 1px 4px;
+/* The unresolved picker stacks its calendar under the phrase row: the panel
+   grows the group in flow because `.task-group` clips floating popovers. */
+.task-due-picker {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+/* Always visible, unlike `.task-due-btn`: resolving the phrase is the row's
+   whole job, not a hover affordance. */
+.task-due-toggle {
+  padding: 1px 7px;
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--fg-secondary);
+  background: var(--bg-surface);
+  border: 2px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color var(--duration-fast) var(--ease),
+              border-color var(--duration-fast) var(--ease),
+              background var(--duration-fast) var(--ease);
+}
+
+.task-due-toggle:hover {
+  color: var(--accent);
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.task-cal {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 232px;
+  padding: 10px;
+  background: var(--bg-surface);
+  border: 2px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card);
+}
+
+.task-cal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.task-cal-title {
+  font-family: "DM Mono", "Cascadia Code", monospace;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fg);
+}
+
+.task-cal-nav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--fg-secondary);
+  background: transparent;
+  border: 2px solid transparent;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease),
+              border-color var(--duration-fast) var(--ease),
+              color var(--duration-fast) var(--ease);
+}
+
+.task-cal-nav:hover {
+  color: var(--accent);
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.task-cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 2px;
+}
+
+.task-cal-dow {
+  padding: 2px 0;
+  font-family: "DM Mono", "Cascadia Code", monospace;
+  font-size: 10px;
+  color: var(--fg-muted);
+  text-align: center;
+}
+
+.task-cal-day {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 26px;
+  font-family: "DM Mono", "Cascadia Code", monospace;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-secondary);
+  background: transparent;
+  border: 2px solid transparent;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease),
+              border-color var(--duration-fast) var(--ease),
+              color var(--duration-fast) var(--ease);
+}
+
+.task-cal-day:hover {
+  color: var(--accent);
+  background: var(--accent-subtle);
+  border-color: var(--border-strong);
+}
+
+.task-cal-day.today {
+  color: var(--accent);
+  border-color: var(--accent);
+  font-weight: 700;
+}
+
+.task-cal-day.today:hover {
+  background: var(--accent-subtle);
+}
+
+.task-cal-empty {
+  height: 26px;
+}
+
+.task-cal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 2px solid var(--border);
+}
+
+.task-cal-action {
+  padding: 2px 10px;
   font-family: inherit;
   font-size: 11px;
   color: var(--fg-secondary);
   background: transparent;
   border: 2px solid var(--border);
   border-radius: var(--radius);
+  cursor: pointer;
+  transition: color var(--duration-fast) var(--ease),
+              border-color var(--duration-fast) var(--ease),
+              background var(--duration-fast) var(--ease);
+}
+
+.task-cal-action:hover {
+  color: var(--accent);
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
 }
 
 .task-due-btn {

@@ -8,6 +8,7 @@ use dioxus::prelude::*;
 
 use chrono::NaiveDate;
 
+use super::calendar::DueCalendar;
 use super::{due_label, picked_due};
 use crate::notes::ics;
 use crate::notes::task::Task;
@@ -28,6 +29,11 @@ pub struct DueRowProps {
 pub fn DueRow(props: DueRowProps) -> Element {
     let DueRowProps { task, mut tasks, today } = props;
     let id = task.id.clone();
+
+    // First, before any early return: hooks must run on every render in the
+    // same order, including renders that take the chip branch below after a
+    // pick resolves the phrase.
+    let mut open = use_signal(|| false);
 
     if let Some(due) = task.due_parsed() {
         let overdue = task.is_overdue(today);
@@ -57,20 +63,40 @@ pub fn DueRow(props: DueRowProps) -> Element {
         return rsx! {};
     };
 
+    // Inline, not a floating popup: `.task-group` clips absolutely-positioned
+    // children, and the native date control's popup is unthemeable besides.
+    let pick_id = id.clone();
+    let is_open = *open.read();
+
     rsx! {
-        div { class: "task-due-row",
-            // Shown rather than swallowed: says what to fill the picker in with.
-            span { class: "task-due unresolved", title: "Beamer would not guess a date for this",
-                "\u{201c}{phrase}\u{201d}"
+        div { class: "task-due-picker",
+            div { class: "task-due-row",
+                // Shown rather than swallowed: says what to fill the picker in with.
+                span { class: "task-due unresolved", title: "Beamer would not guess a date for this",
+                    "\u{201c}{phrase}\u{201d}"
+                }
+                button {
+                    class: "task-due-toggle",
+                    title: "Set a date yourself",
+                    onclick: move |_| {
+                        let showing = *open.read();
+                        open.set(!showing);
+                    },
+                    if is_open { "Close" } else { "Set date" }
+                }
             }
-            input {
-                class: "task-due-input",
-                r#type: "date",
-                title: "Set a date yourself",
-                onchange: move |e: Event<FormData>| {
-                    let (due, all_day) = picked_due(&e.value());
-                    tasks.write().set_due(&id, due, all_day);
-                },
+            if is_open {
+                DueCalendar {
+                    today,
+                    on_pick: move |day: NaiveDate| {
+                        let (due, all_day) =
+                            picked_due(&day.format("%Y-%m-%d").to_string());
+                        tasks.write().set_due(&pick_id, due, all_day);
+                    },
+                    on_close: move |_| {
+                        open.set(false);
+                    },
+                }
             }
         }
     }
