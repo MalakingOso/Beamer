@@ -3,8 +3,7 @@
 //!
 //! Every test builds its own temp directory. Nothing here reads or writes
 //! anything under the real `~/.config/Beamer`, which holds the user's actual
-//! notes and, since attachments became content-addressed, the only copy of
-//! some of their files.
+//! notes.
 
 use std::path::{Path, PathBuf};
 
@@ -35,7 +34,6 @@ impl Machine {
         let notes = NoteStore::load_from(
             dir.join("notes.json"),
             dir.join("machine.json"),
-            dir.join("attachments"),
             dir.join("notes.automerge"),
         );
         let tasks = TaskStore::load_beside_at(&notes, dir.join("tasks.json"));

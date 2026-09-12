@@ -28,10 +28,9 @@ struct Machine {
 use super::task_store::TaskStore;
 
 /// A `notes.json` shaped like the one this install has been writing, with
-/// invented text. Fourteen notes, two archived, three attachments across two
-/// of them, ascending creation times, and `pos`/`size`/`open` on every note,
-/// which the live file still carries and the migration still has to lift into
-/// `machine.json`.
+/// invented text. Fourteen notes, two archived, ascending creation times,
+/// and `pos`/`size`/`open` on every note, which the live file still carries
+/// and the migration still has to lift into `machine.json`.
 const FIXTURE: &str = include_str!("../../tests/fixtures/notes-14.json");
 
 /// The fixture with the machine-local keys removed, which is what the mirror
@@ -53,7 +52,6 @@ impl Machine {
         let notes = NoteStore::load_from(
             dir.join("notes.json"),
             dir.join("machine.json"),
-            dir.join("attachments"),
             dir.join("notes.automerge"),
         );
         let tasks = TaskStore::load_beside_at(&notes, dir.join("tasks.json"));

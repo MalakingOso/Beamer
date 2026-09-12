@@ -26,29 +26,20 @@ fn note(id: &str, clean: StageState, extract: StageState) -> Note {
         extract_state: extract,
         origin: NoteOrigin::default(),
         color: NoteColor::Purple,
-        attachments: Vec::new(),
         archived: false,
     }
 }
 
 fn store(notes: Vec<Note>) -> NoteStore {
-    // `attachments_dir` points at the real temp directory, not an empty
-    // `PathBuf`: nothing here exercises attachment removal, but an empty
-    // base would make any future `release_attachment_bytes` call resolve
-    // relative to the process's cwd, which during `cargo test` is the repo
-    // checkout, not a throwaway location.
-    let attachments_dir = std::env::temp_dir().join("beamer_pipeline_test_attachments");
     NoteStore {
         notes,
         path: std::path::PathBuf::new(),
         dirty: false,
         machine: crate::notes::MachineStore::new(std::path::PathBuf::new()),
-        attachments_dir,
         doc: crate::notes::sync_doc::SyncHandle::default(),
         doc_dirty: false,
         load_error: None,
         unreadable_notes: Vec::new(),
-        sync_enabled: false,
     }
 }
 
@@ -242,19 +233,18 @@ fn no_outcomes_at_all_is_not_a_success() {
 fn a_single_not_attempted_stage_is_not_a_success() {
     // Three different real code paths collapse to this one outcome list:
     // a `CleanOnly` request with `llm.cleanup.enabled = false` (the
-    // stage-disabled branch in `run_request`), an image-only or
-    // whitespace-only note where `run_cleanup`'s loop never calls
-    // `cleanup::clean` (`contacted_server` stays false), and a blank-text
-    // note where `run_extraction`'s fast path marks it analyzed without
-    // calling `extract::extract`. None of them made a request.
+    // stage-disabled branch in `run_request`), a whitespace-only note where
+    // `run_cleanup`'s blank fast path never calls `cleanup::clean`, and a
+    // blank-text note where `run_extraction`'s fast path marks it analyzed
+    // without calling `extract::extract`. None of them made a request.
     assert!(!succeeded_from(&[RequestOutcome::NotAttempted]));
 }
 
 #[test]
 fn both_stages_not_attempted_is_not_a_success() {
     // A `Both` request where both stages are individually disabled in
-    // config, or a `Both` request against an attachment-only note whose
-    // extraction also found nothing to send.
+    // config, or a `Both` request against a blank note whose extraction
+    // also found nothing to send.
     assert!(!succeeded_from(&[RequestOutcome::NotAttempted, RequestOutcome::NotAttempted]));
 }
 

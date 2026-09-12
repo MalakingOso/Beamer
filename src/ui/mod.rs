@@ -18,7 +18,6 @@ pub mod shell_indicator;
 pub mod shell_window;
 pub mod splash;
 pub mod sticky;
-pub mod sticky_blocks;
 pub mod sticky_chips;
 pub mod sticky_css;
 pub mod sticky_footer;

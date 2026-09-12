@@ -10,7 +10,6 @@
       "extract_state": "done",
       "origin": "dictated",
       "color": "purple",
-      "attachments": [],
       "archived": false,
       "pos": null,
       "size": [
@@ -29,7 +28,6 @@
       "extract_state": "skipped",
       "origin": "dictated",
       "color": "violet",
-      "attachments": [],
       "archived": false,
       "pos": [
         1170,
@@ -46,24 +44,11 @@
       "created": "2026-08-12T09:17:00+01:00",
       "modified": "2026-08-12T11:22:00+01:00",
       "raw": "idea for the talk: open with the failure not the fix people remember the fall",
-      "body": "Idea for the talk: open with the failure, not the fix. People remember the fall. [[beamer:199032340-0100]]",
+      "body": "Idea for the talk: open with the failure, not the fix. People remember the fall.",
       "clean_state": "pending",
       "extract_state": "pending",
       "origin": "dictated",
       "color": "amber",
-      "attachments": [
-        {
-          "kind": "image",
-          "id": "199032340-0100",
-          "filename": "whiteboard.png",
-          "alt": null,
-          "location": {
-            "kind": "owned",
-            "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            "ext": "png"
-          }
-        }
-      ],
       "archived": false,
       "pos": [
         1220,
@@ -85,7 +70,6 @@
       "extract_state": "done",
       "origin": "dictated",
       "color": "teal",
-      "attachments": [],
       "archived": false,
       "pos": null,
       "size": [
@@ -104,7 +88,6 @@
       "extract_state": "done",
       "origin": "dictated",
       "color": "rose",
-      "attachments": [],
       "archived": true,
       "pos": [
         1320,
@@ -126,7 +109,6 @@
       "extract_state": "skipped",
       "origin": "dictated",
       "color": "slate",
-      "attachments": [],
       "archived": false,
       "pos": [
         1370,
@@ -143,28 +125,11 @@
       "created": "2026-08-16T09:21:00+01:00",
       "modified": "2026-08-16T11:26:00+01:00",
       "raw": "reply to nadia about the reading group say yes but push the date",
-      "body": "Reply to Nadia about the reading group. Say yes but push the date. [[beamer:199072340-0101]] [[beamer:199072340-0102]]",
+      "body": "Reply to Nadia about the reading group. Say yes but push the date.",
       "clean_state": "skipped",
       "extract_state": "pending",
       "origin": "dictated",
       "color": "purple",
-      "attachments": [
-        {
-          "kind": "link",
-          "id": "199072340-0101",
-          "url": "https://example.org/reading-group",
-          "title": "Reading group"
-        },
-        {
-          "kind": "file",
-          "id": "199072340-0102",
-          "filename": "agenda.pdf",
-          "location": {
-            "kind": "external",
-            "path": "/home/nobody/Documents/agenda-that-is-not-here.pdf"
-          }
-        }
-      ],
       "archived": false,
       "pos": null,
       "size": [
@@ -183,7 +148,6 @@
       "extract_state": "done",
       "origin": "dictated",
       "color": "violet",
-      "attachments": [],
       "archived": false,
       "pos": [
         1470,
@@ -205,7 +169,6 @@
       "extract_state": "skipped",
       "origin": "dictated",
       "color": "amber",
-      "attachments": [],
       "archived": false,
       "pos": [
         1520,
@@ -227,7 +190,6 @@
       "extract_state": "done",
       "origin": "dictated",
       "color": "teal",
-      "attachments": [],
       "archived": false,
       "pos": null,
       "size": [
@@ -246,7 +208,6 @@
       "extract_state": "failed",
       "origin": "dictated",
       "color": "rose",
-      "attachments": [],
       "archived": true,
       "pos": [
         1620,
@@ -268,7 +229,6 @@
       "extract_state": "done",
       "origin": "typed",
       "color": "slate",
-      "attachments": [],
       "archived": false,
       "pos": [
         1670,
@@ -290,7 +250,6 @@
       "extract_state": "skipped",
       "origin": "dictated",
       "color": "purple",
-      "attachments": [],
       "archived": false,
       "pos": null,
       "size": [
@@ -309,7 +268,6 @@
       "extract_state": "done",
       "origin": "typed",
       "color": "violet",
-      "attachments": [],
       "archived": false,
       "pos": [
         1770,

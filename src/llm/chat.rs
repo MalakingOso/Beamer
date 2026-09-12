@@ -139,10 +139,6 @@ pub fn parse_completion(body: &str) -> Result<String, ChatError> {
     Ok(content)
 }
 
-/// Placeholder-token opener, spelled out: this module cannot reach the note
-/// block helper, and a test there pins the literal.
-const NOTE_TOKEN_MARKER: &str = "[[beamer:";
-
 /// Send one completion and return the assistant's text. Does not probe
 /// `GET /v1/models` first: a status read resets the per-model idle clock and
 /// would pin the extraction model in VRAM with no symptom.
@@ -151,16 +147,6 @@ pub async fn complete(
     request: &ChatRequest,
     timeout: Duration,
 ) -> Result<String, ChatError> {
-    // A placeholder token here makes the model answer garbage at HTTP 200 —
-    // nothing downstream can catch it, so this warns rather than just logging.
-
-    if let Some(bad) = request.messages.iter().find(|m| m.content.contains(NOTE_TOKEN_MARKER)) {
-        tracing::warn!(
-            "chat request to {} carries a note placeholder token in its {} message — \
-             the reply will be garbage and the server will still answer 200",
-            request.model, bad.role
-        );
-    }
     tracing::debug!(
         "chat request: model={} messages={} chars={}",
         request.model,

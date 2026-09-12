@@ -132,120 +132,20 @@ prefers a match whose app id looks like Beamer's and falls back to a title-only
 match, logging when it does. A hard filter was rejected: guessing the app id
 wrong would break placement silently, and diagnosing that costs a log out.
 
-## A note body is a block stack, not a textarea
+## A note body is one textarea of plain text
 
-A note holds text, images, links and dropped files **interleaved in reading
-order**. The body is still one `String`; attachments live in it as placeholder
-tokens.
+A note holds text: `body` is one `String`, rendered as one `<textarea>` sized
+by `rows_for` (`ui::sticky`). There is no attachment concept anymore — file
+and image attaching (`notes::blocks`, the `[[beamer:<id>]]` tokens,
+`Attachment`/`Location`, `ui::sticky_blocks` and its `/note-media` asset
+handler, the paperclip, drag-drop and link chips) was removed outright, with
+the document's old per-note `attachments` map deleted on reconcile and the
+`attachments` key in pre-removal `notes.json` files ignored on load. A URL
+typed or dictated into a note stays plain text; linkifying inside a
+`<textarea>` is not possible without replacing the editor.
 
-```
-body:  "Ring Sarah about the\n[[beamer:18f2a-0001]]\nQ3 deck before Friday."
-        └── run 0 ──────────┘ └── attachment ─────┘ └── run 1 ───────────┘
-```
-
-The grammar is deliberately narrow, and lives in exactly one module,
-`notes::blocks` — pure, no Dioxus, fully tested:
-
-- A token is `[[beamer:<id>]]` **alone on its own line**, after trimming.
-- Anything else, including a token mid-line, is literal text.
-- `[[` cannot come out of dictation, so no transcript can accidentally make one.
-- **An id with no matching `Attachment` renders as literal text.** A
-  desynchronised note fails visibly rather than swallowing a line.
-
-`parse` returns strictly alternating `Text`/`Attachment` blocks, synthesizing
-**empty text runs** at both ends and between adjacent attachments — that is what
-gives the UI a textarea above a leading image and below a trailing one.
-`reassemble` works off an exact tiling of the original body, so an all-`None`
-result is byte-identical; that is what makes "cleanup changed nothing" mean
-nothing changed.
-
-⚠️ **`NoteStore::search` matches `blocks::plain_text(body)`, not `body`.**
-Without it every attachment-bearing note would match the query "beamer" through
-its own tokens.
-
-⚠️ **`raw` never gains a token.** It stays the verbatim transcript.
-
-⚠️ **Tokens never reach either model.** This is the constraint that shapes the
-cleanup path — see `agent_docs/local_inference.md`, failure mode 6, before
-touching `src/llm/` or `notes/pipeline.rs`.
-
-| Module | Job |
-|---|---|
-| `notes::blocks` | The grammar. `parse`, `plain_text`, `reassemble`, `set_run`, `insert_token`, `remove_token`. Pure. |
-| `notes::edit` | `add_attachment` / `remove_attachment` / `prune_attachments` / `relocate_attachment`, plus `set_size` and `delete`. |
-| `ui::sticky_blocks` | Rendering, the per-window asset handler, and drop classification. |
-
-### Attachments are owned copies, not references
-
-This section used to say an `Attachment::Image` holds the path to your file
-and that Beamer never copies, moves or deletes it. That was true until the
-sync work landed, and it is not true anymore. Dropping a file now copies its
-bytes into `<config_dir>/sync/attachments/<sha256>.<ext>`, content-addressed,
-before the record ever reaches `notes.json`. The note stores that hash plus
-the original file name instead of a path. Two attachments with identical
-bytes, even on different notes, share one file on disk. See
-`src/notes/model.rs`'s `Location` and `Attachment` types for the exact shape,
-and `src/notes/edit.rs` for the refcount that manages the copy:
-`add_attachment` adopts the bytes on drop, and `remove_attachment`, `delete`,
-and the "Locate…" repoint each release their share of it afterward.
-
-**Your original file is still never touched.** That half of the old guarantee
-survives unchanged: what gets deleted is Beamer's own copy, made on attach,
-not the file the photo or document came from. An attachment Beamer cannot
-read at the moment of attaching (already gone, permissions) still falls back
-to the old `External`, path-only record, and gets the same muted card and
-Locate… recovery a legacy attachment gets, with the full path on hover.
-
-Because Beamer now owns a copy, there is more that can go orphaned than there
-used to be. It used to be just a record, an `Attachment` whose token the user
-deleted out of a textarea, and `prune_attachments` still collects those in the
-same store write as the edit. Content-addressed bytes under
-`sync/attachments/` are orphanable now too, and that is what the refcount in
-`release_attachment_bytes` exists for: it checks every note's attachments and
-removes a file under `attachments_dir` only once nothing anywhere in the store
-still points at that `(hash, ext)` pair.
-
-### Getting content in
-
-| Gesture | Result |
-|---|---|
-| Drop a file | `Image` if the extension is a WebKit-decodable raster, else `File` |
-| Drop a link from a browser | `Link` chip, from `text/uri-list` or a bare `text/plain` URL |
-| Paste a bare URL | `Link` chip |
-| Paperclip in the bar | Native file dialog — the fallback, and the Windows path |
-
-Notes:
-
-- **`ondragover` must call `prevent_default()`** or `ondrop` never fires at all.
-- On every platform but Windows, wry's native drag-drop handler merges real
-  filesystem paths into the HTML event, so `e.files()` is authoritative when it
-  is non-empty (`dioxus-desktop/src/webview.rs:157-185`).
-- ⚠️ **`ClipboardData` carries nothing on desktop** —
-  `SerializedClipboardData` is an empty struct. The clipboard is read directly
-  with `arboard`, **synchronously**, because `prevent_default` rides the event's
-  own IPC response and a spawned read would answer too late to suppress the
-  insert.
-- **Pasted image bytes are out of scope**, deliberately: an attachment is a
-  reference to a file, and a screenshot on the clipboard is not a file anywhere.
-  Detected rather than ignored — the footer says so and points at the paperclip.
-- ⚠️ Only **dropped or pasted** links become chips. A URL typed or dictated
-  inside a run stays plain text; linkifying inside a `<textarea>` is not
-  possible without replacing the editor.
-- Dropping *between* two runs is deferred; a drop appends at the end.
-
-### Images are served, not inlined
-
-`img { src: "/note-media/<attachment-id>" }`, answered by an asset handler.
-
-⚠️ **Registered inside `StickyNote`, from `sticky_blocks::use_note_media`** —
-`use_asset_handler` resolves `crate::window()` by `consume_context`, so a
-registration in `App()` binds to the main window and every note's image 404s,
-silently, as a broken image. Same per-window rule as the close handler below.
-
-The URL carries an **id, never a path**: the handler resolves it against that
-note's own `attachments` and can therefore only ever serve a file that note
-already references. Chosen over `data:` URIs, which would put whole photos into
-the DOM string on every render.
+⚠️ **`raw` stays the verbatim transcript.** Cleanup may rewrite `body`, never
+`raw`.
 
 ## Notes are resized by the client, and the size is remembered
 
@@ -457,8 +357,9 @@ Each sticky window is its own `VirtualDom` with its own scope tree.
 corrupt file is preserved as `.json.corrupt` rather than overwritten.
 
 Migration is free and stays free: `Note` has no `deny_unknown_fields` and every
-field added since v1 is `#[serde(default)]`. A `notes.json` written before
-attachments existed loads with an empty vec.
+field added since v1 is `#[serde(default)]`. A `notes.json` written while
+attachments existed loads with its text intact and the stale `attachments` key
+ignored (and dropped on the next flush).
 
 Three write paths, because one is not enough:
 
@@ -471,8 +372,8 @@ Three write paths, because one is not enough:
 3. **Flush in the tray Quit handler** — `process::exit` skips destructors *and*
    the interval tick.
 
-Dropping, pasting and attaching also flush **inline**, on the same argument as
-capture: a photo you just dropped must not be lost to a crash before the tick.
+Discrete gestures (new note, archive, delete) also flush **inline**, on the
+same argument as capture: a crash before the tick must not resurrect them.
 
 ### Machine-local state: pos, size, open (Task 7)
 
@@ -493,17 +394,16 @@ for a merge to see. `set_size` had the milder version of the same problem
 (resizing generated sync churn with no content change) and is fixed the same
 way.
 
-`machine.json` also carries `machine_id`: four hex digits, generated once per
-install and never synced. Note ids need it because `next_id`'s old shape,
+`machine.json` also carries `machine_id`: sixteen hex digits, generated once per
+install and never synced. Note ids need it because the old id shape,
 `{millis:x}-{counter:04x}`, restarts its counter at 0 every process, so the
 first note of every session was `…-0000`. Two machines creating their first
 note in the same millisecond would produce the same id, and `Task.note_id` is
 a foreign key into that namespace, so a collision would silently reparent tasks
 onto the wrong note. `notes::next_note_id` mints note ids as
-`{millis:x}-{counter:04x}-{machine}` instead; `next_id` (no machine suffix)
-still mints attachment and task ids, whose namespaces don't cross machines the
-same way. Existing ids keep working, they are opaque strings and nothing
-parses them, on either side.
+`{millis:x}-{counter:04x}-{machine}` instead, and `next_synced_id` mints task
+ids the same way. Existing ids keep working, they are opaque strings and
+nothing parses them, on either side.
 
 Migration is one-way and, once it has run, self-erasing. `NoteStore::load`
 re-parses `notes.json` a second time into a throwaway shape that still
@@ -539,9 +439,6 @@ happen in memory before a single `flush_stores` call; a crash between the two
 mirror writes inside that call can still strand rows, so `flush_stores` prunes
 rows whose note is gone on the next pass (never over a failed load, where
 "gone" means "unreadable").
-
-**The user's original file is still never touched.** See "Attachments are
-owned copies, not references".
 
 ## Local AI
 
@@ -582,7 +479,7 @@ silently diverted.
 
 ## Gotchas
 
-- **The block model needed no extension change, and no log out.** Attachments,
+- **The note UI needs no extension change, and no log out.** The sticky body,
   the resize grip and delete are all client-side. `GetVersion` is still the
   only authoritative way to check the running version.
 

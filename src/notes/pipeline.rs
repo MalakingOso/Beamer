@@ -19,7 +19,7 @@ use crate::llm::extract;
 use crate::notes::lifecycle::StageOutcome;
 use crate::notes::task::{Proposal, TaskKind};
 use crate::notes::task_store::TaskStore;
-use crate::notes::{blocks, NoteStore};
+use crate::notes::NoteStore;
 use crate::ui::status_log::{log_status, LogLevel, StatusLog};
 
 /// The sweep's pure decision logic, split out to keep this file under 500 lines.
@@ -236,12 +236,10 @@ enum Stage {
     Extract,
 }
 
-/// Clean one note, one text run at a time; reassemble and compare-and-swap
-/// against the full original body, so a mid-pass edit still supersedes.
-/// ⚠️ Placeholder tokens must never reach the model: garbled output comes
-/// back at HTTP 200 with nothing to catch downstream. Blank runs are skipped;
-/// an error aborts the pass with nothing applied. `NotAttempted` when no call
-/// went out (missing note, or only blank runs).
+/// Clean one note with a single call, then compare-and-swap against the
+/// original body, so a mid-pass edit still supersedes. An error aborts the
+/// pass with nothing applied. `NotAttempted` when no call went out (missing
+/// note, or a blank body).
 async fn run_cleanup(
     id: &str,
     base_url: &str,
@@ -256,56 +254,37 @@ async fn run_cleanup(
         return RequestOutcome::NotAttempted;
     };
 
-    let runs: Vec<String> = blocks::text_runs(&sent).into_iter().map(str::to_string).collect();
-    let mut cleaned: Vec<Option<String>> = Vec::with_capacity(runs.len());
-    let mut changed = false;
-    // Set only when a call actually goes out; a blank-only body must not read as reachable.
-    let mut contacted_server = false;
-
-    for run in &runs {
-        // Re-read the live config each iteration, not the snapshot
-        // `run_request` took: a long body is many sequential requests, and the
-        // user can switch the pass off part-way through them.
-        if !config.peek().llm.cleanup_wanted() {
-            return abandoned("cleanup", id);
-        }
-        if run.trim().is_empty() {
-            cleaned.push(None);
-            continue;
-        }
-        contacted_server = true;
-        match cleanup::clean(base_url, cfg, run, timeout).await {
-            Ok(Cleaned::Rewritten(text)) => {
-                changed = true;
-                cleaned.push(Some(text));
-            }
-            Ok(Cleaned::NothingToChange) => cleaned.push(None),
-            Err(e) => {
-                if !config.peek().llm.cleanup_wanted() {
-                    return abandoned("cleanup", id);
-                }
-                notes.write().mark_clean_failed(id);
-                tracing::warn!("cleanup failed for note {}: {}", id, e);
-                log_status(status_log, LogLevel::Error, format!("Note cleanup failed: {e}"));
-                // Terminal failures (bad model name, broken preset) are still
-                // `Failed` in the store, but retrying them unchanged can only
-                // fail the same way, so the sweep leaves them alone.
-                return if e.is_retryable() {
-                    RequestOutcome::Errored
-                } else {
-                    RequestOutcome::Terminal
-                };
-            }
-        }
-    }
-
-    if !contacted_server {
-        // Blank or attachment-only body: nothing was sent, so this is success
-        // with no rewrite rather than a pass that stays `Pending` forever
-        // offering a retry that always no-ops.
+    if sent.trim().is_empty() {
+        // Blank body: nothing was sent, so this is success with no rewrite
+        // rather than a pass that stays `Pending` forever offering a retry
+        // that always no-ops.
         notes.write().apply_cleanup(id, &sent, "");
         return RequestOutcome::NotAttempted;
     }
+    if !config.peek().llm.cleanup_wanted() {
+        return abandoned("cleanup", id);
+    }
+
+    let cleaned = match cleanup::clean(base_url, cfg, &sent, timeout).await {
+        Ok(Cleaned::Rewritten(text)) => Some(text),
+        Ok(Cleaned::NothingToChange) => None,
+        Err(e) => {
+            if !config.peek().llm.cleanup_wanted() {
+                return abandoned("cleanup", id);
+            }
+            notes.write().mark_clean_failed(id);
+            tracing::warn!("cleanup failed for note {}: {}", id, e);
+            log_status(status_log, LogLevel::Error, format!("Note cleanup failed: {e}"));
+            // Terminal failures (bad model name, broken preset) are still
+            // `Failed` in the store, but retrying them unchanged can only
+            // fail the same way, so the sweep leaves them alone.
+            return if e.is_retryable() {
+                RequestOutcome::Errored
+            } else {
+                RequestOutcome::Terminal
+            };
+        }
+    };
 
     // The last gate, and the one that matters most: past here `apply_cleanup`
     // rewrites the user's body. Doing that after they switched the pass off
@@ -315,14 +294,14 @@ async fn run_cleanup(
     }
 
     // Unchanged passes an empty response, which `apply_cleanup` reads as "success, change nothing".
-    let text = if changed { blocks::reassemble(&sent, &cleaned) } else { String::new() };
+    let text = cleaned.unwrap_or_default();
 
     match notes.write().apply_cleanup(id, &sent, &text) {
         StageOutcome::Applied => {
-            if changed {
-                tracing::info!("cleanup rewrote note {} ({} run(s))", id, runs.len());
-            } else {
+            if text.is_empty() {
                 tracing::info!("cleanup found nothing to change in note {}", id);
+            } else {
+                tracing::info!("cleanup rewrote note {}", id);
             }
         }
         StageOutcome::Superseded => {
@@ -333,12 +312,7 @@ async fn run_cleanup(
             tracing::debug!("note {} disappeared during cleanup", id);
         }
     }
-    // The loop completed without error here; still only `Responded` if a call went out.
-    if contacted_server {
-        RequestOutcome::Responded
-    } else {
-        RequestOutcome::NotAttempted
-    }
+    RequestOutcome::Responded
 }
 
 /// Same outcome contract as `run_cleanup`. Blank text is `NotAttempted`:
@@ -354,8 +328,8 @@ async fn run_extraction(
     status_log: &mut Signal<StatusLog>,
 ) -> RequestOutcome {
     // Read the post-cleanup body: cleaned, or `raw`/the user's edit on the other
-    // outcomes. Tokens stripped — evidence spans must never contain token text.
-    let Some(text) = notes.peek().get(id).map(|n| blocks::plain_text(&n.body)) else {
+    // outcomes.
+    let Some(text) = notes.peek().get(id).map(|n| n.body.clone()) else {
         return RequestOutcome::NotAttempted;
     };
     if text.trim().is_empty() {

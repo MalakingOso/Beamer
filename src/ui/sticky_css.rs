@@ -36,7 +36,6 @@ body { font-family:"Recursive","Segoe UI Variable","Segoe UI",system-ui,sans-ser
 #main { padding:0 5px 5px 0; }
 
 .sticky { display:flex; flex-direction:column; height:100%;
-  position:relative; /* Anchors the drop-target ring. */
   border:2px solid var(--note-border);
   border-radius:var(--radius-lg);
   overflow:hidden; /* Keeps the bar clipped to the rounded top corners. */
@@ -71,9 +70,8 @@ body { font-family:"Recursive","Segoe UI Variable","Segoe UI",system-ui,sans-ser
              background var(--duration-fast) var(--ease); }
 .sticky-archive:hover { color:var(--danger); background:rgba(220,38,38,0.10); }
 
-/* --- The block stack -----------------------------------------------------
-   One textarea per run + one card per attachment. Textareas size by `rows`
-   and never scroll alone, so the note scrolls as one document. */
+/* --- The body ------------------------------------------------------------
+   One textarea sized by `rows`, filling the note. */
 
 .sticky-blocks { flex:1; min-height:0; overflow-y:auto;
   display:flex; flex-direction:column; padding:6px 0; }
@@ -82,71 +80,20 @@ body { font-family:"Recursive","Segoe UI Variable","Segoe UI",system-ui,sans-ser
   overflow:hidden; background:transparent; padding:6px 12px;
   font-family:inherit; font-size:14px;
   line-height:1.5; color:var(--ink); caret-color:var(--accent); }
-/* Last run fills the leftover space, so a plain note stays one big textarea. */
-.sticky-blocks > .sticky-body:last-child { flex:1 0 auto; }
+.sticky-blocks > .sticky-body { flex:1 0 auto; }
 
 .sticky-body::selection { background:rgba(75,0,130,0.18); }
 .sticky-body::placeholder { color:#94a0b8; }
 
-/* `position:relative` anchors the hover-only remove button. */
-.sticky-attachment { position:relative; margin:2px 12px 6px; }
-.sticky-attachment-remove { position:absolute; top:4px; right:4px;
-  display:flex; align-items:center; justify-content:center;
-  width:20px; height:20px; padding:0; border:none; cursor:pointer;
-  border-radius:var(--radius); background:rgba(255,255,255,0.86);
-  color:var(--ink-soft); font-size:13px; line-height:1;
-  opacity:0; transition:opacity var(--duration-fast) var(--ease),
-                        color var(--duration-fast) var(--ease); }
-.sticky-attachment:hover .sticky-attachment-remove { opacity:1; }
-.sticky-attachment-remove:hover { color:var(--danger); }
-
-.sticky-image { display:block; width:100%; height:auto; max-height:420px;
-  object-fit:contain; border:2px solid var(--note-border);
-  border-radius:var(--radius); background:rgba(255,255,255,0.5); }
-
-/* Links/files are one-line chips, not image-sized cards. */
-.sticky-link, .sticky-file { display:block; width:100%; text-align:left;
-  padding:6px 26px 6px 8px; border:2px solid var(--note-border);
-  border-radius:var(--radius); background:rgba(255,255,255,0.5);
-  font-family:inherit; font-size:13px; line-height:1.35; color:var(--ink);
-  text-decoration:none; cursor:pointer;
-  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
-  transition:background var(--duration-fast) var(--ease); }
-.sticky-link:hover, .sticky-file:hover { background:rgba(255,255,255,0.9); }
-
-/* Missing file: muted, names the file, offers the fix. */
-.sticky-missing { display:flex; flex-direction:column; gap:3px;
-  padding:8px; border:2px dashed var(--note-border);
-  border-radius:var(--radius); background:rgba(255,255,255,0.35); }
-.sticky-missing-title { font-size:11px; letter-spacing:0.04em;
-  text-transform:uppercase; color:var(--ink-soft); }
-.sticky-missing-name { font-size:13px; color:var(--ink);
-  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.sticky-locate { align-self:flex-start; cursor:pointer;
-  font-size:12px; color:var(--accent); text-decoration:underline; }
-
-/* Orphan token: literal text, so a desync fails visibly. */
-.sticky-orphan-token { padding:2px 12px; font-size:13px; line-height:1.5;
-  font-family:"DM Mono","Cascadia Code",monospace; color:var(--ink-soft); }
-
-/* Hidden behind a label; `display:none` would make webviews skip the click. */
-.sticky-file-input { position:absolute; width:0; height:0; opacity:0;
-  pointer-events:none; }
-
 .sticky-bar-actions { display:flex; align-items:center; gap:2px; }
-.sticky-new, .sticky-attach { display:flex; align-items:center; justify-content:center;
+.sticky-new { display:flex; align-items:center; justify-content:center;
   cursor:pointer; font-size:13px; line-height:1; padding:3px 5px;
   border-radius:var(--radius-lg); opacity:0.6;
+  border:none; background:none; color:var(--ink-soft);
   transition:opacity var(--duration-fast) var(--ease),
               background var(--duration-fast) var(--ease); }
-.sticky-new { border:none; background:none; color:var(--ink-soft); }
-.sticky-new:hover, .sticky-attach:hover {
+.sticky-new:hover {
   opacity:1; background:rgba(75,0,130,0.08); }
-
-/* Drag feedback: inset ring, so it can't shift layout mid-drag. */
-.sticky-drop-target::after { content:""; position:absolute; inset:6px;
-  border:2px dashed var(--accent); border-radius:var(--radius);
-  pointer-events:none; }
 
 .sticky-gone { display:flex; align-items:center; justify-content:center;
   height:100%; padding:16px; text-align:center;
@@ -218,5 +165,4 @@ body { font-family:"Recursive","Segoe UI Variable","Segoe UI",system-ui,sans-ser
 
 /* Footer words (failures only). */
 .sticky-pass-error { font-size:11px; color:var(--danger); }
-.sticky-paste-hint { font-size:11px; color:var(--ink-soft); }
 "#;

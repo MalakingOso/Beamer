@@ -6,7 +6,6 @@
 
 use dioxus::prelude::*;
 
-use crate::notes::blocks;
 use crate::notes::task_store::TaskStore;
 use crate::notes::{Note, NoteColor, NoteOrigin, NoteStore};
 use crate::ui::components::Toggle;
@@ -24,11 +23,9 @@ pub struct NotesPageProps {
 /// How much of a note's body a card shows before trimming.
 const PREVIEW_CHARS: usize = 180;
 
-/// Card text with attachment tokens stripped — otherwise a picture-only note
-/// would show only "[[beamer:18f2a…]]".
+/// Card text, whitespace-collapsed.
 fn preview(note: &Note) -> String {
-    let body = blocks::plain_text(&note.body);
-    let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let flat = note.body.split_whitespace().collect::<Vec<_>>().join(" ");
     if flat.chars().count() <= PREVIEW_CHARS {
         return flat;
     }
@@ -194,7 +191,6 @@ pub fn NotesPage(props: NotesPageProps) -> Element {
                         let text = preview(note);
                         let stamp = when(note);
                         let archived = note.archived;
-                        let clips = note.attachments.len();
                         let confirming = pending_delete.read().as_deref() == Some(id.as_str());
                         rsx! {
                             div {
@@ -214,12 +210,6 @@ pub fn NotesPage(props: NotesPageProps) -> Element {
                                     div { class: "note-card-body", "{text}" }
                                     div { class: "note-card-meta",
                                         "{stamp}"
-                                        if clips > 0 {
-                                            span { class: "note-card-clips",
-                                                title: if clips == 1 { "1 attachment" } else { "attachments" },
-                                                "\u{1F4CE} {clips}"
-                                            }
-                                        }
                                     }
                                 }
                                 div { class: "note-card-actions",
@@ -245,7 +235,7 @@ pub fn NotesPage(props: NotesPageProps) -> Element {
                                                 "note-action-btn"
                                             },
                                             title: if confirming {
-                                                "Deletes the note and its tasks. Your files are never touched."
+                                                "Deletes the note and its tasks."
                                             } else {
                                                 "Delete permanently"
                                             },

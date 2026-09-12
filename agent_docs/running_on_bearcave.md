@@ -245,10 +245,6 @@ url = "wss://callisto.taila63f23.ts.net/sync"
 `BeamerSyncServer` for this reason: pointed at callisto's own Beamer config it
 would be a second process writing the same document.
 
-⚠️ **Attachments do not sync yet.** A note crosses, its image does not, and
-bearcave shows the missing-file card. This is the top open question in
-`agent_docs/sync.md`.
-
 ## Two limits to know before they surprise you
 
 **Dictation is silently dead against elevated windows.** An unelevated
@@ -336,11 +332,6 @@ Not bugs, just untested, so do not spend time being surprised by them.
 
 - Mixed-DPI multi-monitor note placement. Uniform scale round-trips correctly,
   so one display or two matched ones are fine.
-- Dragging a URL from a browser onto a note does nothing. wry disables HTML5
-  drag-and-drop on Windows and the synthesized event carries no `text/uri-list`.
-  Dropping a file works. The paperclip button works.
-- The drop-target highlight never appears, because `dragenter` is never
-  synthesized.
 - Ctrl+F, F5 and Ctrl+P are disabled inside note windows. Editing shortcuts
   should still work; worth confirming in a note textarea.
 - Each note is its own WebView2 process set. Watch `msedgewebview2.exe` memory

@@ -3,11 +3,12 @@
 //! A map keyed by note id (not a list), so concurrent creations on two machines merge.
 
 use anyhow::Result;
+use automerge::transaction::Transactable;
 use automerge::{AutoCommit, ObjId, ReadDoc};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use super::model::{Attachment, Note, NoteColor, NoteOrigin, StageState};
+use super::model::{Note, NoteColor, NoteOrigin, StageState};
 use super::sync_doc::{
     child_map, get_bool, get_str, get_text, put_bool, put_str, put_text, retain_keys, SyncDoc,
     NOTES_KEY,
@@ -42,7 +43,11 @@ pub fn reconcile(sync: &mut SyncDoc, notes: &[Note], unreadable: &[String]) -> R
         put_str(doc, &obj, "origin", &enum_name(&note.origin))?;
         put_str(doc, &obj, "color", &enum_name(&note.color))?;
         put_bool(doc, &obj, "archived", note.archived)?;
-        reconcile_attachments(doc, &obj, &note.attachments)?;
+        // Attachments were removed: drop the map left behind by older
+        // documents so it does not linger in the shared corpus.
+        if doc.get(&obj, "attachments")?.is_some() {
+            doc.delete(&obj, "attachments")?;
+        }
     }
     Ok(())
 }
@@ -104,49 +109,8 @@ fn read_note(doc: &AutoCommit, obj: &ObjId, key: &str) -> Option<Note> {
         extract_state: read_enum::<StageState>(doc, obj, "extract_state"),
         origin: read_enum::<NoteOrigin>(doc, obj, "origin"),
         color: read_enum_or(doc, obj, "color", NoteColor::Purple),
-        attachments: read_attachments(doc, obj),
         archived: get_bool(doc, obj, "archived").unwrap_or(false),
     })
-}
-
-/// Attachments as a map keyed by attachment id (JSON values), so two machines
-/// attaching different files to one note both keep theirs. The shape stays
-/// defined in `model.rs`, which must never learn about automerge.
-fn reconcile_attachments(
-    doc: &mut AutoCommit,
-    note: &ObjId,
-    attachments: &[Attachment],
-) -> Result<()> {
-    let map = child_map(doc, note, "attachments")?;
-    let keep: Vec<String> = attachments.iter().map(|a| a.id().to_string()).collect();
-    retain_keys(doc, &map, &keep)?;
-    for attachment in attachments {
-        let json = serde_json::to_string(attachment)?;
-        put_str(doc, &map, attachment.id(), &json)?;
-    }
-    Ok(())
-}
-
-/// Read a note's attachments back, ordered by id (insertion order in practice).
-fn read_attachments(doc: &AutoCommit, note: &ObjId) -> Vec<Attachment> {
-    let Ok(Some((value, map))) = doc.get(note, "attachments") else { return Vec::new() };
-    if !value.is_object() {
-        return Vec::new();
-    }
-    let mut keys: Vec<String> = doc.keys(&map).collect();
-    keys.sort();
-    keys.iter()
-        .filter_map(|key| {
-            let json = get_str(doc, &map, key)?;
-            match serde_json::from_str::<Attachment>(&json) {
-                Ok(a) => Some(a),
-                Err(e) => {
-                    tracing::warn!("Skipping unreadable attachment {key}: {e}");
-                    None
-                }
-            }
-        })
-        .collect()
 }
 
 /// The serde name of a unit enum, matching the `notes.json` spelling.

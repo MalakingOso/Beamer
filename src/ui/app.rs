@@ -85,13 +85,6 @@ pub fn App() -> Element {
             crate::model_setup::spawn_ensure_model_present(download_status);
         }
     });
-    // `use_hook`, not a plain call: `Signal::write` notifies every subscriber
-    // even when the value is unchanged, and this flag is fixed for the process.
-    // Must run before anything can delete an attachment (`release_attachment_bytes`
-    // reads it). Same `should_start` check `sync_client` uses.
-    use_hook(move || {
-        notes.write().set_sync_enabled(sync_client::should_start(&config.peek().sync.url));
-    });
     let status_log = use_signal(StatusLog::new);
     app_setup::report_load_errors(notes, tasks, status_log);
     let update_status = use_signal(UpdateStatus::default);

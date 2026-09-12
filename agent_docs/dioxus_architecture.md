@@ -194,42 +194,17 @@ Beamer's code opts into or could opt out of without patching the dependency.
 It should not surprise anyone that these shortcuts do nothing in a note or
 in Settings on Windows; there is no bug to chase here.
 
-### Drag-and-drop diverges between platforms
+### Drag-and-drop was removed with file attaching
 
-`.sticky-bar`'s drop handling (`src/ui/sticky.rs:191-206`) reads the same
-way on both platforms, but wry backs it differently underneath. dioxus-desktop
-0.7.10's `with_drag_drop_handler` (`dioxus-desktop-0.7.10/src/webview.rs:411-412`)
-is installed unconditionally on every platform; only `disable_file_drop_handler`
-(default `false`) would suppress it. On every platform but Windows that native
-handler just merges real dropped files into the synthesized `DragData`, so
-`e.files()` is non-empty exactly when a real file was dropped. Windows is the
-one where the native handler causes a problem: per the comment at
-`webview.rs:328-330`, "Windows webview blocks HTML-native events when the drop
-handler is provided", so dioxus glue code mimics drag-drop events instead,
-wiring `handleWindowsDragDrop` / `handleWindowsDragOver` / `handleWindowsDragLeave`
-in `launch.rs:61-83` off the native `DragDropEvent`. `e.files()` still returns
-real paths on Windows. The JS glue's `File` object is a placeholder, at
-`native.ts:268`, `File(["content"], "file.txt")`, whose own comment says it
-exists "to mimic that there are actually files in this event" and get the
-DOM drop event to fire at all. The real paths come from the Rust side,
-bypassing that placeholder entirely: `webview.rs:159` calls
-`NativeFileHover::current_paths()`, populated from wry's native
-`DragDropEvent::Drop { paths }`, and `webview.rs:159-183` builds the
-`DesktopFileDragEvent` with those paths unconditionally, on every platform.
-The file-drop path works the same on both platforms as a result.
-What does not carry over is the URL case. `attachments_from_drop`
-falls back to `dataTransfer.getData("text/uri-list")` when there are no files,
-and Windows's synthetic `dataTransfer` never populates that field, so dragging
-a URL from a browser onto a note silently does nothing on Windows even though
-it attaches a link chip on Linux. Worse for visual feedback, `ondragenter`
-(`sticky.rs:194`, the handler that flips `drop_target` and shows the
-drop-target highlight) is never synthesized on Windows at all, so that
-highlight is dead code there. The interpreter shim (`dioxus-interpreter-js-0.7.10/src/ts/native.ts:256-321`)
-only ever dispatches `dragover`, `dragleave`, and `drop` from the Windows glue
-path, with no `handleWindowsDragEnter` counterpart at all, so there is no code
-path by which a synthesized `dragenter` could fire on Windows. None of this
-touches the paperclip button, which opens a native file dialog and is
-unaffected on every platform.
+Sticky notes used to accept dropped files and URLs (`StickyNote`'s `ondrop`
+plus `attachments_from_drop`), and this section documented how wry backs
+that differently per platform. File attaching is gone now, so the handlers
+are gone with it. If drop support ever comes back, the thing to re-check
+first is the Windows path: dioxus's glue synthesizes `dragover`,
+`dragleave` and `drop` from the native `DragDropEvent` but never
+`dragenter`, and its synthetic `dataTransfer` never populates
+`text/uri-list`, so URL drops and enter-highlight behaved differently there
+than on Linux.
 
 ### Toast branding and AUMID registration
 
@@ -353,10 +328,6 @@ be broken.
   which resolves to `%LOCALAPPDATA%` on Windows, per Microsoft's guidance for
   browser caches. The function comment documents why this was changed from
   the Roaming location.
-- **Note images work on Windows unchanged.** `src/ui/sticky_blocks.rs`
-  serves attachment images through a root-relative `/note-media/<id>` URL
-  via `use_asset_handler`, and wry's URI handling makes that path resolve
-  identically on both platforms.
 - **`ui::fonts::embedded_font_css()` is fine as-is.** It emits `data:` URIs
   with the font bytes inlined, which is exactly the kind of reference that
   cannot fail to resolve regardless of platform or windowing quirks.

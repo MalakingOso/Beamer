@@ -177,11 +177,10 @@ async fn download(dest: &Path, status: &mut Signal<DownloadStatus>) -> anyhow::R
 }
 
 /// Size check first (cheap, catches a truncated file without hashing it),
-/// then a streamed sha256 (same 64KB-buffer shape as
-/// `notes::edit::Attachments::stream_copy_and_hash`, adapted to hash a file
-/// already on disk rather than hash-while-copying). Takes the expected
-/// size/hash as parameters, not the module constants directly, so tests can
-/// exercise this against a tiny fake file instead of a 1.15GB one.
+/// then a streamed sha256 over a 64KB buffer so a large file is never read
+/// fully into memory. Takes the expected size/hash as parameters, not the
+/// module constants directly, so tests can exercise this against a tiny fake
+/// file instead of a 1.15GB one.
 fn verify_against(path: &Path, expected_size: u64, expected_sha256: &str) -> anyhow::Result<bool> {
     let metadata = std::fs::metadata(path)?;
     if metadata.len() != expected_size {

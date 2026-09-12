@@ -11,14 +11,12 @@ use std::time::Duration;
 use dioxus::desktop::tao::event::{Event as TaoEvent, WindowEvent};
 use dioxus::desktop::tao::window::ResizeDirection;
 use dioxus::desktop::{use_window, use_wry_event_handler};
-use dioxus::html::HasFileData;
 use dioxus::prelude::*;
 
 use crate::notes::pipeline::PipelineRequest;
 use crate::notes::task_store::TaskStore;
-use crate::notes::{next_synced_id, Attachment, NoteColor, NoteOrigin, NoteStore, StageState};
+use crate::notes::{NoteColor, NoteOrigin, NoteStore, StageState};
 use crate::ui::icons::{IconAsterisk, IconCheck, IconPlus};
-use crate::ui::sticky_blocks::{self, StickyBody};
 use crate::ui::sticky_chips::StickyChips;
 use crate::ui::sticky_footer::{self, FooterIcon};
 
@@ -42,6 +40,15 @@ pub fn logical_size(physical: (u32, u32), scale: f64) -> Option<(u32, u32)> {
         (f64::from(physical.0) / scale).round() as u32,
         (f64::from(physical.1) / scale).round() as u32,
     ))
+}
+
+/// Rows for the body's textarea, from line count (not measured JS — a
+/// `document::eval` roundtrip per keystroke would sit behind the IPC bridge).
+pub fn rows_for(text: &str) -> usize {
+    // `str::lines` drops the trailing empty line, so "hello\n" counts as one.
+    // Splitting on '\n' counts it as the two rows the textarea shows.
+    let counted = text.split('\n').count().max(1);
+    counted.max(3).min(40)
 }
 
 #[derive(Props, Clone, PartialEq)]
@@ -71,17 +78,10 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
     // undecorated note. `use_window()` resolves to this sticky's own VirtualDom.
     let window = use_window();
 
-    // Per-window asset handler — must register here, not in `App()` (see `sticky_blocks`).
-    sticky_blocks::use_note_media(id.clone(), notes);
-
     let note = {
         let id = id.clone();
         use_memo(move || notes.read().get(&id).cloned())
     };
-
-    let mut drop_target = use_signal(|| false);
-    // Set when a paste carried image bytes and no text (nothing on disk to attach).
-    let mut paste_hint = use_signal(|| false);
 
     // Whether the footer's red failure text is currently shown. Starts true
     // so a note opened already-Failed still shows it once; the effect below
@@ -170,68 +170,17 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
         return rsx! { div { class: "sticky-gone", "This note was deleted." } };
     };
 
-    let color_class = if drop_target() {
-        format!("sticky sticky-{} sticky-drop-target", note.color.css_class())
-    } else {
-        format!("sticky sticky-{}", note.color.css_class())
-    };
+    let color_class = format!("sticky sticky-{}", note.color.css_class());
     let archive_id = id.clone();
     let chips_id = id.clone();
     let pass_id = id.clone();
-    let drop_id = id.clone();
-    let pick_id = id.clone();
-    let paste_id = id.clone();
 
     // Keyed to the stage fields, not the note's origin, so a superseded pass stays retryable.
     let in_flight = passes_in_flight.read().contains(&id);
     let footer = sticky_footer::footer(note.clean_state, note.extract_state, in_flight);
 
     rsx! {
-        div {
-            class: "{color_class}",
-            // Without this, the browser refuses the drop and `ondrop` never fires.
-            ondragover: move |e| e.prevent_default(),
-            ondragenter: move |_| drop_target.set(true),
-            ondragleave: move |_| drop_target.set(false),
-            ondrop: move |e: Event<DragData>| {
-                e.prevent_default();
-                drop_target.set(false);
-                // Synced ids carry the machine suffix (attachments sync keyed by id).
-                let machine_id = notes.peek().machine_id().to_string();
-                let dropped = attachments_from_drop(&e, &machine_id);
-                if dropped.is_empty() {
-                    return;
-                }
-                {
-                    let mut store = notes.write();
-                    for attachment in dropped {
-                        store.add_attachment(&drop_id, attachment);
-                    }
-                }
-                // Flush both stores so a crash before the tick can't lose the drop.
-                crate::notes::flush_stores(&mut notes.write(), &mut tasks.write());
-            },
-            onpaste: move |e: Event<ClipboardData>| {
-                // `ClipboardData` is empty on desktop, so read the clipboard
-                // directly — synchronously, or `prevent_default` lands too late.
-                match clipboard_paste() {
-                    Pasted::Url(url) => {
-                        e.prevent_default();
-                        paste_hint.set(false);
-                        let link_id = next_synced_id(notes.peek().machine_id());
-                        notes.write().add_attachment(
-                            &paste_id,
-                            Attachment::Link { id: link_id, url, title: None },
-                        );
-                        crate::notes::flush_stores(&mut notes.write(), &mut tasks.write());
-                    }
-                    Pasted::ImageBytes => {
-                        e.prevent_default();
-                        paste_hint.set(true);
-                    }
-                    Pasted::Nothing => paste_hint.set(false),
-                }
-            },
+        div { class: "{color_class}",
             div {
                 class: "sticky-bar",
                 // The bar is the title bar; positions are not persisted.
@@ -272,41 +221,6 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
                         },
                         IconPlus { size: 13 }
                     }
-                    // Native file dialog (the only attach path on Windows).
-                    label {
-                        class: "sticky-attach",
-                        title: "Attach a file",
-                        onmousedown: move |e: Event<MouseData>| e.stop_propagation(),
-                        "\u{1F4CE}"
-                        input {
-                            r#type: "file",
-                            multiple: true,
-                            class: "sticky-file-input",
-                            onchange: move |e: Event<FormData>| {
-                                let files = e.files();
-                                if files.is_empty() {
-                                    return;
-                                }
-                                {
-                                    let machine_id = notes.peek().machine_id().to_string();
-                                    let mut store = notes.write();
-                                    for file in files {
-                                        store.add_attachment(
-                                            &pick_id,
-                                            sticky_blocks::attachment_for_path(
-                                                next_synced_id(&machine_id),
-                                                file.path(),
-                                            ),
-                                        );
-                                    }
-                                }
-                                crate::notes::flush_stores(
-                                    &mut notes.write(),
-                                    &mut tasks.write(),
-                                );
-                            },
-                        }
-                    }
                     button {
                         class: "sticky-archive",
                         title: "Archive this note",
@@ -325,9 +239,7 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
             StickyBody {
                 id: id.clone(),
                 notes,
-                tasks,
                 body: note.body.clone(),
-                attachments: note.attachments.clone(),
             }
             StickyChips { note_id: chips_id, tasks }
             div { class: "sticky-footer",
@@ -352,10 +264,6 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
                     if show_error_text() {
                         span { class: "sticky-pass-error", "{message}" }
                     }
-                } else if paste_hint() {
-                    span { class: "sticky-paste-hint",
-                        "Save the image first, then attach it with \u{1F4CE}"
-                    }
                 }
                 // No decorations means no edge to grab; resize is client-initiated
                 // (unlike positioning) so no extension method is needed.
@@ -375,57 +283,31 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
     }
 }
 
-/// What a drop carries: real files first, else a URL from the data transfer.
-/// Off Windows, `files()` is authoritative when non-empty; a browser drag
-/// arrives as `text/uri-list` or bare `text/plain` instead.
-fn attachments_from_drop(e: &Event<DragData>, machine_id: &str) -> Vec<Attachment> {
-    let files = e.files();
-    if !files.is_empty() {
-        return files
-            .into_iter()
-            .map(|f| sticky_blocks::attachment_for_path(next_synced_id(machine_id), f.path()))
-            .collect();
-    }
-
-    let transfer = e.data_transfer();
-    let text = transfer
-        .get_data("text/uri-list")
-        .or_else(|| transfer.get_data("text/plain"))
-        .unwrap_or_default();
-
-    sticky_blocks::url_in(&text)
-        .map(|url| vec![Attachment::Link { id: next_synced_id(machine_id), url, title: None }])
-        .unwrap_or_default()
+#[derive(Props, Clone, PartialEq)]
+pub struct StickyBodyProps {
+    pub id: String,
+    pub notes: Signal<NoteStore>,
+    /// Passed down so this re-renders with the parent, not via a second store subscription.
+    pub body: String,
 }
 
-/// What a paste turned out to be carrying.
-pub enum Pasted {
-    /// A bare URL, and nothing else. Becomes a link chip.
-    Url(String),
-    /// Image bytes with no text. Detected so the note can say so — a silent
-    /// drop would look like a bug. (Attachments reference files on disk.)
-    ImageBytes,
-    /// Anything else; the paste falls through and inserts text as normal.
-    Nothing,
-}
+#[component]
+pub fn StickyBody(props: StickyBodyProps) -> Element {
+    let StickyBodyProps { id, mut notes, body } = props;
 
-/// Read the system clipboard and decide what the paste means.
-fn clipboard_paste() -> Pasted {
-    let Ok(mut clipboard) = arboard::Clipboard::new() else {
-        return Pasted::Nothing;
-    };
-    if let Ok(text) = clipboard.get_text() {
-        if let Some(url) = sticky_blocks::url_in(&text) {
-            return Pasted::Url(url);
-        }
-        if !text.trim().is_empty() {
-            return Pasted::Nothing;
+    rsx! {
+        div { class: "sticky-blocks",
+            textarea {
+                class: "sticky-body",
+                spellcheck: false,
+                rows: "{rows_for(&body)}",
+                value: "{body}",
+                oninput: move |e| {
+                    notes.write().set_body(&id, e.value());
+                },
+            }
         }
     }
-    if clipboard.get_image().is_ok() {
-        return Pasted::ImageBytes;
-    }
-    Pasted::Nothing
 }
 
 #[cfg(test)]

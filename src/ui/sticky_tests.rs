@@ -36,3 +36,23 @@ fn a_zero_sized_resize_is_ignored() {
         "a bad scale must not divide by zero"
     );
 }
+
+#[test]
+fn an_empty_note_gets_room_and_a_long_one_is_capped() {
+    assert_eq!(rows_for(""), 3, "an empty note should not be a one-line slot");
+    assert_eq!(rows_for("one"), 3);
+    assert_eq!(rows_for("a\nb\nc\nd"), 4);
+    assert_eq!(
+        rows_for(&"x\n".repeat(200)),
+        40,
+        "a runaway note must not make a window of unbounded height"
+    );
+}
+
+#[test]
+fn a_trailing_enter_grows_the_textarea() {
+    // `str::lines` drops the trailing empty line, so the textarea never
+    // grew on an Enter at the end of the note.
+    assert_eq!(rows_for("hello\n"), 3);
+    assert_eq!(rows_for("a\nb\nc\nd\n"), 5);
+}

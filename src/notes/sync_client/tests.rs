@@ -146,7 +146,7 @@ fn message_framing_round_trips() {
 /// has not run since the keystroke) was not yet in the document, so that
 /// hydrate silently threw it away, and permanently: the store then
 /// matched the document exactly, so the next reconcile produced no diff
-/// to recover it. `sticky_blocks.rs` writes the body on every keystroke,
+/// to recover it. The sticky body writes on every keystroke,
 /// so this was visible as characters vanishing mid-word whenever a sync
 /// message happened to arrive while the user was typing, which needs
 /// nothing more exotic than two machines being online around the same
@@ -176,7 +176,6 @@ fn an_edit_still_only_in_the_signal_survives_an_incoming_change() {
     let mut a_notes = NoteStore::load_from(
         a_dir.join("notes.json"),
         a_dir.join("machine.json"),
-        a_dir.join("attachments"),
         a_dir.join("notes.automerge"),
     );
     let mut a_tasks = TaskStore::load_beside_at(&a_notes, a_dir.join("tasks.json"));
@@ -190,7 +189,6 @@ fn an_edit_still_only_in_the_signal_survives_an_incoming_change() {
     let mut b_notes = NoteStore::load_from(
         b_dir.join("notes.json"),
         b_dir.join("machine.json"),
-        b_dir.join("attachments"),
         b_dir.join("notes.automerge"),
     );
     let mut b_tasks = TaskStore::load_beside_at(&b_notes, b_dir.join("tasks.json"));

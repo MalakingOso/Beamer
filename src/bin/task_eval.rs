@@ -16,10 +16,6 @@
 
 #[path = "../llm/mod.rs"]
 mod llm;
-/// Included so image placeholder tokens are stripped exactly as the pipeline
-/// strips them — grading against text the model is never sent is meaningless.
-#[path = "../notes/blocks.rs"]
-mod blocks;
 #[path = "../notes/model.rs"]
 mod note_model;
 #[path = "../notes/task.rs"]
@@ -185,8 +181,8 @@ async fn main() -> Result<()> {
     for (i, (note, decided)) in gradeable.iter().take(planned).enumerate() {
         print!("── [{}/{planned}] {} ", i + 1, note.id);
         println!("{}", "─".repeat(46usize.saturating_sub(note.id.len())));
-        // What the pipeline sends: tokens stripped, never escaped.
-        let sent = blocks::plain_text(&note.body);
+        // What the pipeline sends: the body as-is.
+        let sent = note.body.clone();
         for line in sent.trim().lines() {
             println!("   │ {line}");
         }

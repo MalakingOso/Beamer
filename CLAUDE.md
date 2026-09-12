@@ -11,12 +11,9 @@ Windows system-tray dictation app. Captures mic audio, transcribes via cloud API
 - `src/hotkey/` — Global hotkey registration (hold-to-talk + toggle modes)
 - `src/config/` — TOML config + vocabulary management
 - `src/notes/` — Note store (`mod.rs`) + types (`model.rs`), stage transitions
-  (`lifecycle.rs`), attachment/size/delete edits (`edit.rs`), the model-pass
+  (`lifecycle.rs`), size/delete edits (`edit.rs`), the model-pass
   coroutine (`pipeline.rs`), task suggestions (`task.rs`, `task_store.rs`),
   calendar export (`ics.rs`)
-  - `blocks.rs` — the `[[beamer:<id>]]` placeholder grammar. Pure. **Read it
-    before touching the body of a note or the cleanup path** — tokens must
-    never reach a model.
 - `src/llm/` — Client for the standalone llama.cpp server (Beamer never spawns
   it). Cleanup (`cleanup.rs`) and extraction (`extract.rs`) over `chat.rs`;
   `prompts.rs` holds both models' input contracts.
@@ -26,8 +23,7 @@ Windows system-tray dictation app. Captures mic audio, transcribes via cloud API
 - `src/ui/` — Dioxus desktop: settings window, overlay, screen edge glow
   - `src/ui/settings/` — One file per card section (recording, transcription, api_keys, etc.)
   - `src/ui/sticky*.rs`, `note_layout.rs`, `shell_window.rs` — Sticky note
-    windows, placement; `sticky_blocks.rs` renders the block stack and serves
-    a note's images to its own webview
+    windows and placement
   - `src/ui/notes_page.rs` — All-notes board; `tasks_page.rs` — accepted tasks
   - `src/ui/components.rs` — Shared: Card, Select, Toggle, MaskedInput, TagChip
 
@@ -65,7 +61,7 @@ cargo run --bin task_eval -- --limit 20   # Measure extraction against your own 
 - `agent_docs/design_system.md` — Color tokens, typography, component patterns
 - `agent_docs/sticky_notes.md` — Note windows, Wayland placement, cross-window state (CRITICAL for multi-window work)
 - `agent_docs/local_inference.md` — The two model passes, the pipeline coroutine, and the failures that return HTTP 200 (CRITICAL before touching `src/llm/`)
-- `agent_docs/sync.md` — Cross-machine sync design (automerge doc, Syncthing for attachments)
+- `agent_docs/sync.md` — Cross-machine sync design (automerge doc, live sync client)
 - `agent_docs/running_on_bearcave.md` — Deploying/running Beamer on the Windows laptop against callisto's models
 - `docs/decisions.md` — The "why" behind major shipped features, one paragraph each
 

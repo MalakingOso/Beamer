@@ -32,7 +32,6 @@ impl Machine {
         let notes = NoteStore::load_from(
             dir.join("notes.json"),
             dir.join("machine.json"),
-            dir.join("attachments"),
             dir.join("notes.automerge"),
         );
         let tasks = TaskStore::load_beside_at(&notes, dir.join("tasks.json"));

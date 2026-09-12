@@ -10,21 +10,17 @@ fn temp_store(tag: &str) -> NoteStore {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(format!("{tag}.json"));
     let machine_path = dir.join(format!("{tag}.machine.json"));
-    let attachments_dir = dir.join(format!("{tag}_attachments"));
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&machine_path);
-    let _ = std::fs::remove_dir_all(&attachments_dir);
     NoteStore {
         notes: Vec::new(),
         path,
         dirty: false,
         machine: MachineStore::new(machine_path),
-        attachments_dir,
         doc: sync_doc::SyncHandle::default(),
         doc_dirty: false,
         load_error: None,
         unreadable_notes: Vec::new(),
-        sync_enabled: false,
     }
 }
 

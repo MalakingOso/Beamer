@@ -133,18 +133,15 @@ mod tests {
         let machine_path = dir.join(format!("lifecycle_{tag}.machine.json"));
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&machine_path);
-        let attachments_dir = dir.join(format!("lifecycle_{tag}_attachments"));
         NoteStore {
             notes: Vec::new(),
             path,
             dirty: false,
             machine: crate::notes::MachineStore::new(machine_path),
-            attachments_dir,
             doc: crate::notes::sync_doc::SyncHandle::default(),
             doc_dirty: false,
             load_error: None,
             unreadable_notes: Vec::new(),
-            sync_enabled: false,
         }
     }
 

@@ -57,8 +57,6 @@ pub fn use_sync_client(config: Signal<Config>, doc: SyncHandle, notes: Signal<No
     let status = use_signal(SyncStatus::default);
     let started_url = use_hook(move || {
         let url = config.peek().sync.url.trim().to_string();
-        // `NoteStore::sync_enabled` is already set by `App()`'s startup hook; not
-        // repeated here to avoid writing the same `Signal` from two places.
         if should_start(&url) {
             spawn(run_client(url.clone(), doc, notes, tasks, status));
         }

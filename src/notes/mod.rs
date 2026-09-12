@@ -12,7 +12,6 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use crate::config::Config;
 use sync_doc::{SyncDoc, SyncHandle};
 
-pub mod blocks;
 mod doc_notes;
 mod doc_vocab;
 mod doc_tasks;
@@ -31,17 +30,12 @@ pub mod task;
 pub mod task_store;
 pub use flush::flush_stores;
 pub use machine::MachineStore;
-pub use model::{Attachment, Location, Note, NoteColor, NoteOrigin, StageState};
+pub use model::{Note, NoteColor, NoteOrigin, StageState};
 
 /// `<config_dir>/sync`, the root of everything that syncs. Takes `config_dir`
 /// explicitly so tests can point it at a temp directory.
 pub fn sync_dir(config_dir: &Path) -> PathBuf {
     config_dir.join("sync")
-}
-
-/// Where Beamer keeps its own content-addressed copy of attachment bytes.
-pub fn attachments_dir(config_dir: &Path) -> PathBuf {
-    sync_dir(config_dir).join("attachments")
 }
 
 /// The automerge document holding both the note and task corpus. One file, two roots.
@@ -60,9 +54,6 @@ pub struct NoteStore {
     /// is its own file with its own atomic save.
     #[serde(skip)]
     machine: MachineStore,
-    /// Injectable like `path`, so tests use a temp directory.
-    #[serde(skip)]
-    pub(crate) attachments_dir: PathBuf,
     /// The automerge document, shared with `TaskStore`. See `sync_doc`.
     #[serde(skip)]
     pub(crate) doc: SyncHandle,
@@ -77,10 +68,6 @@ pub struct NoteStore {
     /// reconcile does not prune them and `machine.gc` does not wipe their window state.
     #[serde(skip)]
     pub(crate) unreadable_notes: Vec<String>,
-    /// Whether a sync server is configured (set once at startup). Gates whether
-    /// `release_attachment_bytes` may delete unreferenced local bytes.
-    #[serde(skip)]
-    pub(crate) sync_enabled: bool,
 }
 
 impl Default for NoteStore {
@@ -90,36 +77,27 @@ impl Default for NoteStore {
             path: Self::storage_path(),
             dirty: false,
             machine: MachineStore::new(Self::machine_storage_path()),
-            attachments_dir: Self::attachments_storage_dir(),
             doc: SyncHandle::default(),
             doc_dirty: false,
             load_error: None,
             unreadable_notes: Vec::new(),
-            sync_enabled: false,
         }
     }
 }
 
-/// Monotonic within a process run, so same-millisecond ids stay distinct without a
-/// uuid dependency. Local-only ids (temp filenames); anything that syncs uses
-/// `next_synced_id`, and note ids use `next_note_id`.
-pub(crate) fn next_id() -> String {
-    let (millis, n) = raw_id_parts();
-    format!("{millis:x}-{n:04x}")
-}
-
-/// Same counter as `next_id`, plus a per-install suffix. Task and attachment
-/// ids sync across machines keyed by id in the shared document, so they need
-/// the same cross-machine uniqueness note ids got — two machines extracting
-/// in the same millisecond must not mint the same task id.
+/// Millis plus a per-install suffix, so same-millisecond ids stay distinct
+/// without a uuid dependency. Task ids sync across machines keyed by id in
+/// the shared document, so they need the same cross-machine uniqueness note
+/// ids got — two machines extracting in the same millisecond must not mint
+/// the same task id.
 pub(crate) fn next_synced_id(machine: &str) -> String {
     let (millis, n) = raw_id_parts();
     format_note_id(millis, n, machine)
 }
 
-/// Same counter as `next_id`, plus a per-install suffix. Without it, two machines
-/// creating a note in the same millisecond would mint the same id, and a sync merge
-/// would silently reparent one machine's tasks onto the other's note.
+/// Millis plus a per-install suffix. Without it, two machines creating a note
+/// in the same millisecond would mint the same id, and a sync merge would
+/// silently reparent one machine's tasks onto the other's note.
 pub(crate) fn next_note_id(machine: &str) -> String {
     let (millis, n) = raw_id_parts();
     format_note_id(millis, n, machine)
@@ -145,10 +123,6 @@ impl NoteStore {
         Config::config_dir().join("machine.json")
     }
 
-    fn attachments_storage_dir() -> PathBuf {
-        attachments_dir(&Config::config_dir())
-    }
-
     fn document_storage_path() -> PathBuf {
         notes_document_path(&Config::config_dir())
     }
@@ -157,7 +131,6 @@ impl NoteStore {
         Self::load_from(
             Self::storage_path(),
             Self::machine_storage_path(),
-            Self::attachments_storage_dir(),
             Self::document_storage_path(),
         )
     }
@@ -165,11 +138,6 @@ impl NoteStore {
     /// The shared document handle, so `TaskStore` can hold the other half of the same corpus.
     pub fn sync_doc(&self) -> SyncHandle {
         self.doc.clone()
-    }
-
-    /// Record whether a sync server is configured. Called once at startup.
-    pub fn set_sync_enabled(&mut self, enabled: bool) {
-        self.sync_enabled = enabled;
     }
 
     /// Whether anything is waiting on the JSON mirror or the document.
@@ -189,12 +157,7 @@ impl NoteStore {
 
     /// Paths taken explicitly so tests avoid the real config dir. GC runs only on a
     /// successful read: a missing/unreadable file is not proof any note is gone.
-    fn load_from(
-        path: PathBuf,
-        machine_path: PathBuf,
-        attachments_dir: PathBuf,
-        doc_path: PathBuf,
-    ) -> Self {
+    fn load_from(path: PathBuf, machine_path: PathBuf, doc_path: PathBuf) -> Self {
         let machine = MachineStore::load_from(machine_path);
         let (mut doc, load_error) = SyncDoc::open(doc_path);
         // Derived from `path` so tests stay in their temp dir. Only caller that opts in.
@@ -219,14 +182,11 @@ impl NoteStore {
                 path,
                 dirty: false,
                 machine,
-                attachments_dir,
                 doc: handle,
                 doc_dirty: false,
                 load_error: load_error.or(unreadable_message),
                 unreadable_notes: hydrated.unreadable,
-                sync_enabled: false,
             };
-            store.migrate_legacy_attachments();
             // Unreadable entries are read failures, not deletions: spare their window
             // state. Skipped entirely when the document could not be read at all.
             if !store.document_read_only() {
@@ -241,7 +201,7 @@ impl NoteStore {
             return store;
         }
 
-        let mut store = Self::seed_from_json(path, machine, attachments_dir, handle);
+        let mut store = Self::seed_from_json(path, machine, handle);
         // Seeding happens at most once per install; a second machine gets the
         // document through sync, never by seeding its own copy.
         store.doc_dirty = true;
@@ -301,7 +261,7 @@ impl NoteStore {
     }
 
     /// This install's id suffix, for synced ids minted outside `notes/`
-    /// (attachment ids from the UI).
+    /// (task rows from the pipeline).
     pub(crate) fn machine_id(&self) -> &str {
         &self.machine.machine_id
     }
@@ -320,7 +280,6 @@ impl NoteStore {
             extract_state: StageState::Pending,
             origin,
             color,
-            attachments: Vec::new(),
             archived: false,
         });
         self.machine.set_open(&id, true);
@@ -435,8 +394,7 @@ impl NoteStore {
     }
 
     /// Active notes matching `query`, newest first. Searches `raw` too (cleanup can
-    /// rewrite away spoken words) and matches `body` through `blocks::plain_text`
-    /// so attachment tokens are not searchable text.
+    /// rewrite away spoken words).
     pub fn search(&self, query: &str) -> Vec<&Note> {
         let needle = query.trim().to_lowercase();
         if needle.is_empty() {
@@ -447,7 +405,7 @@ impl NoteStore {
                 .iter()
                 .filter(|n| !n.archived)
                 .filter(|n| {
-                    blocks::plain_text(&n.body).to_lowercase().contains(&needle)
+                    n.body.to_lowercase().contains(&needle)
                         || n.raw.to_lowercase().contains(&needle)
                 })
                 .collect(),

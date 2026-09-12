@@ -54,8 +54,7 @@ impl MachineStore {
     /// purpose: `RandomState` is already per-instance seeded, salted here with
     /// wall clock + pid. Older four-digit ids keep working — ids are opaque
     /// strings, never parsed — but all newly minted ids carry the full width,
-    /// since these back the cross-machine uniqueness of note, task and
-    /// attachment ids.
+    /// since these back the cross-machine uniqueness of note and task ids.
     fn generate_machine_id() -> String {
         let mut hasher = RandomState::new().build_hasher();
         hasher.write_i64(chrono::Local::now().timestamp_nanos_opt().unwrap_or_default());
