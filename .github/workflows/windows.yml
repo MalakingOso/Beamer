@@ -10,17 +10,64 @@ name: Windows
 # needs to embed the icon and the manifest. The local `cargo xwin check` gate
 # stays useful for fast feedback, and this is the build that proves the real
 # toolchain works.
+#
+# To cut a release: bump the `version` in Cargo.toml, commit it, then run
+# this workflow by hand from the Actions tab with that same version typed
+# into the `version` input. That tags the commit `vX.Y.Z`, and publishes a
+# GitHub Release carrying the Windows/Linux self-update zips (what
+# src/update/mod.rs polls for) plus the NSIS installer and .deb. Leaving
+# `version` blank just builds and tests, same as before — nothing gets
+# tagged or published.
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: >-
+          Version to publish as a GitHub Release, e.g. 0.5.0 (must already be
+          set in Cargo.toml — this workflow never commits a version bump).
+          Leave blank for a build-only run that publishes nothing.
+        required: false
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
 jobs:
+  # Cheap gate that runs before the expensive Windows/Linux builds. Reads the
+  # version straight from Cargo.toml — that file stays the single source of
+  # truth, and the `version` input is only a confirmation that you meant to
+  # release this commit, not a value the workflow ever writes back.
+  prepare:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      is_release: ${{ steps.v.outputs.is_release }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: v
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          cargo_version=$(grep -m1 '^version' Cargo.toml | sed -E 's/version *= *"(.*)"/\1/')
+          echo "Cargo.toml version: $cargo_version"
+          if [ -n "$INPUT_VERSION" ]; then
+            if [ "$INPUT_VERSION" != "$cargo_version" ]; then
+              echo "::error::Input version '$INPUT_VERSION' does not match Cargo.toml version '$cargo_version'. Bump Cargo.toml and commit that first."
+              exit 1
+            fi
+            echo "is_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_release=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$cargo_version" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build and test on Windows
+    needs: prepare
     runs-on: windows-latest
 
     steps:
@@ -98,6 +145,24 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      # `self_update` (src/update/mod.rs) matches release assets by target
+      # triple substring and only knows how to unpack zip/plain archives
+      # (Cargo.toml enables the `archive-zip` feature, not `archive-tar`), so
+      # the self-updater needs exactly this: a flat zip with `beamer.exe` at
+      # its root, named with the triple. Compress-Archive on a single file
+      # input produces that flat layout already.
+      - name: Build self-update archive
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "${{ steps.appexe.outputs.path }}" -DestinationPath beamer-x86_64-pc-windows-msvc.zip
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: beamer-windows-selfupdate
+          path: beamer-x86_64-pc-windows-msvc.zip
+          if-no-files-found: error
+          retention-days: 30
+
       # The NSIS config in Dioxus.toml has existed since the project started
       # and had never been built. Beyond convenience, the installer is what
       # creates a Start Menu shortcut carrying a real AppUserModelID, which is
@@ -124,6 +189,7 @@ jobs:
 
   linux:
     name: Test and bundle on Linux
+    needs: prepare
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -131,18 +197,51 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      # Dioxus desktop needs WebKitGTK, and cpal needs ALSA.
+      # Dioxus desktop needs WebKitGTK, cpal needs ALSA, and `zip` builds the
+      # self-update archive below (not preinstalled on ubuntu-latest).
       - name: System dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libasound2-dev \
-            libgtk-3-dev libsoup-3.0-dev libxdo-dev pkg-config
+            libgtk-3-dev libsoup-3.0-dev libxdo-dev pkg-config zip
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
       - name: Test
         run: cargo test --locked
+
+      - name: Install dioxus-cli
+        uses: taiki-e/install-action@v2
+        with:
+          tool: dioxus-cli@0.7.10
+
+      # `dx build`, not `cargo build` — see the same-named step in the
+      # Windows job above for why: only the dioxus CLI runs the manganis
+      # asset pipeline the app needs.
+      - name: Build release
+        run: dx build --release
+
+      - name: Locate the app binary
+        id: appexe
+        run: |
+          exe=$(find target -type f -name beamer -not -path '*/build/*' -not -path '*/incremental/*' -printf '%T@ %p\n' | sort -rn | head -n1 | cut -d' ' -f2-)
+          if [ -z "$exe" ]; then echo "dx build produced no beamer binary"; exit 1; fi
+          echo "App binary: $exe ($(du -h "$exe" | cut -f1))"
+          echo "path=$exe" >> "$GITHUB_OUTPUT"
+
+      # Same self-update contract as the Windows job: a flat zip containing
+      # just the binary, named with the target triple `self_update` matches
+      # against. `-j` junks the path so `beamer` lands at the zip root.
+      - name: Build self-update archive
+        run: zip -j beamer-x86_64-unknown-linux-gnu.zip "${{ steps.appexe.outputs.path }}"
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: beamer-linux-selfupdate
+          path: beamer-x86_64-unknown-linux-gnu.zip
+          if-no-files-found: error
+          retention-days: 30
 
       # sync_server belongs on the always-on desktop, so this is the build that
       # matters for it. It also has to exist at this path before the bundle
@@ -164,12 +263,8 @@ jobs:
       # The .deb carries both beamer and sync_server. No dpkg-deb or fakeroot
       # needed: tauri-bundler builds the ar/tar.gz archive itself in pure
       # Rust, so the -dev packages already installed above are everything the
-      # bundle step requires beyond dioxus-cli.
-      - name: Install dioxus-cli
-        uses: taiki-e/install-action@v2
-        with:
-          tool: dioxus-cli@0.7.10
-
+      # bundle step requires beyond dioxus-cli (installed earlier, for the
+      # `dx build` self-update step).
       - name: Bundle .deb
         run: dx bundle --release --package-types deb
 
@@ -187,3 +282,42 @@ jobs:
           path: ${{ steps.deb.outputs.path }}
           if-no-files-found: error
           retention-days: 30
+
+  # Only runs when the `version` input was given and matched Cargo.toml (see
+  # `prepare` above). Tags the released commit and publishes everything both
+  # jobs built as one GitHub Release — the two `beamer-*-selfupdate` zips are
+  # what src/update/mod.rs actually finds and downloads; the installer/.deb
+  # are there for people installing fresh rather than updating in place.
+  release:
+    name: Publish GitHub Release
+    needs: [prepare, build, linux]
+    if: needs.prepare.outputs.is_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v5
+        with:
+          path: dist
+
+      - name: Tag the release commit
+        env:
+          TAG: v${{ needs.prepare.outputs.version }}
+        run: |
+          git tag "$TAG"
+          git push origin "$TAG"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ needs.prepare.outputs.version }}
+        run: |
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --generate-notes \
+            dist/beamer-windows-selfupdate/beamer-x86_64-pc-windows-msvc.zip \
+            dist/beamer-windows-installer/*-setup.exe \
+            dist/beamer-linux-selfupdate/beamer-x86_64-unknown-linux-gnu.zip \
+            dist/beamer-linux-deb/*.deb
