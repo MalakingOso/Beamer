@@ -1,4 +1,4 @@
-# Design System — Deploy Purple
+# Design System — Beamer Purple
 
 ## Philosophy
 

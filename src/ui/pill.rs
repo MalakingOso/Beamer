@@ -16,7 +16,7 @@ pub(super) fn pill_state(state: RecordingState, mode: CaptureMode) -> Option<&'s
     }
 }
 
-/// Deploy Purple recording pill (bottom-center): 12-bar waveform following mic
+/// Beamer Purple recording pill (bottom-center): 12-bar waveform following mic
 /// level, plus "Transcribing…" while processing; no elapsed-time readout (mirrors
 /// the GNOME pill). Own transparent, click-through, always-on-top window, driven
 /// via the `beamerSetState`/`beamerSetLevel` head-script.
@@ -55,7 +55,7 @@ pub(super) const PILL_WINDOW_H: f64 = 80.0;
 #[cfg(not(target_os = "linux"))]
 pub(super) const PILL_INK_BOTTOM: f64 = 60.0;
 
-// Deploy Purple card matching the GNOME pill's tokens, shape, and waveform
+// Beamer Purple card matching the GNOME pill's tokens, shape, and waveform
 // gradient (bar colors are indicator.js's COLOR_FROM→COLOR_TO lerp, `i/11`).
 #[cfg(not(target_os = "linux"))]
 pub(super) const PILL_CSS: &str = r#"

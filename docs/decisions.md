@@ -8,9 +8,9 @@ code changes; these entries are just the "why," kept so the reasoning behind a
 decision doesn't have to be re-derived from git log. The original spec/plan
 text is still recoverable from git history if the full detail is ever needed.
 
-## Deploy Purple design language (2026-03-01)
+## Beamer Purple design language (2026-03-01)
 
-Migrated the UI from an earlier "Developer Precision" look to Deploy Purple: a
+Migrated the UI from an earlier "Developer Precision" look to Beamer Purple: a
 `#4B0082` purple accent, 2px borders, hard-offset shadows, DM Mono + Recursive
 fonts. CSS-only redesign plus a couple of small Rust changes for window
 transparency. See `agent_docs/design_system.md`.
@@ -53,9 +53,9 @@ a Dioxus overlay window to a Shell-native St widget on GNOME. See
 ## Pill overlay polish (2026-07-19)
 
 Follow-up to the shell-native pill: made it appear on the focused window's
-monitor rather than always the primary one, and restyled it to Deploy Purple
+monitor rather than always the primary one, and restyled it to Beamer Purple
 (solid near-white capsule, no acrylic — Shell overlays can't blend). The
-Windows/macOS Dioxus pill was untouched by this pass; it got its own Deploy
+Windows/macOS Dioxus pill was untouched by this pass; it got its own Beamer
 Purple pass later (see recent commits).
 
 ## Sticky notes, all three phases (2026-08-20 onward)

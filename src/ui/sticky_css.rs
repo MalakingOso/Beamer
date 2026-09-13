@@ -1,7 +1,7 @@
-//! Sticky note styling, in Deploy Purple. Split out of `sticky.rs` to keep
+//! Sticky note styling, in Beamer Purple. Split out of `sticky.rs` to keep
 //! that file inside the 500-line limit.
 
-/// Sticky note styling, in Deploy Purple. Injected as an inline `<style>` per
+/// Sticky note styling, in Beamer Purple. Injected as an inline `<style>` per
 /// window, so self-contained (no `@import`); `embedded_font_css()` prepends the
 /// faces. Corner radius is the 8px design-system max.
 pub const STICKY_CSS: &str = r#"

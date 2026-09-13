@@ -285,8 +285,8 @@ mod tests {
     /// A raw space would break the upgrade request rather than the term.
     #[test]
     fn keyterms_are_percent_encoded_in_the_url() {
-        let url = build_realtime_url("en", &terms(&["Deploy Purple", "R&D"]), false);
-        assert!(url.contains("&keyterms=Deploy%20Purple"), "{url}");
+        let url = build_realtime_url("en", &terms(&["Beamer Purple", "R&D"]), false);
+        assert!(url.contains("&keyterms=Beamer%20Purple"), "{url}");
         assert!(url.contains("&keyterms=R%26D"), "{url}");
     }
 

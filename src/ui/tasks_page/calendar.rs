@@ -1,7 +1,7 @@
 //! A themed inline calendar for tasks whose due phrase the model could not
 //! resolve. The native `<input type="date">` popup is drawn by the WebView,
 //! not by app CSS, so it always read as a foreign control. This panel is
-//! plain Dioxus markup styled with the Deploy Purple tokens, and it expands
+//! plain Dioxus markup styled with the Beamer Purple tokens, and it expands
 //! in flow below the row: `.task-group` clips absolutely-positioned popovers
 //! (`overflow: hidden`), so a floating popup would be cut off mid-month.
 

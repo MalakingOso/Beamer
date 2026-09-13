@@ -1,4 +1,4 @@
-/* Beamer — Deploy Purple Design System */
+/* Beamer — Beamer Purple Design System */
 
 /* Font loading lives in Rust now, not here. This file ships through
    `asset!()` and is fetched by the `<link>` in `ui::app`, but a bundled
@@ -1149,7 +1149,7 @@ body {
 }
 
 /* ── Notes board ──────────────────────────────────────────────────────────
-   Deploy Purple surfaces, with the note's own colour carried as a left stripe
+   Beamer Purple surfaces, with the note's own colour carried as a left stripe
    rather than as the card's background. A board of six pastel blocks would
    fight the rest of the app; a stripe keeps the colour legible as an index
    while the card stays a card. */

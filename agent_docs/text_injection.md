@@ -205,7 +205,7 @@ D-Bus interface on `org.gnome.Shell` / `/app/beamer/FocusProvider`:
 | `GetVersion() -> u` | capability probe (returns 7) |
 | `TypeText(s) -> b` | type Unicode text via virtual keyboard |
 | `SendPasteChord(b) -> b` | Ctrl(+Shift)+V for the clipboard backend |
-| `ShowIndicator(s)` / `UpdateLevel(d)` / `HideIndicator()` | shell-native recording pill (Deploy Purple waveform, bottom-center of the focused window's monitor, click-through) |
+| `ShowIndicator(s)` / `UpdateLevel(d)` / `HideIndicator()` | shell-native recording pill (Beamer Purple waveform, bottom-center of the focused window's monitor, click-through) |
 | `PlaceWindow(s,i,i,b) -> b` / `GetWindowFrame(s) -> (b,i,i,u,u)` | sticky note placement (v5, see `sticky_notes.md`) |
 | `SetHotkeys(as) -> ab` | grab the dictation chords inside Mutter (v7); index = binding slot (0 inject, 1 note), `''` = leave ungrabbed, reply = which slots Mutter accepted |
 | signal `HotkeyActivated(u)` / `HotkeyDeactivated(u)` | press / release of a grabbed slot |

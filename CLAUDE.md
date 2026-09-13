@@ -45,7 +45,7 @@ cargo run --bin task_eval -- --limit 20   # Measure extraction against your own 
 - All UIA/Win32 calls MUST go through tokio::task::spawn_blocking() with COM initialized (sole exception: the low-level keyboard hook in `src/hotkey/ll_hook.rs`, which must own a real thread with a Windows message loop — `SetWindowsHookExW`/`GetMessageW` cannot run on the runtime's pool)
 - tray-icon and muda used directly (not via Dioxus re-exports)
 - API keys stored in Windows Credential Manager via keyring — never on disk
-- Design language: Deploy Purple (purple accent, 2px borders, hard-offset shadows, solid backgrounds)
+- Design language: Beamer Purple (purple accent, 2px borders, hard-offset shadows, solid backgrounds)
 
 ## Git & Commits
 
@@ -69,10 +69,20 @@ cargo run --bin task_eval -- --limit 20   # Measure extraction against your own 
 
 ## Current status
 
-Sticky Notes (all 3 phases) is built and committed on `master`. The suite is
-large and growing — run `cargo test` (CI enforces it with `-D warnings`, so a
-warning fails the build) rather than trusting any count here.
-`agent_docs/sticky_notes.md` and `agent_docs/local_inference.md` carry all
-the detail that used to live here — read them before touching related code.
-`todo.md` tracks everything still open, including the one pending manual
-action (a GNOME log-out to deploy the extension's latest version).
+Version 1.0.3 on `master`. Sticky Notes (all 3 phases) and cross-machine
+sync are shipped; note attachments (files, images, link chips) and the
+S1-mini cleanup pass have since been removed as dead weight — extraction
+is now the only local model pass. The GNOME extension ships inside the
+.deb and `deploy/install-linux.sh`, so Settings → Injection can install it
+without a checkout; a GNOME log-out/in is still needed to pick up a new
+extension version, but it's no longer a separate manual deploy step. The
+feature set is large and growing — run `cargo test` (CI enforces it with
+`-D warnings`) rather than trusting any count here.
+
+The detailed docs are the source of truth:
+- `agent_docs/sticky_notes.md` — Note windows, Wayland placement, cross-window state
+- `agent_docs/local_inference.md` — The extraction pass, pipeline coroutine, and edge cases
+- `agent_docs/sync.md` — Cross-machine sync design
+
+`roadmap.md` tracks what's left (known issues + low-priority items); it
+replaced `todo.md` once the larger parked items resolved.

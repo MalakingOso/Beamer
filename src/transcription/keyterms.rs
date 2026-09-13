@@ -77,10 +77,10 @@ mod tests {
 
     #[test]
     fn ordinary_terms_pass_through_unchanged() {
-        let input = terms(&["Beamer", "Deploy Purple", "Dioxus"]);
+        let input = terms(&["Beamer", "Beamer Purple", "Dioxus"]);
         assert_eq!(
             sanitize(&input, BATCH_MAX_TERMS, BATCH_MAX_CHARS),
-            ["Beamer", "Deploy Purple", "Dioxus"]
+            ["Beamer", "Beamer Purple", "Dioxus"]
         );
     }
 
@@ -203,7 +203,7 @@ mod tests {
     /// A raw space would break the WebSocket upgrade URL.
     #[test]
     fn spaces_and_separators_are_escaped() {
-        assert_eq!(encode_query_value("Deploy Purple"), "Deploy%20Purple");
+        assert_eq!(encode_query_value("Beamer Purple"), "Beamer%20Purple");
         assert_eq!(encode_query_value("a&b=c"), "a%26b%3Dc");
         assert_eq!(encode_query_value("a+b"), "a%2Bb");
         assert_eq!(encode_query_value("50%"), "50%25");

@@ -141,7 +141,7 @@ is in the URL — no separate config message needed after connect).
 `build_realtime_url()` is a pure function with its exact output pinned by unit
 tests. Keyterms are **repeated `&keyterms=` query parameters**, percent-encoded
 (`encode_query_value`) because a keyterm may legitimately contain a space
-(`"Deploy Purple"` → `keyterms=Deploy%20Purple`). `no_verbatim=true` is appended
+(`"Beamer Purple"` → `keyterms=Beamer%20Purple`). `no_verbatim=true` is appended
 only when enabled, so an untouched install produces byte-identical URLs to the
 pre-2026-08-23 build.
 
@@ -151,7 +151,7 @@ sending no audio at all — confirms the encoding without a billable transcript:
 
 ```json
 {"message_type":"session_started","session_id":"…","config":{
-  "keyterms":["Beamer","Deploy Purple"],"no_verbatim":true,
+  "keyterms":["Beamer","Beamer Purple"],"no_verbatim":true,
   "filter_background_audio":true,"secondary_languages":[],"entity_detection":null, …}}
 ```
 
