@@ -435,3 +435,7 @@ mod sync_doc_tests;
 #[cfg(test)]
 #[path = "sync_recovery_tests.rs"]
 mod sync_recovery_tests;
+
+#[cfg(test)]
+#[path = "sync_peer_tests.rs"]
+mod sync_peer_tests;
