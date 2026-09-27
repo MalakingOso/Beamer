@@ -93,7 +93,6 @@ async fn handle_recording(
     let backend = &cfg.transcription.backend;
     let language = &cfg.transcription.language;
     let backends = cfg.injection.backends.clone();
-    let paste_shortcut = cfg.injection.paste_shortcut.clone();
 
     // Exhaustive on purpose: an unknown backend must error, never silently
     // fall back to another model.
