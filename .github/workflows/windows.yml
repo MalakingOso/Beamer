@@ -199,6 +199,16 @@ jobs:
     runs-on: [self-hosted, Windows, ARM64]
 
     steps:
+      # BEARCAVE's PATH has no Git Bash, only WindowsApps\bash.exe, which is
+      # the WSL launcher: it gets handed a Windows script path it can't read
+      # ("C:actions-runner_work_temp...sh: No such file or directory"), so
+      # every `shell: bash` step fails, including those inside
+      # dtolnay/rust-toolchain and taiki-e/install-action. Put Git Bash first;
+      # the runner resolves later steps' `bash` through this prepended path.
+      - name: Use Git Bash, not WSL's bash
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_PATH -Value "C:\Program Files\Git\bin"
+
       - uses: actions/checkout@v5
 
       - name: Install Rust
