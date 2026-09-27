@@ -131,15 +131,11 @@ stall), waits for a 1500ms CSS fill animation to finish, closes the splash
 window, then reveals the main window (except on Windows, which stays hidden
 until a tray click, matching the original tray-app convention).
 
-The network step **matches on the backend name exhaustively**. Realtime
-backends (`elevenlabs`, `voxtral`) open and drop a real session, which is
-what they'd do on the first recording anyway. Batch backends
-(`elevenlabs_batch`, `voxtral_batch`) get
-`transcription::preconnect_batch_host` instead — an unauthenticated GET that
-warms DNS/TLS/the shared client's connection pool with no billable side
-effect. Do not reintroduce a `_ =>` fallback here: it previously routed the
-batch backends into the ElevenLabs *realtime* constructor, so every launch
-opened a metered realtime STT session for users who had never selected one.
+The network step calls `transcription::preconnect_batch_host` for the
+configured backend — an unauthenticated GET that warms DNS/TLS/the shared
+client's connection pool with no billable side effect. (It used to open and
+drop a real realtime session per launch, including a metered one for users
+who had never selected realtime — batch-only since the realtime removal.)
 
 ## Windows: things Linux never has to think about
 

@@ -183,3 +183,16 @@ The shared client code stays. `chat.rs`, its error classification and the
 footer failure message all serve extraction too, so the `failure_message`
 roadmap bullet (unreachable hosts misreported as reachable) survives on
 that code. It was never cleanup-specific.
+
+## Realtime backends removed, Scribe Medical added (2026-09-27)
+
+Both realtime backends (ElevenLabs `scribe_v2_realtime`, Voxtral realtime)
+are gone; every recording now buffers mic PCM and POSTs it to one batch
+endpoint. Realtime's partial transcripts never reached the user — finals are
+all Beamer injects — so it bought latency on words the user never saw while
+costing two full protocol implementations, a metered session per launch from
+warmup, and the noisiest failure surface in the app. In its place there's a
+third batch choice, `elevenlabs_medical_batch` (`scribe_v2_medical`, same
+endpoint/fields/shape as `scribe_v2`), with a toggle on the home tab's Quick
+Settings. Stored `"elevenlabs"` / `"voxtral"` configs migrate to their `_batch`
+counterparts on load; `ws_test` / `voxtral_test` went with the code they probed.

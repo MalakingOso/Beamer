@@ -46,7 +46,7 @@ start_menu_folder = "Beamer"
 # installer/k2horizon/hooks.nsh and agent_docs/running_on_bearcave.md.
 installer_hooks = "installer/k2horizon/hooks.nsh"
 
-# Runtime equivalents of the `-dev` packages the CI Linux job installs to
+# Runtime equivalents of the `-dev` packages needed to
 # build the app (`libwebkit2gtk-4.1-dev`, `libasound2-dev`, `libgtk-3-dev`,
 # `libsoup-3.0-dev`, `libxdo-dev`). `libxdo3` matters on its own: the
 # injection fallback chain shells out to `xdotool` on Linux, so without it

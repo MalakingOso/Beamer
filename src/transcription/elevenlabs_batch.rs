@@ -5,6 +5,11 @@ use super::keyterms;
 use super::{http_client, wav::pcm_to_wav};
 use bytes::Bytes;
 
+/// ElevenLabs batch model IDs. `scribe_v2_medical` is a separate model, not a
+/// mode: same endpoint, same fields, same response shape — only the id changes.
+pub const SCRIBE_V2: &str = "scribe_v2";
+pub const SCRIBE_V2_MEDICAL: &str = "scribe_v2_medical";
+
 /// Transcribe raw 16-bit LE, 16 kHz, mono PCM via the ElevenLabs Scribe v2 batch API.
 /// Wraps the PCM in a WAV container before uploading.
 ///
@@ -18,9 +23,31 @@ pub async fn transcribe_batch(
     vocab: &[String],
     no_verbatim: bool,
 ) -> Result<String> {
+    transcribe_with_model(api_key, audio_pcm, language, vocab, no_verbatim, SCRIBE_V2).await
+}
+
+/// Same as [`transcribe_batch`] but with the medical-tuned Scribe v2 model.
+pub async fn transcribe_medical_batch(
+    api_key: &str,
+    audio_pcm: Vec<u8>,
+    language: &str,
+    vocab: &[String],
+    no_verbatim: bool,
+) -> Result<String> {
+    transcribe_with_model(api_key, audio_pcm, language, vocab, no_verbatim, SCRIBE_V2_MEDICAL).await
+}
+
+async fn transcribe_with_model(
+    api_key: &str,
+    audio_pcm: Vec<u8>,
+    language: &str,
+    vocab: &[String],
+    no_verbatim: bool,
+    model_id: &str,
+) -> Result<String> {
     tokio::time::timeout(
         super::BATCH_OVERALL_TIMEOUT,
-        transcribe_batch_inner(api_key, audio_pcm, language, vocab, no_verbatim),
+        transcribe_batch_inner(api_key, audio_pcm, language, vocab, no_verbatim, model_id),
     )
     .await
     .map_err(|_| {
@@ -37,6 +64,7 @@ async fn transcribe_batch_inner(
     language: &str,
     vocab: &[String],
     no_verbatim: bool,
+    model_id: &str,
 ) -> Result<String> {
     let wav = pcm_to_wav(&audio_pcm);
     let wav_bytes = Bytes::from(wav);
@@ -47,7 +75,7 @@ async fn transcribe_batch_inner(
 
     for attempt in 0..4 {
         let mut form = multipart::Form::new()
-            .text("model_id", "scribe_v2")
+            .text("model_id", model_id.to_string())
             .text("language_code", language.to_string())
             .text("tag_audio_events", "false")
             .text("no_verbatim", if no_verbatim { "true" } else { "false" })
@@ -119,4 +147,17 @@ async fn transcribe_batch_inner(
     }
 
     bail!("ElevenLabs batch request failed after retries")
+}
+
+#[cfg(test)]
+mod model_tests {
+    use super::{SCRIBE_V2, SCRIBE_V2_MEDICAL};
+
+    /// A typo here bills the same but transcribes with the wrong model, and
+    /// nothing in a 200 OK tells you — pin the exact upstream IDs.
+    #[test]
+    fn model_ids_are_the_documented_elevenlabs_ids() {
+        assert_eq!(SCRIBE_V2, "scribe_v2");
+        assert_eq!(SCRIBE_V2_MEDICAL, "scribe_v2_medical");
+    }
 }

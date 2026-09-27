@@ -15,8 +15,7 @@ chunker thread (src/audio/mod.rs, AudioPipeline::start)
   → mpsc::Sender<Vec<u8>>  (CHUNK_CHANNEL_CAPACITY)
       ↓
 orchestrator.rs
-  → realtime: forwarded 1:1 into RealtimeSession::audio_tx (WebSocket)
-  → batch: concatenated into one Vec<u8>, wrapped in a WAV header at send time
+  → concatenated into one Vec<u8>, wrapped in a WAV header at send time
 ```
 
 `AudioPipeline::start()` returns `(cpal::Stream, mpsc::Receiver<Vec<u8>>)`.
@@ -133,13 +132,9 @@ throttle back down to ~15 Hz.
 `orchestrator.rs` owns the `cpal::Stream` and drains the PCM-chunk
 `Receiver`:
 
-- **Realtime mode**: each non-empty chunk is forwarded via
-  `try_send_reserving` into the active `RealtimeSession::audio_tx`. On
-  record-stop, an empty `Vec<u8>` is sent as the end-of-audio convention (see
-  `transcription_backends.md`) using the reserved headroom on that channel.
-- **Batch mode**: chunks are simply concatenated into one `Vec<u8>` PCM
-  buffer until record-stop (plus a ~400ms tail to avoid clipping the last
-  word), then handed to `transcription::wav::pcm_to_wav` + a batch API call.
+Chunks are simply concatenated into one `Vec<u8>` PCM buffer until
+record-stop (plus a ~400ms tail to avoid clipping the last word), then
+handed to `transcription::wav::pcm_to_wav` + a batch API call.
 
 There is no `SpeechStart`/`SpeechEnd`/overlay-glow wiring anywhere in this
 path — recording-state UI (pill, shell indicator) is driven from

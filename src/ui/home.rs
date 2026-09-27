@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 
 use crate::config::Config;
 use crate::orchestrator::RecordingState;
-use crate::ui::components::{language_options, truncate_chars, Card, Select};
+use crate::ui::components::{language_options, truncate_chars, Card, Select, Toggle};
 use crate::ui::history::TranscriptionHistory;
 use crate::ui::icons::{IconCheck, IconCopy};
 
@@ -28,6 +28,7 @@ pub fn HomePage(props: HomePageProps) -> Element {
     let hotkey = props.config.read().recording.hotkey.clone();
 
     let recent = props.history.read().recent(5).into_iter().cloned().collect::<Vec<_>>();
+    let medical = props.config.read().transcription.backend == "elevenlabs_medical_batch";
 
     rsx! {
         div { class: "content",
@@ -38,20 +39,6 @@ pub fn HomePage(props: HomePageProps) -> Element {
                         span { "{status_label}" }
                     }
                     span { class: "hotkey-display", "{hotkey}" }
-                }
-            }
-
-            Card { title: "Recent".to_string(),
-                if recent.is_empty() {
-                    div { class: "empty-state", "No transcriptions yet" }
-                } else {
-                    for entry in &recent {
-                        RecentEntry {
-                            key: "{entry.timestamp}",
-                            timestamp: entry.timestamp.clone(),
-                            text: entry.text.clone(),
-                        }
-                    }
                 }
             }
 
@@ -84,7 +71,44 @@ pub fn HomePage(props: HomePageProps) -> Element {
                         },
                     }
                 }
+                div { class: "quick-settings-row",
+                    span { class: "card-label", "Medical model" }
+                    Toggle {
+                        value: medical,
+                        ontoggle: {
+                            let mut config = props.config;
+                            move |on: bool| {
+                                config.write().transcription.backend = if on {
+                                    "elevenlabs_medical_batch".to_string()
+                                } else {
+                                    "elevenlabs_batch".to_string()
+                                };
+                                let _ = config.read().save();
+                            }
+                        },
+                    }
+                }
+                div { class: "quick-settings-row",
+                    span { class: "card-label card-label-hint",
+                        "Uses Scribe v2 Medical instead of the standard model"
+                    }
+                }
             }
+
+            Card { title: "Recent".to_string(),
+                if recent.is_empty() {
+                    div { class: "empty-state", "No transcriptions yet" }
+                } else {
+                    for entry in &recent {
+                        RecentEntry {
+                            key: "{entry.timestamp}",
+                            timestamp: entry.timestamp.clone(),
+                            text: entry.text.clone(),
+                        }
+                    }
+                }
+            }
+
         }
     }
 }

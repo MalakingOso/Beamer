@@ -8,18 +8,6 @@ name = "beamer"
 path = "src/main.rs"
 
 [[bin]]
-name = "ws_test"
-path = "src/bin/ws_test.rs"
-# Manual probes, like `task_eval` below: `cargo build` still type-checks them.
-test = false
-
-[[bin]]
-name = "voxtral_test"
-path = "src/bin/voxtral_test.rs"
-# Manual probes, like `task_eval` below: `cargo build` still type-checks them.
-test = false
-
-[[bin]]
 name = "sync_server"
 path = "src/bin/sync_server.rs"
 
@@ -44,8 +32,8 @@ dirs = "6"
 keyring = { version = "3", features = ["windows-native", "sync-secret-service"] }
 # Pinned to 0.7.10 or newer so the crate and the `dx` CLI stay in step. The
 # asset pipeline is shared between them, and a `dx` older than the crate
-# bundles assets the crate then cannot resolve. CI installs dioxus-cli at
-# the same floor; see .github/workflows/windows.yml.
+# bundles assets the crate then cannot resolve. Install dioxus-cli at
+# the same floor.
 dioxus = { version = "0.7.10", features = ["desktop"] }
 # Used directly (not via the dioxus re-exports): same versions dioxus 0.7
 # builds its tray support on, so the `Menu`/`Icon` values flow into

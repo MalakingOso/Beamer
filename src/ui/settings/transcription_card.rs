@@ -16,13 +16,12 @@ pub struct TranscriptionCardProps {
 #[component]
 pub fn TranscriptionCard(props: TranscriptionCardProps) -> Element {
     let backend_options = vec![
-        ("elevenlabs".to_string(), "ElevenLabs".to_string()),
-        ("elevenlabs_batch".to_string(), "ElevenLabs (Batch)".to_string()),
-        ("voxtral".to_string(), "Voxtral (Mistral)".to_string()),
-        ("voxtral_batch".to_string(), "Voxtral (Batch)".to_string()),
+        ("elevenlabs_batch".to_string(), "ElevenLabs".to_string()),
+        ("elevenlabs_medical_batch".to_string(), "ElevenLabs Medical".to_string()),
+        ("voxtral_batch".to_string(), "Voxtral (Mistral)".to_string()),
     ];
 
-    let is_voxtral = props.backend == "voxtral" || props.backend == "voxtral_batch";
+    let is_voxtral = props.backend == "voxtral_batch";
 
     rsx! {
         SubSection { label: "Transcription".to_string(),

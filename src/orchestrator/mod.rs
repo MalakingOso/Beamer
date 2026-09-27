@@ -2,13 +2,13 @@ use anyhow::Result;
 use dioxus::prelude::*;
 use futures_util::StreamExt;
 
-use crate::audio::{try_send_reserving, warn_channel_full, AudioPipeline, SendOutcome};
+use crate::audio::AudioPipeline;
 use crate::config::Config;
 use crate::hotkey::{CaptureMode, HotkeyEvent};
 use crate::notes::pipeline::PipelineRequest;
 use crate::notes::task_store::TaskStore;
 use crate::notes::NoteStore;
-use crate::transcription::{self, TranscriptKind};
+use crate::transcription;
 use crate::ui::history::TranscriptionHistory;
 use crate::ui::status_log::{log_status, LogLevel, StatusLog};
 
@@ -16,10 +16,7 @@ mod notify;
 mod session;
 mod sink;
 use notify::show_notification;
-use session::{
-    buffer_tail_audio, proves_session_live, send_commit_sentinel, stream_tail_audio, ClosedStream,
-    StopReason, FINAL_TRANSCRIPT_TIMEOUT_MS,
-};
+use session::{buffer_tail_audio, StopReason};
 
 /// Recording lifecycle state, drives both the pill overlay and home-page status dot.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -99,10 +96,10 @@ async fn handle_recording(
     let paste_shortcut = cfg.injection.paste_shortcut.clone();
 
     // Exhaustive on purpose: an unknown backend must error, never silently
-    // become ElevenLabs realtime.
+    // fall back to another model.
     let (key_name, display_name) = match backend.as_str() {
-        "voxtral" | "voxtral_batch" => ("mistral_api_key", "Voxtral"),
-        "elevenlabs" | "elevenlabs_batch" => ("elevenlabs_api_key", "ElevenLabs"),
+        "voxtral_batch" => ("mistral_api_key", "Voxtral"),
+        "elevenlabs_batch" | "elevenlabs_medical_batch" => ("elevenlabs_api_key", "ElevenLabs"),
         other => {
             tracing::error!("Unknown transcription backend '{}'", other);
             log_status(
@@ -125,216 +122,12 @@ async fn handle_recording(
         return Ok(());
     }
 
-    if backend == "elevenlabs_batch" || backend == "voxtral_batch" {
-        return handle_batch_recording(
-            backend, &api_key, language, &backends, &cfg, config,
-            rec_state, last_injection, history, hotkey_rx, status_log,
-            notes, tasks, capture_mode, note_passes,
-        ).await;
-    }
-
-    log_status(status_log, LogLevel::Info, format!("Connecting to {} realtime...", display_name));
-    // A missing vocabulary file costs keyterms, never the recording.
-    let vocab = crate::config::vocabulary::Vocabulary::load()
-        .map(|v| v.list().to_vec())
-        .unwrap_or_else(|e| {
-            tracing::warn!("Could not load vocabulary, continuing without keyterms: {}", e);
-            Vec::new()
-        });
-    let session_result = match backend.as_str() {
-        "voxtral" => transcription::start_voxtral_session(&api_key).await,
-        "elevenlabs" => {
-            transcription::start_elevenlabs_session(
-                &api_key,
-                language,
-                &vocab,
-                cfg.transcription.no_verbatim,
-            )
-            .await
-        }
-        // Spelled out rather than `_ =>` so a new backend fails here
-        // instead of quietly becoming ElevenLabs.
-        other => Err(anyhow::anyhow!("'{other}' is not a realtime backend")),
-    };
-    let mut session = match session_result {
-        Ok(s) => {
-            log_status(status_log, LogLevel::Info, "WebSocket connected");
-            s
-        }
-        Err(e) => {
-            log_status(status_log, LogLevel::Error, format!("Connection failed: {}", e));
-            show_notification("Beamer", &format!("Connection failed: {}", e));
-            return Err(e);
-        }
-    };
-
-    // Raw PCM stream — VAD is handled server-side by the transcription backend
-    let pipeline = match AudioPipeline::new() {
-        Ok(p) => p,
-        Err(e) => {
-            log_status(status_log, LogLevel::Error, "Microphone not available");
-            show_notification("Beamer", "Microphone not available");
-            return Err(e);
-        }
-    };
-    let (_stream, mut audio_rx) = pipeline.start()?;
-    let mut audio_drop_count: u64 = 0;
-
-    rec_state.set(RecordingState::Recording);
-    log_status(status_log, LogLevel::Info, "Recording started");
-    // Guard resumes playback on drop, on every exit path below.
-    let media_pause = if cfg.recording.pause_media {
-        crate::media::pause_media_if_playing()
-    } else {
-        None
-    };
-    crate::sounds::play_start_sound();
-
-    // Whether the backend ever really transcribed (see `ClosedStream`).
-    let mut saw_live_event = false;
-    let mut stop_reason = StopReason::UserStop;
-    loop {
-        tokio::select! {
-            hotkey_event = hotkey_rx.next() => {
-                match hotkey_event {
-                    Some(HotkeyEvent::RecordStop) | None => break,
-                    Some(HotkeyEvent::RecordStart(_)) => {}
-                }
-            }
-
-            chunk = audio_rx.recv() => {
-                match chunk {
-                    Some(bytes) if !bytes.is_empty() => {
-                        match try_send_reserving(&session.audio_tx, transcription::AUDIO_SENTINEL_RESERVE, bytes) {
-                            SendOutcome::Sent => {}
-                            SendOutcome::Full => warn_channel_full(&mut audio_drop_count, "Realtime audio_tx"),
-                            // Reader task exited: normal teardown, not backpressure.
-                            SendOutcome::Closed => {}
-                        }
-                    }
-                    _ => {
-                        log_status(status_log, LogLevel::Warn, "Audio channel closed");
-                        stop_reason = StopReason::AudioLost;
-                        break;
-                    }
-                }
-            }
-
-            event = session.transcript_rx.recv() => {
-                // ⚠️ The `None` arm must break: `recv()` on a closed channel
-                // returns `None` forever, so falling through spins this loop
-                // hot and starves the Dioxus scheduler — a frozen app.
-                let Some(ev) = event else {
-                    let closed = ClosedStream::classify(saw_live_event);
-                    let message = closed.message(display_name);
-                    tracing::warn!("{}", message);
-                    log_status(status_log, closed.level(), message.clone());
-                    if closed == ClosedStream::NeverStarted {
-                        // Otherwise a refused connection looks like an empty recording.
-                        show_notification("Beamer", &message);
-                    }
-                    stop_reason = StopReason::TranscriptLost;
-                    break;
-                };
-                saw_live_event |= proves_session_live(&ev.kind);
-                match ev.kind {
-                    TranscriptKind::Final => {
-                        if !ev.text.trim().is_empty() {
-                            tracing::info!("[final] {}", ev.text);
-                            log_status(status_log, LogLevel::Info, format!("[final] {}", ev.text));
-                            sink::deliver(&ev.text, capture_mode, &backends, &paste_shortcut,
-                                    last_injection, history, status_log, notes, tasks, config,
-                                    note_passes).await;
-                        }
-                    }
-                    TranscriptKind::Partial => {
-                        if !ev.text.is_empty() {
-                            tracing::debug!("[partial] {}", ev.text);
-                        }
-                    }
-                    TranscriptKind::SessionStarted(ref sid) => {
-                        tracing::info!("[session] started: {}", sid);
-                        log_status(status_log, LogLevel::Info, format!("Session started: {}", sid));
-                    }
-                    TranscriptKind::Error(ref msg) => {
-                        tracing::error!("[error] {}", msg);
-                        log_status(status_log, LogLevel::Error, format!("Transcription error: {}", msg));
-                    }
-                    TranscriptKind::Info(ref msg) => {
-                        tracing::info!("[info] {}", msg);
-                        log_status(status_log, LogLevel::Info, msg.clone());
-                    }
-                }
-            }
-        }
-    }
-
-    // Shared teardown for both exit reasons.
-    crate::sounds::play_stop_sound();
-    rec_state.set(RecordingState::Processing);
-    drop(media_pause);
-
-    // Skip tail capture when the audio channel died: `recv()` on a closed
-    // channel returns immediately and would spin hot until the deadline.
-    if stop_reason == StopReason::UserStop {
-        stream_tail_audio(&mut audio_rx, &session.audio_tx, &mut audio_drop_count).await;
-    }
-
-    send_commit_sentinel(&session.audio_tx, status_log);
-    log_status(status_log, LogLevel::Info, "Sent commit, waiting for final transcript...");
-    drain_final_transcripts(
-        &mut session, &backends, &paste_shortcut, last_injection, history, status_log,
-        notes, tasks, config, capture_mode, note_passes,
+    handle_batch_recording(
+        backend, &api_key, language, &backends, &cfg, config,
+        rec_state, last_injection, history, hotkey_rx, status_log,
+        notes, tasks, capture_mode, note_passes,
     )
-    .await;
-
-    // Stop the backend's pump tasks: the channels are drained and drop here,
-    // but a server that never closes its side would otherwise leave the read
-    // task parked on the socket (and the sender waiting on audio) forever.
-    session.shutdown();
-
-    log_status(status_log, LogLevel::Info, "Recording stopped");
-    Ok(())
-}
-
-/// Inject any remaining final transcripts, up to `FINAL_TRANSCRIPT_TIMEOUT_MS`
-/// or until the backend closes the stream.
-async fn drain_final_transcripts(
-    session: &mut transcription::RealtimeSession,
-    backends: &[String],
-    paste_shortcut: &str,
-    last_injection: &mut Signal<String>,
-    history: &mut Signal<TranscriptionHistory>,
-    status_log: &mut Signal<StatusLog>,
-    notes: &mut Signal<NoteStore>,
-    tasks: &mut Signal<TaskStore>,
-    config: &Signal<Config>,
-    capture_mode: CaptureMode,
-    note_passes: Coroutine<PipelineRequest>,
-) {
-    let deadline = tokio::time::Instant::now()
-        + tokio::time::Duration::from_millis(FINAL_TRANSCRIPT_TIMEOUT_MS);
-    loop {
-        tokio::select! {
-            event = session.transcript_rx.recv() => {
-                match event {
-                    Some(ev) => {
-                        if let TranscriptKind::Final = ev.kind {
-                            if !ev.text.trim().is_empty() {
-                                tracing::info!("[final] {}", ev.text);
-                                log_status(status_log, LogLevel::Info, format!("[final] {}", ev.text));
-                                sink::deliver(&ev.text, capture_mode, backends, paste_shortcut,
-                                        last_injection, history, status_log, notes, tasks, config,
-                                        note_passes).await;
-                            }
-                        }
-                    }
-                    None => break,
-                }
-            }
-            _ = tokio::time::sleep_until(deadline) => break,
-        }
-    }
+    .await
 }
 
 /// Drive one batch recording session: capture mic → buffer all PCM → POST to the batch API.
@@ -366,7 +159,7 @@ async fn handle_batch_recording(
     let (_stream, mut audio_rx) = pipeline.start()?;
 
     rec_state.set(RecordingState::Recording);
-    log_status(status_log, LogLevel::Info, "Recording started (batch mode)");
+    log_status(status_log, LogLevel::Info, "Recording started");
     // Guard resumes playback on drop, on every exit path below.
     let media_pause = if cfg.recording.pause_media {
         crate::media::pause_media_if_playing()
@@ -405,7 +198,8 @@ async fn handle_batch_recording(
     rec_state.set(RecordingState::Processing);
     drop(media_pause);
 
-    // Skip tail capture when the audio channel died (see the realtime path).
+    // Skip tail capture when the audio channel died: `recv()` on a closed
+    // channel returns immediately and would spin hot until the deadline.
     if stop_reason == StopReason::UserStop {
         buffer_tail_audio(&mut audio_rx, &mut pcm_buffer).await;
     }
@@ -442,22 +236,41 @@ async fn handle_batch_recording(
     log_status(
         status_log,
         LogLevel::Info,
-        format!("Sending {:.1}s of audio to {} batch API...", audio_secs, backend_label),
+        format!("Sending {:.1}s of audio to {}...", audio_secs, backend_label),
     );
 
     let start = tokio::time::Instant::now();
     let vocab = crate::config::vocabulary::Vocabulary::load()?.list().to_vec();
-    let result = if backend == "voxtral_batch" {
-        transcription::transcribe_voxtral_batch(api_key, pcm_buffer, &vocab).await
-    } else {
-        transcription::transcribe_batch(
-            api_key,
-            pcm_buffer,
-            language,
-            &vocab,
-            cfg.transcription.no_verbatim,
-        )
-        .await
+    // Exhaustive on purpose (see `handle_recording`): a new backend must land
+    // here, never silently fall back to another model.
+    let result = match backend {
+        "voxtral_batch" => {
+            transcription::transcribe_voxtral_batch(api_key, pcm_buffer, &vocab).await
+        }
+        "elevenlabs_medical_batch" => {
+            transcription::transcribe_medical_batch(
+                api_key,
+                pcm_buffer,
+                language,
+                &vocab,
+                cfg.transcription.no_verbatim,
+            )
+            .await
+        }
+        "elevenlabs_batch" => {
+            transcription::transcribe_batch(
+                api_key,
+                pcm_buffer,
+                language,
+                &vocab,
+                cfg.transcription.no_verbatim,
+            )
+            .await
+        }
+        // Unreachable: `handle_recording` rejects unknown backends before we
+        // get here. Spelled out rather than `_ =>` so a new backend fails
+        // loudly instead of silently becoming Scribe v2.
+        other => Err(anyhow::anyhow!("'{other}' is not a batch backend")),
     };
     match result {
         Ok(text) => {

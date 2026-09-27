@@ -22,9 +22,9 @@ note_mode = "toggle"         # "toggle" or "hold". Toggle by default: a note is
                              # a chord through it is awkward.
 
 [transcription]
-backend = "elevenlabs"       # elevenlabs | elevenlabs_batch | voxtral | voxtral_batch
-                             # (unsuffixed = realtime WebSocket; _batch = slower but
-                             # usually cheaper). Language is unavailable for Voxtral.
+backend = "elevenlabs_batch" # elevenlabs_batch | elevenlabs_medical_batch | voxtral_batch
+                             # (all batch: record, then POST the whole clip).
+                             # Language is unavailable for Voxtral.
 language = "en"              # ISO 639-1 language code (ElevenLabs only)
 no_verbatim = false          # ElevenLabs only: ask the model to drop "um",
                              # "uh", false starts and stutters. Off by default
@@ -178,8 +178,8 @@ OAuth2
 tokio::spawn
 ```
 
-Max 100 terms for batch endpoints, 50 for realtime. ElevenLabs batch applies a
-20-second minimum billable duration above 100 terms; realtime's tight realtime budget is 50.
+Max 100 terms. ElevenLabs batch applies a
+20-second minimum billable duration above 100 terms.
 
 **Synced across machines**, with the notes, as a scalar at `ROOT["vocabulary"]`
 in `notes.automerge` — not by copying this file. Gated on `config.sync.url`

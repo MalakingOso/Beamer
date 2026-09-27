@@ -6,7 +6,7 @@ Windows system-tray dictation app. Captures mic audio, transcribes via cloud API
 
 - `src/main.rs` — Entry point, tray icon, Dioxus launch
 - `src/audio/` — Mic capture (cpal) with inline downmix/resample + chunker thread (no VAD)
-- `src/transcription/` — Backend trait + 4 implementations (ElevenLabs/Mistral, batch/realtime)
+- `src/transcription/` — 3 batch backends: ElevenLabs Scribe v2, Scribe v2 medical, Mistral Voxtral
 - `src/injection/` — Text injection fallback chain (UIA → SendInput → clipboard)
 - `src/hotkey/` — Global hotkey registration (hold-to-talk + toggle modes)
 - `src/config/` — TOML config + vocabulary management
@@ -76,8 +76,8 @@ is now the only local model pass. The GNOME extension ships inside the
 .deb and `deploy/install-linux.sh`, so Settings → Injection can install it
 without a checkout; a GNOME log-out/in is still needed to pick up a new
 extension version, but it's no longer a separate manual deploy step. The
-feature set is large and growing — run `cargo test` (CI enforces it with
-`-D warnings`) rather than trusting any count here.
+feature set is large and growing — run `cargo test` (keep `-D warnings`
+clean) rather than trusting any count here.
 
 The detailed docs are the source of truth:
 - `agent_docs/sticky_notes.md` — Note windows, Wayland placement, cross-window state

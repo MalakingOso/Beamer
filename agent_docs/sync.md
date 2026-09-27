@@ -189,7 +189,7 @@ merge.
 Two reasons it is a scalar, both specific to this list rather than general:
 
 - **Order decides which terms are sent at all.** `keyterms` takes the first
-  100 terms (50 for realtime) and drops the rest, so the list's order is
+  100 terms and drops the rest, so the list's order is
   load-bearing. An automerge map has no order, so a map would need a position
   field per term and a tie-break for two machines appending while offline.
 - **`Vocabulary::rename` edits in place, deliberately.** Under a term-keyed

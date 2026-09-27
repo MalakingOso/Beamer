@@ -1,7 +1,7 @@
 //! Terminal sinks for a finished transcript: injection or sticky note.
 //!
 //! `deliver` is the single place the inject-vs-note decision is made; every
-//! `TranscriptKind::Final` site funnels through it.
+//! finished transcript funnels through it.
 
 use dioxus::prelude::*;
 

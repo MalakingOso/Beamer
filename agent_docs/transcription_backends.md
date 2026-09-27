@@ -8,64 +8,29 @@ backend is a plain async function in its own module under
 
 ```
 elevenlabs_batch.rs    transcribe_batch(api_key, audio_pcm, language, vocab, no_verbatim) -> Result<String>
-elevenlabs_realtime.rs start_realtime_session(api_key, language, vocab, no_verbatim) -> Result<RealtimeSession>
+                       transcribe_medical_batch(same args) -> Result<String>
 voxtral_batch.rs       transcribe_batch(api_key, audio_pcm, vocab) -> Result<String>
-voxtral_realtime.rs    start_realtime_session(api_key) -> Result<RealtimeSession>
 ```
 
-`mod.rs` re-exports these under distinguishing names
-(`transcribe_batch`/`transcribe_voxtral_batch`,
-`start_elevenlabs_session`/`start_voxtral_session`). Backend selection is a
-plain string match in `orchestrator.rs` on `cfg.transcription.backend`
-(`"elevenlabs"` default — ElevenLabs realtime, per `default_backend()` in
-`src/config/mod.rs` — plus `"elevenlabs_batch"`, `"voxtral_batch"`, and
-`"voxtral"` for Voxtral realtime; unknown backends are rejected with an error).
+`mod.rs` re-exports the ElevenLabs pair as `transcribe_batch` /
+`transcribe_medical_batch` and the Voxtral one as `transcribe_voxtral_batch`.
+Backend selection is a plain string match in `orchestrator.rs` on
+`cfg.transcription.backend` (`"elevenlabs_batch"` default, per `default_backend()`
+in `src/config/mod.rs` — plus `"elevenlabs_medical_batch"` and `"voxtral_batch"`;
+unknown backends are rejected with an error, never silently remapped).
+A stored `"elevenlabs"` / `"voxtral"` from before the realtime removal migrates
+to its `_batch` counterpart on load (see `migrate_transcription_backend`).
 
-`RealtimeSession` (defined in `mod.rs`) is the only shared abstraction:
-
-```rust
-pub struct RealtimeSession {
-    pub audio_tx: mpsc::Sender<Vec<u8>>,
-    pub transcript_rx: mpsc::Receiver<TranscriptEvent>,
-}
-```
-
-Both realtime backends produce one of these and normalize their own
-wire-format messages into the shared `TranscriptEvent { text, kind }` /
-`TranscriptKind` (`Partial`, `Final`, `SessionStarted(String)`,
-`Error(String)`, `Info(String)`) enum.
+There is no shared backend trait or session abstraction: every recording
+buffers mic PCM and POSTs it to one batch endpoint. The only shared pieces
+are the HTTP client, the batch timeout/retry helpers, and the WAV/keyterm
+preparation in `mod.rs` / `wav.rs` / `keyterms.rs`.
 
 ## Shared Infrastructure (`mod.rs`)
 
 - `http_client()` — a single lazily-built `reqwest::Client` behind a
-  `OnceLock`, shared by all four backends so connection pools/TLS contexts
+  `OnceLock`, shared by all three backends so connection pools/TLS contexts
   aren't rebuilt per request.
-- Bounded channel capacities, sized off the same worst-case cadence as the
-  mic-capture path (see `audio_pipeline.md`):
-  - `AUDIO_CHANNEL_CAPACITY = 12_000` — `RealtimeSession::audio_tx`, fed 1:1
-    from `AudioPipeline`'s PCM chunks.
-  - `AUDIO_SENTINEL_RESERVE = 4` — slots withheld on `audio_tx` so the
-    end-of-audio sentinel always has room via `try_send_reserving`, even if
-    a stalled WebSocket write has saturated the data path.
-  - `TRANSCRIPT_CHANNEL_CAPACITY = 1_200` — `transcript_rx`, sized for a
-    conservative 20Hz upper bound on partial-transcript pushes (both
-    providers typically emit every 100–300ms). No sentinel travels on this
-    channel, so sends are a plain rate-limited `try_send` +
-    `warn_channel_full` (no reserved headroom needed).
-
-## End-of-Audio Convention
-
-Both realtime backends' audio-sender tasks treat an **empty `Vec<u8>`** sent
-on `audio_tx` as "finalize now": `orchestrator.rs` sends one after the
-~400ms capture tail on record-stop. Each backend translates that into its
-own wire message (ElevenLabs: `commit: true` with empty `audio_base_64`;
-Voxtral: a dedicated `input_audio.end` message).
-
-Frame-building for outgoing audio messages is hand-rolled string formatting
-into a reused `String` buffer (`build_audio_chunk_frame` /
-`build_audio_frame`), not `serde_json::json!{...}.to_string()` per chunk —
-this is a recent perf change. It's safe because base64 output only ever
-contains `[A-Za-z0-9+/=]`, none of which need JSON escaping.
 
 ## ElevenLabs Scribe v2 (Batch) — `elevenlabs_batch.rs`
 
@@ -76,7 +41,9 @@ contains `[A-Za-z0-9+/=]`, none of which need JSON escaping.
 Fields:
 - `file` — WAV bytes (`transcription::wav::pcm_to_wav` wraps the raw PCM;
   no `hound` dependency)
-- `model_id` — `scribe_v2`
+- `model_id` — `scribe_v2` (`elevenlabs_batch`) or `scribe_v2_medical`
+  (`elevenlabs_medical_batch`). The medical model is a separate model, not a
+  mode: same endpoint, same fields, same response shape — only the id changes.
 - `language_code` — ISO code (e.g. `en`)
 - `tag_audio_events` — `false`
 - `no_verbatim` — `cfg.transcription.no_verbatim`, default `false`
@@ -105,7 +72,7 @@ Response: `{ "text": "..." }`.
 
 ## Keyterms — `keyterms.rs`
 
-Both ElevenLabs backends share one pure function,
+Both ElevenLabs batch backends share one pure function,
 `keyterms::sanitize(terms, max_terms, max_chars)`, because every rule the API
 imposes rejects the **whole request** rather than the offending term. Dropping
 a term silently costs one dictation's accuracy; a 400 costs the dictation.
@@ -115,10 +82,10 @@ Rules enforced (all the API's, none invented here): non-empty after trimming,
 de-duplicated, then capped at `max_terms`. The cap counts *survivors*, so a run
 of rejects at the front of the vocabulary doesn't eat the budget.
 
-| | Batch (`scribe_v2`) | Realtime (`scribe_v2_realtime`) |
-|---|---|---|
-| Terms | `BATCH_MAX_TERMS` = **100** | `REALTIME_MAX_TERMS` = **50** |
-| Chars | `BATCH_MAX_CHARS` = **49** | `REALTIME_MAX_CHARS` = **20** |
+| | Batch (`scribe_v2` / `scribe_v2_medical`) |
+|---|---|
+| Terms | `BATCH_MAX_TERMS` = **100** |
+| Chars | `BATCH_MAX_CHARS` = **49** |
 
 Two constants look wrong and aren't:
 
@@ -128,64 +95,6 @@ Two constants look wrong and aren't:
   triggers a **20-second minimum billable duration** per request. Beamer's
   utterances are seconds long, so raising this multiplies the bill for a
   benefit no dictation-length clip can collect. Price it before changing it.
-
-Keyterm prompting also carries a surcharge in its own right, which is why
-`warmup.rs` passes an **empty** vocab: that session's transcript is discarded.
-
-## ElevenLabs Realtime (WebSocket) — `elevenlabs_realtime.rs`
-
-**Endpoint:** `wss://api.elevenlabs.io/v1/speech-to-text/realtime?model_id=scribe_v2_realtime&language_code={lang}&audio_format=pcm_16000&commit_strategy=manual[&no_verbatim=true][&keyterms=…]*`
-**Auth:** `xi-api-key` header on the WebSocket upgrade request (all config
-is in the URL — no separate config message needed after connect).
-
-`build_realtime_url()` is a pure function with its exact output pinned by unit
-tests. Keyterms are **repeated `&keyterms=` query parameters**, percent-encoded
-(`encode_query_value`) because a keyterm may legitimately contain a space
-(`"Beamer Purple"` → `keyterms=Beamer%20Purple`). `no_verbatim=true` is appended
-only when enabled, so an untouched install produces byte-identical URLs to the
-pre-2026-08-23 build.
-
-**Verifying a realtime parameter costs nothing.** `session_started` echoes back
-the config the server actually parsed, so connecting and reading one message —
-sending no audio at all — confirms the encoding without a billable transcript:
-
-```json
-{"message_type":"session_started","session_id":"…","config":{
-  "keyterms":["Beamer","Beamer Purple"],"no_verbatim":true,
-  "filter_background_audio":true,"secondary_languages":[],"entity_detection":null, …}}
-```
-
-That echo also lists parameters not in the published AsyncAPI spec
-(`secondary_languages`, `timestamps_granularity`, `max_tokens_to_recompute`,
-`vad_commit_strategy`, `disable_logging`) — it's the most current description
-of the endpoint available.
-
-Message flow:
-1. Connect; server sends `{ "message_type": "session_started", "session_id": "..." }`.
-2. Client sends audio: `{ "message_type": "input_audio_chunk", "audio_base_64": "<b64>", "commit": false, "sample_rate": 16000 }`.
-3. Server sends `{ "message_type": "partial_transcript", "text": "..." }` for interim results (→ `TranscriptKind::Partial`).
-4. Server sends `{ "message_type": "committed_transcript", "text": "..." }` for finals (→ `TranscriptKind::Final`).
-5. End-of-audio: client sends `{ "message_type": "input_audio_chunk", "audio_base_64": "", "commit": true, "sample_rate": 16000 }`.
-6. Errors arrive as `{ "message_type": "<kind>", "error": "..." }` (→ `TranscriptKind::Error`).
-
-⚠️ **There is no single error message type.** The API defines a separate
-`message_type` per failure — `error`, `auth_error`, `quota_exceeded`,
-`rate_limited`, `commit_throttled`, `unaccepted_terms`, `queue_overflow`,
-`resource_exhausted`, `session_time_limit_exceeded`, `input_error`,
-`invalid_request`, `chunk_size_exceeded`, `insufficient_audio_activity`,
-`transcriber_error` — each carrying one `error` string. Beamer used to match
-only `input_error` and read `code`/`message`, fields the API does not send, so
-an input error rendered as `"? - "` and everything else (a blown quota, an
-expired key) was logged at debug and swallowed. The user saw dictation produce
-nothing, with no reason given.
-
-`describe_error()` therefore recognises the *shape* rather than enumerating the
-list: anything that isn't one of `NON_ERROR_MESSAGE_TYPES` and carries an error
-string is surfaced. New error types added upstream are covered automatically;
-add to `NON_ERROR_MESSAGE_TYPES` only when a *non*-error message type appears.
-
-`commit_strategy=manual` is used because Beamer decides when to finalize
-(hotkey release), not the server.
 
 ## Mistral Voxtral (Batch) — `voxtral_batch.rs`
 
@@ -210,28 +119,6 @@ if its Levenshtein-based similarity to the original is ≥ `MIN_SIMILARITY`
 transcript is used instead. Any request/parse failure also falls back to
 the raw transcript.
 
-## Mistral Voxtral (Realtime) — `voxtral_realtime.rs`
-
-**Endpoint:** `wss://api.mistral.ai/v1/audio/transcriptions/realtime?model=voxtral-mini-transcribe-realtime-2602`
-**Auth:** `Authorization: Bearer {api_key}` header on the upgrade request.
-
-Unlike ElevenLabs, Voxtral requires an explicit config message right after
-connecting, before any audio:
-```json
-{"type": "session.update", "session": {"audio_format": {"encoding": "pcm_s16le", "sample_rate": 16000}}}
-```
-
-Message flow:
-- `session.created` → `TranscriptKind::SessionStarted(request_id)`
-- `session.updated` → logged only (no event)
-- `transcription.text.delta` → `TranscriptKind::Partial`
-- `transcription.done` → `TranscriptKind::Final`
-- `transcription.language` → `TranscriptKind::Info("Language: ...")`
-- `transcription.segment` → logged only (no event)
-- `error` → `TranscriptKind::Error`
-- Client audio: `{"type": "input_audio.append", "audio": "<b64>"}`
-- End-of-audio: `{"type": "input_audio.end"}` (empty-chunk convention)
-
 ## ElevenLabs API review — reviewed and deliberately skipped
 
 The full Scribe v2 surface was surveyed on **2026-08-23** (batch reference,
@@ -249,16 +136,13 @@ survives the note next to it.
 | `temperature`, `seed` | Determinism knobs for evaluation. Dictation wants the model's best guess; the default temperature already is one. |
 | `secondary_languages` | Code-switching between two named languages. No demand yet — revisit if bilingual dictation comes up. |
 | `include_timestamps`, `timestamps_granularity` | Word timings are for subtitles and editors. Beamer discards everything but `text`. |
-| `filter_background_audio` (realtime) | **Verified accepted** by the live endpoint, and plausibly useful on a desktop mic. Left off because it is untested against real recordings — enabling it is a one-line change if speech is being lost to room noise. |
 | `enable_logging=false` (zero retention) | Enterprise-only on the ElevenLabs side. |
 | Single-use tokens (`tokens.singleUse.create`) | Exists so browsers never see the API key. Beamer is a desktop client holding the key in the OS keyring already. |
 | `source_url`, `cloud_storage_url`, `file_format`, `additional_formats` | File/URL-oriented batch transcription, not live capture. |
 
-Not adopted for a different reason: **Voxtral realtime keyterms**. Mistral's
-realtime endpoint exposes no vocabulary mechanism, so `voxtral_realtime.rs`
-still ignores vocabulary. `voxtral_batch.rs` compensates with the LLM
-correction pass; realtime has no equivalent and this is a known gap, not an
-oversight.
+Vocabulary on Voxtral works differently: the batch endpoint exposes no
+keyterm mechanism, so `voxtral_batch.rs` compensates with the LLM correction
+pass described above.
 
 ## `wav.rs`
 

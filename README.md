@@ -52,7 +52,7 @@ ones folded away rather than deleted.
 
 ## Platform status
 
-Runs on **Linux (GNOME/Wayland), Windows, and Windows ARM**. Download pre-built artifacts from the CI workflow on the Actions tab (portable `beamer.exe` + NSIS installer for Windows, `.deb` with `sync_server` for Linux), or use the self-update feature in the tray. Otherwise build from source.
+Runs on **Linux (GNOME/Wayland), Windows, and Windows ARM**. Build from source, or use the self-update feature in the tray once installed.
 
 ## Quick start
 

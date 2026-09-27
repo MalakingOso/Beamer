@@ -125,7 +125,7 @@ pub struct AppearanceConfig {
 
 fn default_hotkey() -> String { "Ctrl+Space".into() }
 fn default_mode() -> String { "hold".into() }
-fn default_backend() -> String { "elevenlabs".into() }
+fn default_backend() -> String { "elevenlabs_batch".into() }
 fn default_language() -> String { "en".into() }
 fn default_backends() -> Vec<String> { crate::injection::default_backend_names() }
 fn default_paste_shortcut() -> String { "auto".into() }
@@ -256,6 +256,10 @@ impl Config {
             dirty = true;
         }
 
+        if migrate_transcription_backend(&mut config.transcription.backend) {
+            dirty = true;
+        }
+
         if dirty {
             let _ = config.save();
         }
@@ -278,6 +282,20 @@ impl Config {
         }
         Ok(())
     }
+}
+
+/// Migrate a stored transcription backend across the realtime removal.
+/// `"elevenlabs"` becomes `"elevenlabs_batch"`, `"voxtral"` becomes
+/// `"voxtral_batch"`. Anything else (including `"elevenlabs_medical_batch"`)
+/// is left alone. Returns `true` if the value changed (caller re-saves).
+fn migrate_transcription_backend(backend: &mut String) -> bool {
+    let migrated = match backend.as_str() {
+        "elevenlabs" => "elevenlabs_batch",
+        "voxtral" => "voxtral_batch",
+        _ => return false,
+    };
+    *backend = migrated.to_string();
+    true
 }
 
 /// Normalize a stored injection backend chain against the current build.
@@ -353,6 +371,41 @@ mod migration_tests {
         assert_eq!(backends, default_backends());
     }
 }
+
+    #[test]
+    fn realtime_elevenlabs_migrates_to_batch() {
+        let mut backend = "elevenlabs".to_string();
+        assert!(migrate_transcription_backend(&mut backend));
+        assert_eq!(backend, "elevenlabs_batch");
+    }
+
+    #[test]
+    fn realtime_voxtral_migrates_to_batch() {
+        let mut backend = "voxtral".to_string();
+        assert!(migrate_transcription_backend(&mut backend));
+        assert_eq!(backend, "voxtral_batch");
+    }
+
+    #[test]
+    fn batch_and_medical_backends_are_untouched() {
+        for kept in ["elevenlabs_batch", "elevenlabs_medical_batch", "voxtral_batch"] {
+            let mut backend = kept.to_string();
+            assert!(!migrate_transcription_backend(&mut backend), "{kept}");
+            assert_eq!(backend, kept);
+        }
+    }
+
+    #[test]
+    fn unknown_backend_is_untouched() {
+        let mut backend = "something_new".to_string();
+        assert!(!migrate_transcription_backend(&mut backend));
+        assert_eq!(backend, "something_new");
+    }
+
+    #[test]
+    fn default_backend_is_a_batch_backend() {
+        assert_eq!(default_backend(), "elevenlabs_batch");
+    }
 
 /// In-memory cache of API keys confirmed by the OS keyring, by credential name.
 /// Misses/errors are never cached, so a transiently locked keyring at startup

@@ -97,9 +97,8 @@ pub async fn warm_all(mut progress: Signal<WarmupProgress>) {
 
     let cfg = crate::config::Config::load().unwrap_or_default();
     let backend = cfg.transcription.backend.clone();
-    let language = cfg.transcription.language.clone();
     let key_name = match backend.as_str() {
-        "voxtral" | "voxtral_batch" => "mistral_api_key",
+        "voxtral_batch" => "mistral_api_key",
         _ => "elevenlabs_api_key",
     };
     let api_key = crate::config::load_api_key(key_name);
@@ -108,27 +107,10 @@ pub async fn warm_all(mut progress: Signal<WarmupProgress>) {
         tracing::debug!("warmup: skipping network preconnect — no key for backend '{}'", backend);
     } else {
         let t3 = std::time::Instant::now();
-        // Exhaustive on purpose: a `_ =>` fallback once routed batch backends
-        // into the realtime constructor, opening a metered session per launch.
-        let result: anyhow::Result<()> = match backend.as_str() {
-            "voxtral" => crate::transcription::start_voxtral_session(&api_key)
-                .await
-                .map(drop),
-            "elevenlabs" => {
-                // Transcript is discarded; skip keyterms (surcharged) — this
-                // only warms DNS/TLS.
-                crate::transcription::start_elevenlabs_session(&api_key, &language, &[], false)
-                    .await
-                    .map(drop)
-            }
-            "voxtral_batch" | "elevenlabs_batch" => {
-                crate::transcription::preconnect_batch_host(&backend).await
-            }
-            other => {
-                tracing::warn!("warmup: unknown backend '{}', skipping preconnect", other);
-                Ok(())
-            }
-        };
+        // Batch-only: an unauthenticated GET warms DNS/TLS with no billable
+        // side effect. Unknown backends still preconnect to ElevenLabs; the
+        // orchestrator rejects them at record time.
+        let result: anyhow::Result<()> = crate::transcription::preconnect_batch_host(&backend).await;
         match result {
             Ok(()) => tracing::debug!("warmup: network preconnect ok ({:?})", t3.elapsed()),
             Err(e) => tracing::warn!("warmup: network preconnect failed: {}", e),

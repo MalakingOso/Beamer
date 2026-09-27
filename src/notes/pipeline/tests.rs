@@ -4,8 +4,8 @@
 //!
 //! Everything here is a function of plain values (`NoteStore`, `StageState`,
 //! `PipelineRequest`), with no coroutine, no signal and no server. That is
-//! deliberate: there is no llama.cpp server reachable in CI or in this
-//! sandbox, so the sweep's actual trigger (a real request completing inside
+//! deliberate: there is no llama.cpp server reachable from a test,
+//! so the sweep's actual trigger (a real request completing inside
 //! `use_pipeline`) is not something a test here can exercise. What is tested
 //! is the two functions that trigger is built on: `sweep_requests`, which
 //! decides what a sweep asks for, and `should_sweep`, which decides whether
