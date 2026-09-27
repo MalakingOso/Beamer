@@ -196,3 +196,21 @@ third batch choice, `elevenlabs_medical_batch` (`scribe_v2_medical`, same
 endpoint/fields/shape as `scribe_v2`), with a toggle on the home tab's Quick
 Settings. Stored `"elevenlabs"` / `"voxtral"` configs migrate to their `_batch`
 counterparts on load; `ws_test` / `voxtral_test` went with the code they probed.
+
+## The exe is the install: embedded UI, reconciled components (2026-09-26)
+
+The 1.0.4 self-update left the main window unstyled: `self_update` swaps only
+the binary, and the new binary asked for a manganis-hashed
+`assets/styles-dxh<hash>.css` the old install never had. Every other part of
+an install had the same flaw (the llama runtime, preset, launchers and
+Scheduled Task only came from installers built on the dev PC; the model only
+on a fresh install; the GNOME extension from a `share/` dir the updater never
+touches). Now each part is either inside the exe (CSS, icon and fonts via
+`include_str!`/`include_bytes!`, with a packaging test forbidding `asset!()`;
+the GNOME extension's files) or declared in a catalog compiled into the exe
+that the running build reconciles the disk to at launch (`src/components/`).
+The catalog ships in the exe rather than as a fetched manifest, so there is
+no hosting and no exe/manifest skew: changing the model is one entry and a
+release. The server's parts form one all-or-nothing group, so a new preset
+can never go live before the model it names. Big downloads (the model) prompt
+in Settings, except on a fresh install; the rest applies silently.

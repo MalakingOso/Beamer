@@ -92,11 +92,12 @@ jobs:
         with:
           tool: dioxus-cli@0.7.10
 
-      # `dx build`, not `cargo build`. The app uses manganis `asset!()` at
-      # `src/ui/app.rs` for the stylesheet and the icon, and only the dioxus
-      # CLI runs the asset pipeline that resolves them. A `cargo build` binary
-      # links and runs but ships unprocessed asset references, which is how the
-      # main window ends up unstyled.
+      # `dx build`, not `cargo build`: dx is what bundles the app (the Windows
+      # icon + VERSIONINFO resource, and the same toolchain `dx bundle` uses
+      # below). It is no longer needed for assets. The stylesheet, fonts and
+      # icon are compiled into the exe (`include_str!`/`include_bytes!`), and
+      # `tests/packaging.rs` forbids manganis `asset!()`, so the exe alone is
+      # a complete app and a self-update that swaps only the binary stays styled.
       #
       # `build.rs` guards on CARGO_CFG_TARGET_OS rather than a cfg attribute,
       # so the icon and the asInvoker/PerMonitorV2 manifest are embedded here.
@@ -318,8 +319,7 @@ jobs:
           tool: dioxus-cli@0.7.10
 
       # `dx build`, not `cargo build` — see the same-named step in the
-      # Windows job above for why: only the dioxus CLI runs the manganis
-      # asset pipeline the app needs.
+      # Windows job above for why.
       - name: Build release
         run: dx build --release
 
@@ -348,8 +348,8 @@ jobs:
       # matters for it. It also has to exist at this path before the bundle
       # step below: the .deb's [bundle.deb.files] entry in Dioxus.toml copies
       # it straight out of target/release, it does not build it itself.
-      # Plain cargo is right here. sync_server is headless, has no UI and no
-      # manganis assets, so there is no asset pipeline for dx to run. The
+      # Plain cargo is right here. sync_server is headless and has no UI, so
+      # there is nothing for dx to bundle. The
       # .deb picks this binary up through [bundle.deb.files].
       - name: Build sync_server
         run: cargo build --release --locked --bin sync_server

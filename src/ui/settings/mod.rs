@@ -38,10 +38,9 @@ pub struct SettingsPageProps {
     pub notes: Signal<NoteStore>,
     pub tasks: Signal<TaskStore>,
     pub sync_client: SyncClientHandle,
-    /// K2-Horizon's first-run download/setup state. `Idle` on every platform
-    /// but a bundled aarch64 build with a fresh install — see `App()` and
-    /// `crate::model_setup`.
-    pub download_status: Signal<crate::model_setup::DownloadStatus>,
+    /// The component reconcile (`crate::components`): download prompts,
+    /// progress and failures for what lives outside the exe.
+    pub components: crate::components::Components,
 }
 
 /// Apply a mutation to the config signal, then synchronously persist it.
@@ -145,7 +144,7 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                 on_extract_model_change: move |m: String| {
                     save_config(config, |c| c.llm.extract.model = m);
                 },
-                download_status: props.download_status,
+                components: props.components,
             }
             }
 
@@ -167,6 +166,7 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                 },
                 notes: props.notes,
                 tasks: props.tasks,
+                components: props.components,
             }
             }
 

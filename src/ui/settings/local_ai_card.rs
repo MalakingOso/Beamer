@@ -4,7 +4,7 @@ use dioxus::prelude::*;
 
 use crate::llm::client::{self, ModelInfo};
 use crate::llm::MIN_CONNECT_TIMEOUT_MS;
-use crate::model_setup::{self, DownloadStatus};
+use crate::components::{Components, Group, Status, MODEL_ID};
 use crate::ui::components::{Select, Toggle};
 use crate::ui::settings::layout::SubSection;
 
@@ -29,9 +29,9 @@ pub struct LocalAiCardProps {
     pub on_base_url_change: EventHandler<String>,
     pub on_connect_timeout_ms_change: EventHandler<u64>,
     pub on_extract_model_change: EventHandler<String>,
-    /// K2-Horizon's first-run download/setup state — `Idle` except on a
-    /// fresh, bundled aarch64 install. See `crate::model_setup`.
-    pub download_status: Signal<crate::model_setup::DownloadStatus>,
+    /// K2-Horizon's model and server setup, from the component reconcile.
+    /// Always quiet off Windows ARM64, whose catalog is empty.
+    pub components: Components,
 }
 
 #[component]
@@ -40,7 +40,7 @@ pub fn LocalAiCard(props: LocalAiCardProps) -> Element {
 
     let base_url = props.base_url.clone();
     let timeout = std::time::Duration::from_millis(props.request_timeout_ms);
-    let download_status = props.download_status;
+    let components = props.components;
 
     let start_probe = move |base_url: String| {
         spawn(async move {
@@ -169,40 +169,38 @@ pub fn LocalAiCard(props: LocalAiCardProps) -> Element {
                 }
             }
 
-            match &*download_status.read() {
-                DownloadStatus::Idle | DownloadStatus::Ready => rsx! {},
-                DownloadStatus::Verifying => rsx! {
+            // The model's own line, else a whole-server setup failure. A
+            // pending download is offered in the Updates card instead.
+            match components.status(MODEL_ID).or_else(|| components.status(Group::LlamaServer.id())) {
+                Some(Status::Verifying) => rsx! {
                     div { class: "card-row",
                         span { class: "llm-status", "Verifying K2-Horizon model\u{2026}" }
                     }
                 },
-                DownloadStatus::Downloading { bytes, total } => {
-                    let pct = if *total > 0 {
-                        (*bytes as f64 / *total as f64 * 100.0) as u32
-                    } else {
-                        0
-                    };
+                Some(Status::Downloading { bytes, total }) => {
+                    let pct = bytes.saturating_mul(100).checked_div(total).unwrap_or(0);
                     rsx! {
                         div { class: "card-row",
                             span { class: "llm-status", "Downloading K2-Horizon model\u{2026} {pct}%" }
                             button {
                                 class: "btn btn-secondary",
-                                onclick: move |_| model_setup::cancel(download_status),
+                                onclick: move |_| components.cancel(),
                                 "Cancel"
                             }
                         }
                     }
                 },
-                DownloadStatus::Failed(msg) => rsx! {
+                Some(Status::Failed(msg)) => rsx! {
                     div { class: "card-row",
                         span { class: "llm-status bad", "K2-Horizon setup failed: {msg}" }
                         button {
                             class: "btn btn-secondary",
-                            onclick: move |_| model_setup::retry(download_status),
-                            "Retry download"
+                            onclick: move |_| components.run(),
+                            "Retry"
                         }
                     }
                 },
+                _ => rsx! {},
             }
 
         }

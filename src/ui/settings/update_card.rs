@@ -1,5 +1,6 @@
 use dioxus::prelude::*;
 
+use crate::components::{Components, Status};
 use crate::notes::task_store::TaskStore;
 use crate::notes::NoteStore;
 use crate::ui::components::Toggle;
@@ -13,6 +14,7 @@ pub struct UpdateCardProps {
     pub on_auto_check_toggle: EventHandler<bool>,
     pub notes: Signal<NoteStore>,
     pub tasks: Signal<TaskStore>,
+    pub components: Components,
 }
 
 #[component]
@@ -20,6 +22,8 @@ pub fn UpdateCard(props: UpdateCardProps) -> Element {
     let update_status = props.update_status;
     let mut notes = props.notes;
     let mut tasks = props.tasks;
+    let components = props.components;
+    let component_rows = components.attention();
 
     rsx! {
         SubSection { label: "Updates".to_string(),
@@ -103,7 +107,62 @@ pub fn UpdateCard(props: UpdateCardProps) -> Element {
                     }
                 },
             }
+            // Parts of the install outside the exe (`crate::components`).
+            // Quiet unless one needs a decision or went wrong.
+            if !component_rows.is_empty() {
+                div { class: "card-row",
+                    span { class: "card-label", "Components" }
+                }
+            }
+            for (key, label, size, status) in component_rows {
+                div { class: "card-row", key: "{key}",
+                    match status {
+                        Status::Pending => rsx! {
+                            span { class: "card-label",
+                                "{label}"
+                                if let Some(size) = size { " \u{00b7} {human_size(size)}" }
+                            }
+                            button {
+                                class: "btn btn-primary",
+                                onclick: move |_| components.accept(key),
+                                "Download"
+                            }
+                        },
+                        Status::Downloading { bytes, total } => {
+                            let pct = bytes.saturating_mul(100).checked_div(total).unwrap_or(0);
+                            rsx! {
+                                span { class: "card-label", "{label} \u{00b7} {pct}%" }
+                                button {
+                                    class: "btn btn-secondary",
+                                    onclick: move |_| components.cancel(),
+                                    "Cancel"
+                                }
+                            }
+                        },
+                        Status::Failed(msg) => rsx! {
+                            span { class: "card-label", style: "color: var(--fg-secondary);", "{label}: {msg}" }
+                            button {
+                                class: "btn btn-secondary",
+                                onclick: move |_| components.run(),
+                                "Retry"
+                            }
+                        },
+                        _ => rsx! {},
+                    }
+                }
+            }
         }
+    }
+}
+
+/// `1_148_614_016` → "1.1 GB". Decimal units, as download sizes usually are.
+fn human_size(bytes: u64) -> String {
+    const MB: f64 = 1_000_000.0;
+    let mb = bytes as f64 / MB;
+    if mb >= 1000.0 {
+        format!("{:.1} GB", mb / 1000.0)
+    } else {
+        format!("{mb:.0} MB")
     }
 }
 

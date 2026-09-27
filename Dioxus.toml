@@ -7,7 +7,6 @@ asset_dir = "assets"
 identifier = "com.beamer.app"
 publisher = "Beamer"
 icon = ["assets/icon.ico", "assets/icon.png"]
-resources = ["assets/*", "assets/fonts/*"]
 copyright = "Copyright Beamer"
 category = "Utility"
 short_description = "Voice dictation"
@@ -39,11 +38,10 @@ install_mode = "CurrentUser"
 display_language_selector = false
 start_menu_folder = "Beamer"
 # `!include`d once, at global script scope, between the generated install
-# Section's SectionEnd and the generated "Section \"Uninstall\"" — so this
-# file defines its own hidden install-time section (K2-Horizon runtime
-# placement + dormant Scheduled Task registration) AND its own
-# `un.`-prefixed uninstall section (cleanup), both from one file. See
-# installer/k2horizon/hooks.nsh and agent_docs/running_on_bearcave.md.
+# Section's SectionEnd and the generated "Section \"Uninstall\"". Uninstall
+# cleanup only (the Scheduled Task, the K2-Horizon runtime dir and model):
+# installing those is the app's own job on launch (src/components/), not the
+# installer's. See installer/k2horizon/hooks.nsh.
 installer_hooks = "installer/k2horizon/hooks.nsh"
 
 # Runtime equivalents of the `-dev` packages the CI Linux job installs to
@@ -82,16 +80,6 @@ recommends = ["syncthing"]
 # (`cargo build --release --bin sync_server` first).
 [bundle.deb.files]
 "usr/bin/sync_server" = "target/release/sync_server"
-# The GNOME Shell extension sources Settings → Injection installs from.
-# `install::gnome_extension::locate_source_dir` probes
-# `<exe>/../share/beamer/extension/<uuid>`, which is this destination once
-# the package lands in /usr. One entry per file: `dx bundle` copies files,
-# not directories. `tests/packaging.rs` fails if a file is added to the
-# extension dir without an entry here.
-"usr/share/beamer/extension/beamer-focus@beamer.app/extension.js" = "extension/beamer-focus@beamer.app/extension.js"
-"usr/share/beamer/extension/beamer-focus@beamer.app/indicator.js" = "extension/beamer-focus@beamer.app/indicator.js"
-"usr/share/beamer/extension/beamer-focus@beamer.app/metadata.json" = "extension/beamer-focus@beamer.app/metadata.json"
-"usr/share/beamer/extension/beamer-focus@beamer.app/stylesheet.css" = "extension/beamer-focus@beamer.app/stylesheet.css"
 # The systemd user unit for the sync server. Without this the package installs
 # the binary and `systemctl --user enable beamer-sync` reports the unit does
 # not exist, which is what happened on the first install. /usr/lib/systemd/user

@@ -35,7 +35,7 @@ is on. See `agent_docs/local_inference.md` for the full story.
 
 ## Linux install location
 
-callisto runs Beamer from `~/.local/bin/beamer` + `~/.local/lib/Beamer/assets/`,
+callisto runs Beamer from `~/.local/bin/beamer` (the binary is the whole app),
 installed via `deploy/install-linux.sh` — never `/usr/bin`, which is where the
 `.deb` puts it. A `.deb` install needs root to write `/usr/bin`, and
 `self-replace` (the crate behind the in-app updater) creates its swap
@@ -56,12 +56,11 @@ which overrides the `.deb`'s `/usr/lib/systemd/user/beamer-sync.service` of
 the same name; there's no separate "old unit" to disable, just `systemctl
 --user restart beamer-sync` to pick up the new binary path once installed.
 
-⚠️ **Known gap: the self-update zip is binary-only.** A future release that
-changes `assets/styles-*.css` or the icon (manganis content-hashes the
-filenames) will self-update the binary but leave stale or missing files in
-`~/.local/lib/Beamer/assets/` — the app would come up unstyled. Not worth
-solving for a two-machine setup; re-running `deploy/install-linux.sh` from a
-fresh checkout fixes it.
+The self-update zip is binary-only, and that's complete: the stylesheet,
+fonts, icon and GNOME extension are compiled in (1.0.4 shipped the opposite
+and came up unstyled after an exe-only update). Re-running
+`deploy/install-linux.sh` also deletes the old `~/.local/lib/Beamer/assets/`
+and `~/.local/share/beamer/extension/` copies earlier installs left behind.
 
 ## Install
 
@@ -123,46 +122,52 @@ K2-Horizon (no `K2HorizonForCausalLM` support), so this is built from
 `agent_docs/local_inference.md`'s "bearcave's extraction server" section for
 why, and for the tokenizer patch that build needed.
 
-**An NSIS installer built locally on this machine (`dx bundle --release
---package-types nsis`) now does this automatically**, on a fresh install
-(no pre-existing `config.toml`) of a bundled aarch64 build:
+**Beamer installs and updates all of this itself, on launch**
+(`src/components/`), on a Windows ARM64 build, however the exe got there
+(installer, self-update, hand copy):
 
-1. `installer/k2horizon/hooks.nsh` (NSIS, `!include`d via
-   `[bundle.windows.nsis].installer_hooks` in `Dioxus.toml`) embeds the 9
-   runtime files plus `deploy/llama-models-bearcave.ini` and the two portable
-   launcher scripts (`installer/k2horizon/start-llama-k2horizon.cmd`,
-   `...-hidden.vbs`) directly into the installer — sourced from
-   `vendor/llama-k2horizon/` on the build machine (gitignored; populate it by
-   hand before running `dx bundle`, copying from wherever you built or
-   staged the fork's `llama-server.exe` + DLLs) — and places them at
-   `%LOCALAPPDATA%\Beamer\llama-k2horizon\` at install time. This is a fixed
-   per-user path chosen for the same reason the installer itself is now
-   `install_mode = "CurrentUser"`-only (see "Linux install location" below):
-   Beamer runs `asInvoker` and can't write into `Program Files` later, so the
-   runtime and the model
-   (`%USERPROFILE%\models\beamer\K2-Horizon-0.9B-Q8_0.gguf`, same as before)
-   both live outside the app's own install directory on purpose.
-2. The same install step registers the Scheduled Task, **dormant** (no
-   `/run`) — starting it before the model file exists leaves the router
-   stuck reporting `"loading"` forever with no error, confirmed empirically,
-   so it must never fire before the model is actually present.
-3. `src/model_setup.rs` downloads the model itself on first launch (sha256-
-   verified against Hugging Face's published hash, restart-from-scratch on
-   failure, retried automatically on the next launch), then triggers the
-   dormant task (`schtasks /run`) once verified — the Local AI settings card
-   shows progress and a Cancel control while this runs. This is the one
-   narrow, deliberate exception to "Beamer never touches server lifecycle":
-   it starts a pre-installed task exactly once, after a download it
-   initiated, never `llama-server.exe` directly.
-4. Re-running the installer over an already-set-up machine is safe: the
-   install step stops any running `llama-server.exe` first, `schtasks
-   /create ... /F` overwrites the existing task definition rather than
-   duplicating it, and `model_setup` treats a model file already present at
-   the target path as something to **verify** (size + sha256), not skip
-   blindly or redownload unconditionally.
-5. Uninstalling removes all of it: the task, the runtime directory, and the
-   model file (not the whole `models\beamer\` directory, which may hold other
-   GGUFs).
+1. The runtime (the 9 files below) is downloaded silently from a GitHub
+   **prerelease** (`llama-runtime-k2h-N`, published with
+   `deploy/publish-llama-runtime.sh`), sha256-verified, and swapped into
+   `%LOCALAPPDATA%\Beamer\llama-k2horizon\`. The preset
+   (`deploy/llama-models-bearcave.ini`) and the two launchers
+   (`installer/k2horizon/start-llama-k2horizon.cmd`, `...-hidden.vbs`) are
+   embedded in the exe and written into the same dir. This is a fixed
+   per-user path, not the app's install dir: Beamer runs `asInvoker` (see
+   "Linux install location" below for the same reasoning), so the runtime and
+   the model (`%USERPROFILE%\models\beamer\K2-Horizon-0.9B-Q8_0.gguf`) both
+   live somewhere it can always write.
+2. The Scheduled Task is registered (`schtasks /create /xml ... /f`, so it's
+   updated, never duplicated) from XML the exe renders. Its logon trigger
+   names the current user: an any-user `<LogonTrigger>` is admin-only, and the
+   unelevated app gets "Access is denied" for it (1.0.5's first build did).
+3. The model (1.15 GB) downloads on its own on a **fresh install** (no
+   `config.toml` before that launch). On an existing install it's offered in
+   Settings → Updates → Components with a Download button, progress, Cancel
+   and Retry. A model already on disk is **verified** (size + sha256) once,
+   never redownloaded blindly, and never prompted for.
+4. All of it is one all-or-nothing group. Nothing live is touched until every
+   out-of-date part is downloaded and verified; then the task is ended and
+   `llama-server.exe` killed (its files are locked while it runs), everything
+   is applied, and the task is run. **The server is never started before the
+   model exists**: a router started without its model sits at `"loading"`
+   forever with no error, confirmed empirically. If a part can't be staged
+   (say the model is waiting on its Download click), the server keeps
+   running on its current files. This is the one narrow, deliberate
+   exception to "Beamer never touches server lifecycle": only this apply
+   step ends, registers and runs the task, and never `llama-server.exe`
+   directly.
+5. `%APPDATA%\Beamer\components.json` records what was applied, so later
+   launches only compare that record and check the files exist, with no
+   re-hashing. Delete it (and the runtime dir) to force a full reinstall.
+6. The installer (`installer/k2horizon/hooks.nsh`) now only uninstalls: the
+   task, the runtime dir and the model file (not the whole `models\beamer\`
+   directory, which may hold other GGUFs).
+
+**First launch after upgrading from 1.0.x is a one-time migration, not a
+bug:** there's no `components.json` yet, so the runtime re-downloads (~8 MB),
+the existing model gets one full verify (a few seconds), and the server
+restarts once. No model prompt, since the file verifies.
 
 The manual procedure below is now the fallback — for a from-scratch fork
 build, or a non-installer setup:
@@ -299,18 +304,22 @@ not exist if the Windows hotkey work had been done as a four-line patch.
     runs, and the server should start (task goes `Running`, `GET
     127.0.0.1:8080/v1/models` succeeds) once it completes — a dictated note
     then extracts correctly with no manual setup at all.
-13. **Cancel and retry.** Cancel a download mid-flight from the card; confirm
-    the `.part` file is gone and the card returns to idle. Relaunch: the
-    download should restart from scratch (not resume) automatically.
-14. **Installer re-run over an already-set-up machine.** With bearcave's own
-    manual setup (or a prior install) already in place and its Scheduled Task
-    running, run the newly-built installer again. Confirm: the old
-    `llama-server.exe` process is gone afterward (not orphaned holding port
-    8080), the task is updated rather than duplicated (`schtasks /query /tn
-    "Beamer K2-Horizon Server"` shows exactly one), and the already-present
-    model is verified rather than redundantly redownloaded (no download
-    progress shown in the card on next launch).
-15. **Uninstall.** Confirm the task, `%LOCALAPPDATA%\Beamer\llama-k2horizon\`,
+13. **Cancel and retry.** Cancel a download mid-flight; confirm the `.part`
+    file is gone and the row returns to Pending with a Download button that
+    restarts it from scratch (not resume). Leaving Settings mid-download must
+    not stop it.
+14. **Upgrade over 1.0.x.** With an older install's runtime, task and model in
+    place, launch the new build: expect the one-time migration (runtime
+    re-download, one model verify, one server restart) and no model prompt.
+    Afterward the old `llama-server.exe` is gone (not orphaned holding port
+    8080), `schtasks /query /tn "Beamer K2-Horizon Server"` shows exactly one
+    task, and `components.json` lists every component. A second launch
+    touches nothing.
+15. **Group gate.** Remove the model and don't accept its download, then
+    launch a build whose embedded ini differs: the runtime dir must be
+    unchanged and the server not stopped until Download is clicked and
+    finishes.
+16. **Uninstall.** Confirm the task, `%LOCALAPPDATA%\Beamer\llama-k2horizon\`,
     and the model file are all gone; `models\beamer\` itself (and any other
     GGUF in it) is left alone.
 
