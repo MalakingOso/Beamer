@@ -19,6 +19,12 @@ Windows system-tray dictation app. Captures mic audio, transcribes via cloud API
   extraction prompt.
   ⚠️ **No crate-rooted paths in this directory** — `src/bin/task_eval.rs`
   `#[path]`-includes it, and there is no `src/lib.rs`.
+- `src/components/` — Everything an install needs outside the exe (llama
+  runtime, preset, launchers, Scheduled Task, model), declared in a catalog
+  compiled into the exe and reconciled on launch. The only code allowed to
+  touch the local server's lifecycle. See `agent_docs/local_inference.md`.
+  The UI's CSS, fonts and icon are compiled in too: never use manganis
+  `asset!()` (`tests/packaging.rs` enforces it).
 - `src/tray/` — System tray icon + menu
 - `src/ui/` — Dioxus desktop: settings window, overlay, screen edge glow
   - `src/ui/settings/` — One file per card section (recording, transcription, api_keys, etc.)
@@ -69,13 +75,16 @@ cargo run --bin task_eval -- --limit 20   # Measure extraction against your own 
 
 ## Current status
 
-Version 1.0.3 on `master`. Sticky Notes (all 3 phases) and cross-machine
+Version 1.0.5 on `master`. The exe is the whole install: UI assets and the
+GNOME extension are compiled in, and `src/components/` brings the local
+extraction server (runtime, preset, task, model) in line on launch, so a
+self-update is all any machine needs. Sticky Notes (all 3 phases) and cross-machine
 sync are shipped; note attachments (files, images, link chips) and the
 S1-mini cleanup pass have since been removed as dead weight — extraction
-is now the only local model pass. The GNOME extension ships inside the
-.deb and `deploy/install-linux.sh`, so Settings → Injection can install it
-without a checkout; a GNOME log-out/in is still needed to pick up a new
-extension version, but it's no longer a separate manual deploy step. The
+is now the only local model pass. The GNOME extension is embedded in the
+exe, so Settings → Injection can install it without a checkout; a GNOME
+log-out/in is still needed to pick up a new extension version, but it's no
+longer a separate manual deploy step. The
 feature set is large and growing — run `cargo test` (CI enforces it with
 `-D warnings`) rather than trusting any count here.
 

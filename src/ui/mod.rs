@@ -159,6 +159,15 @@ pub fn launch_app() {
                         .with_inner_size(dioxus::desktop::LogicalSize::new(500.0_f64, 600.0_f64))
                         .with_min_inner_size(dioxus::desktop::LogicalSize::new(500.0_f64, 400.0_f64)),
                 )
+                // Inline, not a manganis `asset!()` link: a hashed asset file
+                // lives beside the exe, so a self-update that swaps only the
+                // binary requests a filename the old install never had and the
+                // window renders unstyled. `tests/packaging.rs` forbids `asset!(`.
+                .with_custom_head(format!(
+                    "<style>{}{}</style>",
+                    fonts::embedded_font_css(),
+                    include_str!("../../assets/styles.css")
+                ))
                 .with_close_behaviour(WindowCloseBehaviour::WindowHides)
                 .with_exits_when_last_window_closes(false),
         )

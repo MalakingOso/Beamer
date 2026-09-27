@@ -67,24 +67,10 @@ pub fn App() -> Element {
     // "fresh install" from "upgrade of an existing install". `Ok(false)`
     // only: an `Err` (can't tell) is treated as "not fresh", the same
     // conservative call `Config::load()` itself documents for the same stat.
-    // Gated to match its only reader below: on every other arch nothing
-    // consumes it, and an ungated `let` is a dead binding under `-D warnings`.
-    #[cfg(target_arch = "aarch64")]
+    // Read by the component reconcile below: a fresh install auto-accepts
+    // prompted downloads (the model), an upgrade asks in Settings.
     let fresh_install = matches!(Config::config_path().try_exists(), Ok(false));
     let config = use_signal(|| Config::load().unwrap_or_default());
-    let download_status = use_signal(crate::model_setup::DownloadStatus::default);
-    // K2-Horizon local extraction only exists for a bundled aarch64 build
-    // (the only arch the fork's llama-server.exe is built for). A fresh
-    // install downloads and starts it itself; an upgrade over an existing
-    // install must not retroactively engage this — that case's file
-    // placement/task update is instead handled entirely by the installer's
-    // hooks.nsh. See agent_docs/local_inference.md.
-    #[cfg(target_arch = "aarch64")]
-    use_hook(move || {
-        if fresh_install {
-            crate::model_setup::spawn_ensure_model_present(download_status);
-        }
-    });
     let status_log = use_signal(StatusLog::new);
     app_setup::report_load_errors(notes, tasks, status_log);
     let update_status = use_signal(UpdateStatus::default);
@@ -180,6 +166,9 @@ pub fn App() -> Element {
     let sync_client_handle = sync_client::use_sync_client(config, sync_doc, notes, tasks);
 
     app_setup::setup_update_check(config, update_status);
+    // Bring everything outside the exe (runtime, preset, task, model) in line
+    // with this build's catalog. Silent unless a big download needs an OK.
+    let components = crate::components::use_components(fresh_install);
 
     // Start Menu shortcut so toasts show under Beamer's own name (see `windows_shortcut`).
     #[cfg(target_os = "windows")]
@@ -192,15 +181,12 @@ pub fn App() -> Element {
     let page = *current_page.read();
 
     rsx! {
-        head {
-            link { rel: "stylesheet", href: asset!("/assets/styles.css") }
-        }
         div { class: "app-container",
             div { class: "left-column",
                 div { class: "corner-badge",
                     img {
                         class: "corner-badge-icon",
-                        src: asset!("/assets/icon.png"),
+                        src: crate::assets::icon_png_data_url(),
                         alt: "Beamer",
                     }
                 }
@@ -292,7 +278,7 @@ pub fn App() -> Element {
                         VocabPage {}
                     },
                     Page::Settings => rsx! {
-                        SettingsPage { config, last_injection, status_log, update_status, notes, tasks, sync_client: sync_client_handle, download_status }
+                        SettingsPage { config, last_injection, status_log, update_status, notes, tasks, sync_client: sync_client_handle, components }
                     },
                 }
             }

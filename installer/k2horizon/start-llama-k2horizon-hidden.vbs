@@ -6,8 +6,8 @@
 '
 ' WScript.ScriptFullName resolves to THIS script's own path, so the .cmd it
 ' launches is found relative to wherever this file actually is on disk (the
-' fixed runtime path, %LOCALAPPDATA%\Beamer\llama-k2horizon\ once installed —
-' see hooks.nsh) rather than a hardcoded machine-specific path.
+' fixed runtime path, %LOCALAPPDATA%\Beamer\llama-k2horizon\, where
+' src/components/ writes it) rather than a hardcoded machine-specific path.
 Set fso = CreateObject("Scripting.FileSystemObject")
 scriptDir = fso.GetParentFolderName(WScript.ScriptFullName)
 cmdPath = fso.BuildPath(scriptDir, "start-llama-k2horizon.cmd")

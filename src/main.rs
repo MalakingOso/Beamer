@@ -4,6 +4,7 @@
 
 mod assets;
 mod audio;
+mod components;
 mod config;
 mod hotkey;
 mod injection;
@@ -11,7 +12,6 @@ mod injection;
 mod install;
 mod llm;
 mod media;
-mod model_setup;
 mod notes;
 mod orchestrator;
 mod sounds;

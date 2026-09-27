@@ -59,32 +59,22 @@ fn parse_status(output: &str, uuid: &str) -> Option<Status> {
     if in_block { Some(Status::Disabled) } else { None }
 }
 
-/// Extension source dir: `$BEAMER_EXTENSION_DIR`, then FHS, portable, then
-/// `./extension/` for cargo-run from the repo root.
+/// The extension's files, compiled in. A self-updated exe carries the
+/// extension that matches it, with no `share/` dir to go stale beside it.
+/// A unit test fails if a file is added to the source dir without an entry.
+const EMBEDDED: &[(&str, &[u8])] = &[
+    ("extension.js", include_bytes!("../../extension/beamer-focus@beamer.app/extension.js")),
+    ("indicator.js", include_bytes!("../../extension/beamer-focus@beamer.app/indicator.js")),
+    ("metadata.json", include_bytes!("../../extension/beamer-focus@beamer.app/metadata.json")),
+    ("stylesheet.css", include_bytes!("../../extension/beamer-focus@beamer.app/stylesheet.css")),
+];
+
+/// Dev override only: `$BEAMER_EXTENSION_DIR`, to try extension edits
+/// without rebuilding. Every other run uses the embedded files. (The .deb and
+/// `install-linux.sh` still ship a `share/` copy; nothing reads it now.)
 pub fn locate_source_dir() -> Option<PathBuf> {
-    if let Ok(env) = std::env::var("BEAMER_EXTENSION_DIR") {
-        let p = PathBuf::from(env);
-        if p.join("metadata.json").exists() {
-            return Some(p);
-        }
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let fhs = dir.join("../share/beamer/extension").join(EXTENSION_UUID);
-            if fhs.join("metadata.json").exists() {
-                return Some(fhs);
-            }
-            let portable = dir.join("extension").join(EXTENSION_UUID);
-            if portable.join("metadata.json").exists() {
-                return Some(portable);
-            }
-        }
-    }
-    let cwd = PathBuf::from("extension").join(EXTENSION_UUID);
-    if cwd.join("metadata.json").exists() {
-        return Some(cwd);
-    }
-    None
+    let p = PathBuf::from(std::env::var_os("BEAMER_EXTENSION_DIR")?);
+    p.join("metadata.json").exists().then_some(p)
 }
 
 fn target_dir() -> Result<PathBuf> {
@@ -101,11 +91,17 @@ fn parse_metadata_version(json: &str) -> Option<u32> {
     value.get("version")?.as_u64().map(|v| v as u32)
 }
 
-/// Bundled extension version.
+/// Bundled extension version: the dev override's, else the embedded one.
 pub fn bundled_version() -> Option<u32> {
-    let src = locate_source_dir()?;
-    let json = std::fs::read_to_string(src.join("metadata.json")).ok()?;
+    let json = match locate_source_dir() {
+        Some(src) => std::fs::read_to_string(src.join("metadata.json")).ok()?,
+        None => String::from_utf8_lossy(embedded("metadata.json")?).into_owned(),
+    };
     parse_metadata_version(&json)
+}
+
+fn embedded(name: &str) -> Option<&'static [u8]> {
+    EMBEDDED.iter().find(|(n, _)| *n == name).map(|(_, bytes)| *bytes)
 }
 
 /// Installed extension version.
@@ -158,21 +154,28 @@ pub fn status() -> Status {
     Status::NotInstalled
 }
 
-/// Copy the bundled extension into the GNOME extensions dir and enable it.
+/// Write the bundled extension into the GNOME extensions dir and enable it.
 /// Idempotent; re-running updates the files.
 pub fn install() -> Result<()> {
-    let src = locate_source_dir()
-        .ok_or_else(|| anyhow::anyhow!("extension source directory not found; set BEAMER_EXTENSION_DIR"))?;
     let dst = target_dir()?;
     // Clear stale files so the target holds exactly this build's bundle.
     if dst.exists() {
         std::fs::remove_dir_all(&dst)?;
     }
     std::fs::create_dir_all(&dst)?;
-    for entry in std::fs::read_dir(&src)? {
-        let entry = entry?;
-        if entry.file_type()?.is_file() {
-            std::fs::copy(entry.path(), dst.join(entry.file_name()))?;
+    match locate_source_dir() {
+        Some(src) => {
+            for entry in std::fs::read_dir(&src)? {
+                let entry = entry?;
+                if entry.file_type()?.is_file() {
+                    std::fs::copy(entry.path(), dst.join(entry.file_name()))?;
+                }
+            }
+        }
+        None => {
+            for (name, bytes) in EMBEDDED {
+                std::fs::write(dst.join(name), bytes)?;
+            }
         }
     }
     let out = Command::new("gnome-extensions")
@@ -222,6 +225,27 @@ pub fn uninstall() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_extension_source_file_is_embedded() {
+        let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("extension").join(EXTENSION_UUID);
+        let mut on_disk: Vec<String> = std::fs::read_dir(&src)
+            .expect("extension source dir readable")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        on_disk.sort();
+        let mut embedded: Vec<String> = EMBEDDED.iter().map(|(n, _)| n.to_string()).collect();
+        embedded.sort();
+        assert_eq!(on_disk, embedded, "a file in the extension dir that isn't embedded never ships");
+    }
+
+    #[test]
+    fn the_embedded_metadata_carries_a_version() {
+        let json = String::from_utf8_lossy(embedded("metadata.json").unwrap()).into_owned();
+        assert!(parse_metadata_version(&json).is_some());
+    }
 
     #[test]
     fn metadata_version_parses() {

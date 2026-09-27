@@ -48,7 +48,9 @@ dictation ──> sink::do_note_capture ──> flush to disk ──> pipeline r
 | `notes/lifecycle.rs` | The only code allowed to write the extraction result to a note. |
 | `bin/task_eval.rs` | Measures extraction against the user's own accepted/dismissed rows. |
 
-**Beamer never spawns the server.** It runs standalone and Beamer's entire
+**Beamer never spawns the server.** It runs standalone (on bearcave, installed
+and started as a Scheduled Task by `src/components/`, the one exception, see
+"Getting the runtime + model onto an install") and Beamer's entire
 connection surface is the shared `[llm] base_url` plus an extract-only
 override (`LlmConfig::extract_base_url()`, falling back to the shared value
 when unset; see `agent_docs/config_schema.md`). On bearcave, extraction runs
@@ -428,6 +430,19 @@ as Beamer's use is text-only.
 |---|---|---|---|
 | `K2-Horizon-0.9B-Q8_0.gguf` | 1.15 GiB | Task extraction. | bearcave (`%USERPROFILE%\models\beamer\`) |
 
+**Swapping the model** is one catalog edit plus its consistency points:
+1. The model entry in `src/components/mod.rs` (url, sha256, size, path).
+2. The preset's `[section]` in `deploy/llama-models-bearcave.ini`, which must
+   equal the new filename stem (`components::tests` pins this).
+3. `default_extract_model()` in `src/llm/mod.rs` (pinned against the catalog
+   on aarch64 by the same tests). Users with a saved `extract.model` in
+   `config.toml` keep the old id: that needs a migration, which doesn't exist
+   yet.
+4. The two filenames in `installer/k2horizon/hooks.nsh`'s uninstall section.
+
+Cut a release, and every install picks the new model up on its next launch
+(prompted in Settings, since it's a big download).
+
 Licences are in `licenses/`. K2-Horizon's licence terms are **unresolved as of
 this writing** — see the provenance note in `licenses/K2-Horizon-LICENSE.txt`.
 
@@ -480,36 +495,60 @@ must be copied in beside the exe or the server fails to start with no error
 text), not the full ~736 MB dev checkout. CPU-only by design: bearcave has no
 GPU, which is the entire point of choosing a 0.9B model here.
 
-#### Getting the runtime + model onto a fresh install
+#### Getting the runtime + model onto an install
 
-A locally-built NSIS installer (`installer/k2horizon/hooks.nsh`) now does
-this automatically for a bundled aarch64 build — see
-`agent_docs/running_on_bearcave.md`'s "Local extraction" section for the
-full walkthrough. Three things worth knowing if touching this code:
+**The app installs all of it itself, on launch** (`src/components/`), not the
+installer. Every part of the server lives in a catalog compiled into the exe
+(`components::LLAMA_SERVER`): the runtime zip (a GitHub **prerelease**,
+`llama-runtime-k2h-N`), the preset ini and both launchers (embedded from
+`deploy/` and `installer/k2horizon/`), the Scheduled Task definition and the
+model. On each launch the running exe reconciles the disk to its own catalog,
+so exe version N always ends up with exactly what N expects, however it got
+there (installer, self-update, hand copy). `components.json` (in the config
+dir) records what was applied; a component is current when it's on disk and
+the record carries the catalog's sha256, so the 1.1 GB model is hashed only
+when installing or when something is missing or mismatched. See
+`agent_docs/running_on_bearcave.md` for the operational walkthrough. Things
+worth knowing if touching this code:
 
+- **The group is all-or-nothing.** Every out-of-date member is downloaded and
+  verified into staging first, touching nothing live. If one fails, or the
+  model needs a download the user hasn't OKed, the whole group waits and the
+  running server keeps its current, consistent files. A new ini must never go
+  live naming a model that isn't on disk. Only a fully staged group is
+  applied: stop → runtime dir swap (old dir kept as `.old` until success) →
+  ini/launchers → model → re-register task → start → record. One blocking
+  call does all of it, so a cancelled download task can't strand the server
+  stopped mid-swap.
+- **`src/components/` is the one narrow, deliberate exception to "Beamer never
+  touches server lifecycle."** Only its apply step may end, register and run
+  the Scheduled Task (`components::llama`), and only around a fully staged
+  group. It never spawns `llama-server.exe` directly, and nothing else in the
+  app calls into Task Scheduler.
+- **The server is never started before the model exists.** A router started
+  without its model sits at `"loading"` forever with no error (confirmed
+  empirically), which is why the model is a group member rather than a
+  separate download.
+- **The model prompts, everything else is silent.** The ~8 MB runtime and the
+  small files apply without asking. The model asks in Settings → Updates
+  unless this is a fresh install (no `config.toml` before this launch), which
+  auto-accepts to keep first-run behavior. A model already on disk that
+  verifies is never prompted for, which is what keeps a 1.0.x upgrade
+  silent: its one-time migration re-downloads the runtime, verifies the model
+  once and restarts the server once.
 - **The runtime and the model live at a fixed per-user path**
   (`%LOCALAPPDATA%\Beamer\llama-k2horizon\`,
-  `%USERPROFILE%\models\beamer\...`), independent of whether Beamer itself
-  was installed per-user or per-machine. Beamer runs `asInvoker` and a
-  per-machine install puts the app under `Program Files`, which an
-  unelevated process can't write into later — so neither the runtime nor the
-  (much larger, downloaded-not-bundled) model can live inside the app's own
-  install directory.
-- **`src/model_setup.rs` starting the Scheduled Task is the one narrow,
-  deliberate exception to "Beamer never touches server lifecycle."** It
-  shells out to `schtasks /run` exactly once, after downloading and
-  sha256-verifying the model, to start a task the installer registered
-  *dormant*. It never spawns `llama-server.exe` directly, and nothing else
-  in the app ever calls into Task Scheduler.
-- **`[bundle].resources` does not work for bundling arbitrary files into an
-  NSIS payload in this `dioxus-cli` version** — tried first, disproven
-  empirically (nothing referencing a `resources` glob entry ever appeared in
-  the generated `.nsi` or its staging directory; only manganis `asset!()`
-  output does). `hooks.nsh` instead embeds the runtime files directly via
-  NSIS's own `File /nonfatal "<path>\*.*"`, which also downgrades a
-  zero-match glob (the CI scenario — `vendor/llama-k2horizon/` is gitignored
-  and never populated there) from a compile error to a harmless warning,
-  verified both ways.
+  `%USERPROFILE%\models\beamer\...`), independent of where Beamer itself is
+  installed. Beamer runs `asInvoker`, so neither can live anywhere it can't
+  write later.
+- **Publishing a new runtime:** `deploy/publish-llama-runtime.sh <N>` builds a
+  deterministic zip of the 9 files in `vendor/llama-k2horizon/` and prints the
+  catalog entry to paste; `... <N> --upload` publishes that exact file as a
+  prerelease. It must never be "latest": the app's self-updater asks GitHub
+  for `/releases/latest`, which excludes prereleases, and would otherwise try
+  to install the runtime zip as an app update. Upload before shipping a build
+  whose catalog names it, or every install's group fails (safely: the server
+  keeps its old files) until it's live.
 
 ### callisto's server
 

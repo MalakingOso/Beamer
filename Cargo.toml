@@ -1,6 +1,6 @@
 [package]
 name = "beamer"
-version = "1.0.4"
+version = "1.0.5"
 edition = "2021"
 
 [[bin]]
@@ -56,6 +56,9 @@ reqwest = { version = "0.12", default-features = false, features = ["multipart",
 # "compression-zip-deflate" every self-update download fails to extract with
 # "Compression method not supported".
 self_update = { version = "0.42", features = ["archive-zip", "compression-zip-deflate"] }
+# Same version and codec self_update already pulls in (see above). Used
+# directly to unpack runtime components (`src/components/archive.rs`).
+zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
 sha2 = "0.10.9"
 automerge = "0.11"
 

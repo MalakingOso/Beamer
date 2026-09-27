@@ -1,13 +1,15 @@
 /* Beamer — Beamer Purple Design System */
 
-/* Font loading lives in Rust now, not here. This file ships through
-   `asset!()` and is fetched by the `<link>` in `ui::app`, but a bundled
-   fetch has no document base for a relative `url("fonts/...")` to resolve
-   against, and the three woff2 files were never copied into the bundle
-   either way. `ui::fonts::embedded_font_css` already carries the same three
-   `@font-face` rules as `data:` URIs, and `ui::launch_app` injects them into
-   this window's head at creation time, the same way every other window
-   (sticky notes, pill, splash) already gets its fonts. */
+/* This file is compiled into the binary (`include_str!` in `ui::launch_app`)
+   and injected into the main window's head as an inline `<style>`, right
+   after `ui::fonts::embedded_font_css`'s `@font-face` rules. It is not a
+   separate file on disk at runtime, so the exe alone is a complete, styled
+   app however it got installed (self-update swaps only the exe).
+
+   Consequences for edits here: no relative `url(...)` can resolve (there is
+   no document base), so any image or font must be an inline `data:` URI; and
+   `dx serve` does not hot-reload this file, since a CSS change needs a
+   rebuild. */
 
 /* ===== Tokens ===== */
 :root {

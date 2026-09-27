@@ -62,7 +62,7 @@ fn default_connect_timeout_ms() -> u64 { 5_000 }
 
 /// Only a bundled aarch64 Windows build ever has a server that can serve
 /// K2-Horizon (its llama.cpp fork build exists for that arch only —
-/// `crate::model_setup` downloads the model and starts it there). Every
+/// `crate::components` installs the runtime and model there). Every
 /// other target — x86_64 Windows, Linux/callisto — has upstream llama.cpp,
 /// which cannot load `K2HorizonForCausalLM` at all, so a fresh config there
 /// must default back to what it always defaulted to.
