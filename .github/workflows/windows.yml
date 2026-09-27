@@ -187,6 +187,107 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  # ARM64 Windows, built on the self-hosted BEARCAVE runner (this repo's
+  # Windows-on-ARM machine) rather than a hosted runner: same manual steps
+  # as the x64 job above — dx build, flat self-update zip, NSIS installer.
+  # The runner's workspace is its own checkout under C:\actions-runner\_work,
+  # so release builds never touch anyone's working tree.
+  build-arm:
+    name: Build and test on Windows ARM64
+    needs: prepare
+    runs-on: [self-hosted, Windows, ARM64]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-pc-windows-msvc
+
+      # No Swatinem/rust-cache here: the cargo cache on a self-hosted
+      # runner persists between runs on its own.
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Install dioxus-cli
+        uses: taiki-e/install-action@v2
+        with:
+          tool: dioxus-cli@0.7.10
+
+      # `dx build`, not `cargo build` — see the x64 job above for why.
+      - name: Build release
+        run: dx build --release
+
+      - name: Locate the app binary
+        id: appexe
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path target -Recurse -Filter beamer.exe -ErrorAction SilentlyContinue |
+                 Where-Object { $_.FullName -notmatch '\\(build|incremental)\\' } |
+                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $exe) { throw "dx build produced no beamer.exe" }
+          Write-Host "App binary: $($exe.FullName) $([math]::Round($exe.Length/1MB,1)) MB"
+          "path=$($exe.FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: Verify the manifest and icon were embedded
+        shell: pwsh
+        run: |
+          $exe = "${{ steps.appexe.outputs.path }}"
+          if (-not (Test-Path $exe)) { throw "beamer.exe was not produced" }
+
+          $mt = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter mt.exe -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -match 'x64|arm64' } | Select-Object -First 1
+          if (-not $mt) { Write-Host "::warning::mt.exe not found, skipping manifest extraction"; exit 0 }
+
+          & $mt.FullName -nologo -inputresource:"$exe" -out:extracted.xml
+          $manifest = Get-Content extracted.xml -Raw
+          if ($manifest -notmatch 'asInvoker')    { throw "requestedExecutionLevel asInvoker missing" }
+          if ($manifest -notmatch 'PerMonitorV2') { throw "PerMonitorV2 dpiAwareness missing" }
+          Write-Host "Manifest carries asInvoker and PerMonitorV2."
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: beamer-windows-arm-portable
+          path: ${{ steps.appexe.outputs.path }}
+          if-no-files-found: error
+          retention-days: 14
+
+      # Same self-update contract as the x64 job: flat zip, exe at root,
+      # named with the triple `self_update` matches against.
+      - name: Build self-update archive
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "${{ steps.appexe.outputs.path }}" -DestinationPath beamer-aarch64-pc-windows-msvc.zip
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: beamer-windows-arm-selfupdate
+          path: beamer-aarch64-pc-windows-msvc.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Bundle installer
+        run: dx bundle --release --package-types nsis
+
+      - name: Locate the installer
+        id: installer
+        shell: pwsh
+        run: |
+          $nsis = Get-ChildItem -Recurse -Filter "*-setup.exe" |
+                  Sort-Object Length -Descending | Select-Object -First 1
+          if (-not $nsis) { throw "dx bundle produced no NSIS installer" }
+          Write-Host "Installer: $($nsis.FullName) $([math]::Round($nsis.Length/1MB,1)) MB"
+          "path=$($nsis.FullName)" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: beamer-windows-arm-installer
+          path: ${{ steps.installer.outputs.path }}
+          if-no-files-found: error
+          retention-days: 30
+
   linux:
     name: Test and bundle on Linux
     needs: prepare
@@ -290,7 +391,7 @@ jobs:
   # are there for people installing fresh rather than updating in place.
   release:
     name: Publish GitHub Release
-    needs: [prepare, build, linux]
+    needs: [prepare, build, build-arm, linux]
     if: needs.prepare.outputs.is_release == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -319,5 +420,7 @@ jobs:
             --generate-notes \
             dist/beamer-windows-selfupdate/beamer-x86_64-pc-windows-msvc.zip \
             dist/beamer-windows-installer/*-setup.exe \
+            dist/beamer-windows-arm-selfupdate/beamer-aarch64-pc-windows-msvc.zip \
+            dist/beamer-windows-arm-installer/*-setup.exe \
             dist/beamer-linux-selfupdate/beamer-x86_64-unknown-linux-gnu.zip \
             dist/beamer-linux-deb/*.deb
