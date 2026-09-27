@@ -1,5 +1,24 @@
-// No console window in release builds; also required by `dx bundle`
-// (`/SUBSYSTEM:WINDOWS` links `WinMain`, not `main`).
+//! Beamer: a tray app that turns speech into text in whatever field has focus.
+//!
+//! Start here. Two paths run through the code:
+//!
+//! - **Dictation:** `hotkey` detects the key → `orchestrator::run` starts a
+//!   recording (`audio`) → on release the clip goes to a cloud speech-to-text
+//!   API (`transcription`) → the text is typed into the focused app (`injection`).
+//! - **Notes:** the second hotkey sends the transcript to a sticky note instead
+//!   (`orchestrator::sink` → `notes`, drawn by `ui::sticky*`). `notes::pipeline`
+//!   then asks a local llama.cpp server (`llm`) to propose tasks, which the
+//!   user accepts or dismisses (`ui::tasks_page`).
+//!
+//! Supporting modules: `ui` (Dioxus windows; `ui::app::App` owns the long-lived
+//! coroutines), `config` (TOML settings + vocabulary), `tray`, `update`
+//! (self-update), `components` (installs the local model server on Windows),
+//! and `notes::sync_*` (cross-machine sync). `agent_docs/` has the deep dives.
+//!
+//! This file only does process setup: logging, single instance, autostart,
+//! desktop identity. Then Dioxus takes over the main thread.
+
+// No console window in release builds; also required by `dx bundle`.
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
 mod assets;
@@ -23,33 +42,22 @@ mod warmup;
 
 use anyhow::Result;
 
-/// Windows AppUserModelID: what toasts and the taskbar display as "Beamer".
-/// Must match `identifier` in `Dioxus.toml`, the shortcut property written by
-/// `ui::windows_shortcut::ensure_shortcut`, and the `Toast::new` app id.
-/// Nothing checks this; a mismatch fails silently (toast never appears).
+/// Windows AppUserModelID: how toasts and the taskbar identify Beamer.
+/// Must match `Dioxus.toml`'s `identifier`, `ui::windows_shortcut`, and the
+/// `Toast::new` app id; a mismatch fails silently (toasts never appear).
 #[cfg(target_os = "windows")]
 pub(crate) const WINDOWS_APP_USER_MODEL_ID: &str = "com.beamer.app";
 
-/// Our identity to the desktop: the Wayland `app_id` (pinned by
-/// [`set_gtk_prgname`]), the basename of both `.desktop` files, their
-/// `StartupWMClass`, and the icon name they reference.
-///
-/// Every one of those has to be the same string or Mutter cannot attach an
-/// icon to our windows, and the mismatch fails silently: the window just
-/// gets the generic placeholder. The Windows counterpart is
-/// [`WINDOWS_APP_USER_MODEL_ID`].
+/// Linux desktop identity: the Wayland `app_id`, the `.desktop` basename, its
+/// `StartupWMClass`, and the icon name. All must match, or GNOME silently shows
+/// a generic icon. Windows counterpart: [`WINDOWS_APP_USER_MODEL_ID`].
 #[cfg(not(target_os = "windows"))]
 pub(crate) const APP_ID: &str = "beamer";
 
-/// The executable path as of process launch, cached before anything can
-/// replace the binary underneath us.
+/// The exe path at launch, cached before an update can replace the binary.
 ///
-/// On Linux, `self-replace` renames a new binary over the running one during
-/// an update; the old inode survives (still mapped, still executing) but
-/// loses its last link, so a *fresh* `current_exe()` call after that point
-/// resolves to `<path> (deleted)` via `/proc/self/exe`. `restart_app` must
-/// reuse this cached value instead of re-querying `current_exe()`, or it
-/// tries to spawn that deleted path and silently fails to relaunch.
+/// On Linux a self-update unlinks the running file, so a later `current_exe()`
+/// returns `<path> (deleted)` and `restart_app` would silently fail to relaunch.
 static LAUNCH_EXE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
 fn main() {
@@ -77,9 +85,7 @@ fn main() {
     let config = config::Config::load().unwrap_or_default();
     tracing::info!("Config loaded from {:?}", config::Config::config_path());
 
-    // Must precede any `llm::client::http_client()` use (including the
-    // settings probe). `connect_timeout()` clamps to the minimum so a
-    // hand-edited `0` can't build a client that fails every connection.
+    // Must precede any `llm::client::http_client()` use, settings probe included.
     llm::client::init_http_client(config.llm.connect_timeout());
 
     if config.appearance.auto_start {
@@ -302,14 +308,9 @@ fn set_auto_start_windows(enable: bool) -> Result<()> {
     Ok(())
 }
 
-/// True when the running binary sits inside a cargo/`dx` build directory
-/// rather than an installed location.
-///
-/// Such a path is not a durable target for a `.desktop` `Exec=`: `dx` renames
-/// dev binaries per build (`beamer-f9c230e6`), and `cargo clean` deletes the
-/// tree outright. Writing one into the user's data dir shadows the packaged
-/// entry (user data dir wins in XDG precedence) and pins the dock to a binary
-/// that will not exist tomorrow.
+/// True when running from a cargo/`dx` `target/` dir rather than an install.
+/// Such paths make bad `.desktop` `Exec=` targets: `dx` renames dev binaries
+/// every build and `cargo clean` deletes them.
 #[cfg(not(target_os = "windows"))]
 fn is_dev_build_exe(exe: &std::path::Path) -> bool {
     exe.components().any(|c| c.as_os_str() == "target")
@@ -329,12 +330,8 @@ fn packaged_beamer_on_path() -> Option<std::path::PathBuf> {
         })
 }
 
-/// What an autostart entry should launch.
-///
-/// A dev build prefers the packaged binary: the user asked for autostart, and
-/// honoring that with a path that survives the next rebuild is more useful
-/// than honoring it literally. With no packaged binary the dev path is still
-/// written, because a working-today autostart beats none at all.
+/// What an autostart entry should launch. A dev build points at the installed
+/// binary if there is one, else at itself (working today beats nothing).
 #[cfg(not(target_os = "windows"))]
 fn autostart_exec_path() -> Result<std::path::PathBuf> {
     let exe = std::env::current_exe()?;
@@ -385,19 +382,11 @@ fn set_auto_start_xdg(enable: bool) -> Result<()> {
 
 // Linux desktop integration.
 
-/// Pin GTK's program name to [`APP_ID`], which is what GTK3 hands
-/// Wayland as the toplevel `app_id`.
+/// Pin GTK's program name (and so the Wayland `app_id`) to [`APP_ID`].
 ///
-/// Without this the `app_id` is whatever `argv[0]`'s basename happens to be.
-/// That is `beamer` for a packaged install and matches, but `dx` names its
-/// dev binaries with a build hash (`beamer-f9c230e6`), so every window from a
-/// `dx build`/`dx serve` run announced an `app_id` no `.desktop` file
-/// declares, and GNOME fell back to the generic placeholder icon.
-///
-/// Safe to call before GTK: `gdk_parse_args` only derives a prgname from
-/// `argv[0]` when one is not already set, so setting it first wins. Raw FFI
-/// for the same reason as [`silence_ayatana_deprecation_warning`] below, to
-/// avoid pinning a glib crate version.
+/// Otherwise it's `argv[0]`'s basename, which for `dx` dev builds carries a
+/// build hash (`beamer-f9c230e6`) and gets the generic icon. Must run before
+/// GTK starts. Raw FFI avoids pinning a glib crate version.
 #[cfg(target_os = "linux")]
 fn set_gtk_prgname() {
     use std::os::raw::c_char;
@@ -465,19 +454,11 @@ fn silence_ayatana_deprecation_warning() {
     }
 }
 
-/// Install the icon + `.desktop` file so GNOME's dock matches our windows.
+/// Install the icon + `.desktop` file so GNOME's dock matches our windows
+/// (Wayland ignores window icon hints; Mutter matches `app_id` instead).
 ///
-/// Wayland ignores window-level icon hints; Mutter matches the toplevel
-/// `app_id` against `StartupWMClass` (or the `.desktop` basename). Our
-/// `app_id` is [`APP_ID`], pinned by [`set_gtk_prgname`] rather than
-/// left to the binary's filename, so `beamer` matches either way.
-///
-/// Skipped entirely for a dev build. This entry is the app's own
-/// housekeeping, not something the user asked for, and one written from a
-/// `target/` path shadows the packaged entry for good (the user data dir
-/// wins in XDG precedence) while pointing at a binary `dx` will rename on
-/// the next build. Autostart is handled differently, see
-/// [`autostart_exec_path`]: that one *is* a user gesture.
+/// Skipped for dev builds: an entry pointing into `target/` would shadow the
+/// packaged one (user data dir wins in XDG precedence) and break on rebuild.
 #[cfg(target_os = "linux")]
 fn install_linux_desktop_entry() -> Result<()> {
     let exe_path = std::env::current_exe()?;

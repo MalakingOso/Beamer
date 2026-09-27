@@ -1,10 +1,13 @@
-//! Note types. Nothing here knows about persistence.
+//! The `Note` type and its enums. Plain data; `NoteStore` (`notes/mod.rs`) owns
+//! persistence. `src/bin/task_eval.rs` `#[path]`-includes this file, so it must
+//! stay free of `crate::` paths.
 
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Extraction progress. `Skipped` means deliberately not run;
-/// `Pending` means not run yet.
+/// Extraction progress. `Skipped` means deliberately not run (pass disabled);
+/// `Pending` means not run yet. Persisted and synced, so there is deliberately
+/// no transient `Running` variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StageState {

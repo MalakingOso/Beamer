@@ -1,3 +1,7 @@
+//! Inline SVG icons (Phosphor paths, 256×256 viewBox) for the sidebar, notes
+//! board and sticky notes. Each takes a pixel `size` and optional `class`, and
+//! paints with `currentColor` so CSS sets the color.
+
 use dioxus::prelude::*;
 
 #[derive(Props, Clone, PartialEq)]
@@ -196,8 +200,8 @@ pub fn IconCheck(props: IconProps) -> Element {
     }
 }
 
-/// Phosphor "asterisk". Note-footer's quiet re-run affordance (not a wand/robot:
-/// the pass is ambient, already run by the time you look at the note).
+/// Phosphor "asterisk". The sticky-note footer's re-run button; deliberately
+/// quiet (not a wand/robot) because the pass has usually already run.
 #[component]
 pub fn IconAsterisk(props: IconProps) -> Element {
     let size = props.size.to_string();

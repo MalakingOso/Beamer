@@ -1,7 +1,11 @@
-//! Local model client config. Beamer is a plain HTTP client of the standalone
-//! server (see `deploy/llama-beamer.service`); the connection surface is just
-//! a base URL. Launch settings live in the unit file, per-model settings in
-//! `deploy/llama-models.ini`.
+//! Client for the standalone llama.cpp server that powers task extraction on
+//! the note path (`notes::pipeline` → `extract` → `chat`). Beamer never spawns
+//! the server; its whole connection surface is a base URL. Sampling and
+//! thinking settings live in the server's preset ini, not here. This file holds
+//! `LlmConfig`. See `agent_docs/local_inference.md`.
+//!
+//! No crate-rooted paths anywhere under `src/llm/`: `src/bin/task_eval.rs`
+//! `#[path]`-includes this module and there is no `src/lib.rs`.
 
 pub mod chat;
 pub mod client;
@@ -43,10 +47,9 @@ pub struct ExtractConfig {
     pub enabled: bool,
     #[serde(default = "default_extract_model")]
     pub model: String,
-    /// Overrides `LlmConfig::base_url` for extraction — see
-    /// [`LlmConfig::extract_base_url`]. Allows pointing extraction at a
-    /// different host than the shared default (e.g. a local CPU-only server
-    /// while the shared URL points at a remote GPU box).
+    /// Overrides `LlmConfig::base_url` for extraction (see
+    /// [`LlmConfig::extract_base_url`]), e.g. a local CPU server while the
+    /// shared URL points at a remote GPU box.
     #[serde(default)]
     pub base_url: Option<String>,
     /// Below this, a suggestion is not shown at all. Extraction is a precision
@@ -60,12 +63,10 @@ fn default_base_url() -> String { "http://127.0.0.1:8080".into() }
 fn default_timeout_ms() -> u64 { 60_000 }
 fn default_connect_timeout_ms() -> u64 { 5_000 }
 
-/// Only a bundled aarch64 Windows build ever has a server that can serve
-/// K2-Horizon (its llama.cpp fork build exists for that arch only —
-/// `crate::components` installs the runtime and model there). Every
-/// other target — x86_64 Windows, Linux/callisto — has upstream llama.cpp,
-/// which cannot load `K2HorizonForCausalLM` at all, so a fresh config there
-/// must default back to what it always defaulted to.
+/// K2-Horizon on aarch64 only: its llama.cpp fork is built for that arch
+/// alone, and `components` installs it there. Every other target (x86_64
+/// Windows, Linux/callisto) runs upstream llama.cpp, which cannot load
+/// `K2HorizonForCausalLM`, so it defaults to Gemma.
 #[cfg(target_arch = "aarch64")]
 fn default_extract_model() -> String { "K2-Horizon-0.9B-Q8_0".into() }
 #[cfg(not(target_arch = "aarch64"))]
@@ -81,11 +82,9 @@ impl LlmConfig {
         Duration::from_millis(self.connect_timeout_ms.max(MIN_CONNECT_TIMEOUT_MS))
     }
 
-    /// The server to send extraction requests to: `extract.base_url` if set
-    /// and non-blank, otherwise the shared `base_url`. Kept as a fallback so
-    /// an existing single-`base_url` config still routes the way it always
-    /// has. A blank override (an empty string, e.g. a hand-edited `base_url =
-    /// ""`) is treated the same as absent rather than as a literal empty host.
+    /// The server for extraction requests: `extract.base_url` if set and
+    /// non-blank, otherwise the shared `base_url` (so old single-URL configs
+    /// still route). A blank override counts as absent, not an empty host.
     pub fn extract_base_url(&self) -> &str {
         match self.extract.base_url.as_deref() {
             Some(url) if !url.trim().is_empty() => url,
@@ -93,11 +92,9 @@ impl LlmConfig {
         }
     }
 
-    /// Whether the extraction pass is wanted right now. Both switches, because
-    /// `enabled` is a master gate over `extract.enabled`, not an alternative
-    /// to it — a caller that checks only one of them reports the wrong answer
-    /// for half the combinations. Lives here rather than at the call sites so
-    /// the pipeline's mid-flight re-check cannot drift from the footer.
+    /// Whether the extraction pass is wanted right now. `enabled` is a master
+    /// gate over `extract.enabled`, so both must be checked. Centralized so the
+    /// pipeline's mid-flight re-check cannot drift from the footer.
     pub fn extract_wanted(&self) -> bool {
         self.enabled && self.extract.enabled
     }
@@ -243,9 +240,7 @@ mod tests {
     #[test]
     fn the_extraction_model_defaults_to_the_file_the_deploy_preset_serves() {
         let cfg = LlmConfig::default();
-        // Only a bundled aarch64 build ever has a server that can serve
-        // K2-Horizon (see `default_extract_model`'s doc comment); every
-        // other target defaults back to Gemma.
+        // K2-Horizon on aarch64, Gemma elsewhere; see `default_extract_model`.
         #[cfg(target_arch = "aarch64")]
         assert_eq!(cfg.extract.model, "K2-Horizon-0.9B-Q8_0");
         #[cfg(not(target_arch = "aarch64"))]

@@ -1,7 +1,7 @@
-//! One-time seed off the old JSON-only storage. Runs only when no `notes.automerge`
-//! exists yet: lifts `pos`/`size`/`open` into `machine.json`, then seeds a fresh
-//! document. Unknown keys (including the removed `attachments` array) are
-//! ignored by `Note`'s own deserialize, so pre-removal files load as-is.
+//! One-time seed off the old JSON-only storage, called from `NoteStore::load_from`
+//! only when no `notes.automerge` exists yet: lifts `pos`/`size`/`open` into
+//! `machine.json`, then seeds a fresh document. Unknown keys (including the
+//! removed `attachments` array) are ignored by `Note`'s own deserialize.
 
 use std::path::PathBuf;
 

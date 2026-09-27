@@ -1,4 +1,5 @@
-//! Authoritative replica of `notes.automerge`, served on loopback only and
+//! The sync server: the authoritative replica of `notes.automerge` that every
+//! machine's `notes::sync_client` converges with. Served on loopback only and
 //! reached over the tailnet via `tailscale serve`'s `/sync` proxy. One shared
 //! document plus one `automerge::sync::State` per connection.
 //!
@@ -42,9 +43,9 @@ fn notes_document_path(config_dir: &Path) -> PathBuf {
     config_dir.join("sync").join("notes.automerge")
 }
 
-/// Deliberately not the app's own config dir: sharing one `notes.automerge`
-/// between this server and a local Beamer install invites a rename race on
-/// save. Opt into sharing explicitly with `--config-dir`.
+/// `BeamerSyncServer`, deliberately not the app's own `Beamer` dir: a flagless
+/// run on a machine that also runs Beamer would otherwise silently share its
+/// `notes.automerge`. Opt into sharing explicitly with `--config-dir`.
 fn default_config_dir() -> PathBuf {
     let base = dirs::config_dir().expect("Could not determine config directory");
     base.join("BeamerSyncServer")

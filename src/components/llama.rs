@@ -1,9 +1,8 @@
-//! The local extraction server's lifecycle: stop, register, start. The
-//! reconciler (`apply`) is the only caller, and nothing else in the app may
-//! touch server lifecycle (see `agent_docs/local_inference.md`). Beamer
-//! never spawns `llama-server.exe` itself; it only asks Task Scheduler to run
-//! (or end) the task. Off Windows every call is a no-op (the catalog there is
-//! empty, so none are reached).
+//! The local extraction server's lifecycle: stop, register, start, via Task
+//! Scheduler. `apply` is the only caller, and nothing else in the app may
+//! touch server lifecycle (see `agent_docs/local_inference.md`). Beamer never
+//! spawns `llama-server.exe` itself. The calls compile to no-ops off Windows
+//! and are only reached on Windows ARM64, where the catalog is non-empty.
 
 use std::path::Path;
 
@@ -14,17 +13,13 @@ use anyhow::Result;
 /// constant), so change both together.
 pub const TASK_NAME: &str = "Beamer K2-Horizon Server";
 
-/// The task definition, ported from the XML `hooks.nsh` used to write. XML
-/// rather than `schtasks /tr "..."`: `Command` and `Arguments` are separate
-/// elements, so the launcher path needs no nested quoting. UTF-16LE with a
-/// BOM: `schtasks /xml` refuses anything else ("unable to switch the
-/// encoding"), even well-formed ASCII.
+/// The Scheduled Task definition XML. XML rather than `schtasks /tr "..."` so
+/// the launcher path needs no nested quoting. UTF-16LE with a BOM:
+/// `schtasks /xml` refuses anything else ("unable to switch the encoding").
 ///
-/// The logon trigger and the principal both name `user`. A bare
-/// `<LogonTrigger>` means "at logon of *any* user", which only an admin may
-/// register: Beamer runs unelevated, and `schtasks /create` refuses it with
-/// "Access is denied" (the old installer hook got away with it only when run
-/// elevated). Scoped to the current user, it registers and overwrites fine.
+/// The logon trigger and principal both name `user`. A bare `<LogonTrigger>`
+/// means "any user", which only an admin may register; unelevated Beamer
+/// would get "Access is denied".
 pub fn task_xml(launcher: &Path, user: &str) -> Vec<u8> {
     let launcher = xml_escape(&launcher.to_string_lossy());
     let user = xml_escape(user);
@@ -82,9 +77,8 @@ fn xml_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// End the task and kill any `llama-server.exe` (its files are locked while
-/// it runs). Failures are expected and ignored: usually nothing is running.
-/// Kills every `llama-server.exe`, as the installer always did.
+/// End the task and kill every `llama-server.exe` (its files are locked while
+/// it runs). Failures are ignored: usually nothing is running.
 pub fn stop_server() {
     #[cfg(target_os = "windows")]
     {

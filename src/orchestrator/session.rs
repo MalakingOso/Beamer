@@ -1,4 +1,5 @@
-//! Helpers for one recording session's shutdown sequence.
+//! Helpers for the end of a recording session: why capture stopped, and the
+//! short tail capture that keeps the last word from being clipped.
 
 use tokio::sync::mpsc;
 
@@ -15,9 +16,8 @@ pub(super) enum StopReason {
 /// isn't clipped off the end of the transcript.
 pub(super) const TAIL_CAPTURE_MS: u64 = 400;
 
-/// Batch equivalent of capturing trailing audio: collect it into `buffer`.
-/// Breaks early if the channel closes instead of spinning on a `recv()` that
-/// returns `None` at once.
+/// Keep appending chunks to `buffer` for `TAIL_CAPTURE_MS`. Breaks early if
+/// the channel closes instead of spinning on a `recv()` that returns `None` at once.
 pub(super) async fn buffer_tail_audio(
     audio_rx: &mut mpsc::Receiver<Vec<u8>>,
     buffer: &mut Vec<u8>,

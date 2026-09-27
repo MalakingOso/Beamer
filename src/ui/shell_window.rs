@@ -1,12 +1,14 @@
 #![cfg(target_os = "linux")]
 
-//! Client for the GNOME Shell extension's window placement. Wayland gives a
-//! client no position control (`outer_position()` returns a cached `(0, 0)`),
-//! so the in-shell extension moves windows over D-Bus; missing methods degrade
-//! to a no-op landing wherever Mutter chose. ⚠️ `PlaceWindow` returning `true`
-//! doesn't mean the window stayed put — Mutter's own initial placement lands
-//! later and clobbers early calls — so the loop re-reads the frame after a
-//! settle delay and only believes a placement that survives it.
+//! Linux: asks the GNOME extension to move a sticky note's window over D-Bus
+//! (`PlaceWindow`), because a Wayland client has no position control
+//! (`outer_position()` returns a cached `(0, 0)`). Called by `sticky_windows`
+//! once per opened note; a missing helper leaves it wherever Mutter chose.
+//!
+//! Warning: `PlaceWindow` returning `true` does not mean the window stayed put.
+//! Mutter's own initial placement lands later and silently clobbers early
+//! calls, so only a `GetWindowFrame` read after `SETTLE` counts as success.
+//! See `agent_docs/sticky_notes.md` ("The clobber").
 
 use std::time::Duration;
 
@@ -34,8 +36,8 @@ fn retry_delays() -> &'static [Duration] {
     &RETRY_DELAYS
 }
 
-/// How long a placement must survive to be believed. Mutter clobbers settled
-/// positions, so a frame read taken too early can match and then be overwritten.
+/// How long after the first attempt before a frame read is believed. A read
+/// taken earlier can match and then be overwritten by Mutter's initial placement.
 const SETTLE: Duration = Duration::from_millis(500);
 
 /// Slack between asked and observed position (guards rounding loops).

@@ -1,13 +1,17 @@
+//! Settings → Dictation → Recording: the dictation hotkey and mode, pause-media,
+//! and the note-capture hotkey and mode (the second hotkey that sends speech to
+//! a sticky note). Hotkey strings are read by `src/hotkey/`.
+
 use dioxus::prelude::*;
 
 use crate::ui::components::Toggle;
 use crate::ui::settings::hotkey_picker::{CaptureModeRadio, HotkeyPicker};
 use crate::ui::settings::layout::SubSection;
 
-/// Chord proposed when note capture is switched on. Not the serde default
-/// (which stays empty so no chord is stolen by a config file appearing).
-/// Ctrl+Alt+Space, not Ctrl+Super+Space: dictation's `Ctrl+Super` is a prefix
-/// of the latter and would fire first (see `hotkey::matching_binding`).
+/// Chord proposed when note capture is switched on. The serde default stays
+/// empty so a fresh config file steals no chord. Not Ctrl+Super+Space:
+/// dictation's `Ctrl+Super` is its prefix and would fire first
+/// (see `hotkey::matching_binding`).
 const DEFAULT_NOTE_HOTKEY: &str = "Ctrl+Alt+Space";
 
 #[derive(Props, Clone, PartialEq)]

@@ -1,5 +1,7 @@
-//! One-shot warmup of cold-start subsystems (keyring, audio, network) so the
-//! first recording starts without a stall. Best-effort: failures are logged.
+//! One-shot warmup of cold-start subsystems (keyring, audio, MPRIS on Linux,
+//! network) so the first recording starts without a stall. Run once at launch
+//! behind the splash (`ui::app_splash`), which shows `WarmupProgress`.
+//! Best-effort: failures are logged and never block startup.
 
 use dioxus::prelude::*;
 
@@ -29,8 +31,7 @@ impl Default for WarmupProgress {
     }
 }
 
-/// Run each warmup step sequentially, updating `progress`. Best-effort: any
-/// failure is logged and ignored — warmup must never block startup.
+/// Run each warmup step in order, updating `progress` as it goes.
 pub async fn warm_all(mut progress: Signal<WarmupProgress>) {
 
     progress.set(WarmupProgress {

@@ -3,16 +3,16 @@
 //! Focused-window lookup via the Beamer GNOME Shell extension.
 //!
 //! GNOME Wayland hides focused-window metadata from clients, so the extension
-//! exports `app.beamer.FocusProvider.GetFocusedAppId()` over D-Bus. This
-//! module is the client side, plus the cached session-bus connection shared
-//! by all helper calls (`TypeText`/`GetVersion`/`SendPasteChord`).
+//! exports `app.beamer.FocusProvider.GetFocusedAppId()` over D-Bus. The app id
+//! picks the clipboard paste chord (terminals get Ctrl+Shift+V) and tells
+//! dispatch when the target is Beamer itself. Also owns the cached session-bus
+//! connection shared by all helper calls (`TypeText`/`GetVersion`/`SendPasteChord`).
 
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
-/// Cached session-bus connection for all helper D-Bus calls. Built once and
-/// cloned after (zbus handles are cheap `Arc`s; cloning skips the handshake).
-/// `Mutex<Option<_>>` (not `OnceLock`) so a dead connection can be replaced.
+/// Cached session-bus connection for all helper calls (clones are cheap `Arc`s).
+/// `Mutex<Option<_>>`, not `OnceLock`, so a dead connection can be replaced.
 /// Separate from the shell indicator's cache (different thread/timeout needs).
 static CONN: Mutex<Option<zbus::blocking::Connection>> = Mutex::new(None);
 
@@ -50,17 +50,12 @@ fn is_connection_dead(err: &zbus::Error) -> bool {
     )
 }
 
-/// Run a D-Bus call with a per-call timeout. zbus bakes its timeout into the
-/// connection at build time, so it can't vary across calls sharing this cached
-/// connection (100 ms focus poll vs. multi-second `TypeText`). A timed-out call
-/// is abandoned; its late result is discarded.
+/// Run a D-Bus call with a per-call timeout. zbus fixes the timeout per
+/// connection, and this shared one serves both a 100 ms focus poll and a
+/// multi-second `TypeText`. A timed-out call is abandoned, result discarded.
 ///
-/// Known cost: the worker thread stays parked inside the blocking zbus call
-/// until it returns, so each timeout leaks one thread until the call itself
-/// finishes. Timeouts are rare (a wedged helper, not steady state) and every
-/// call site bounds its wait, so accumulation is self-limiting; killing the
-/// thread is unsound and an async rewrite of this module is not worth it
-/// for that bound.
+/// Cost: its thread stays parked in the blocking call until that returns.
+/// Timeouts are rare (a wedged helper), so this is accepted over an async rewrite.
 fn with_timeout<T, F>(timeout_ms: u64, call: F) -> Result<T, zbus::Error>
 where
     T: Send + 'static,

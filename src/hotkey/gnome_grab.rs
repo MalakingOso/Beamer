@@ -1,20 +1,12 @@
-//! Desktop-level hotkey through the GNOME Shell extension (v7).
+//! Desktop-level hotkey grab through the GNOME Shell extension (v7), alongside
+//! evdev. RDP input is injected inside Mutter and never reaches `/dev/input`, so
+//! the extension grabs the chords (consuming them, like `ll_hook.rs`) and
+//! re-emits press/release as D-Bus signals. Absent or pre-v7 helper: evdev only.
 //!
-//! The evdev listener reads `/dev/input`, and gnome-remote-desktop injects RDP
-//! input inside Mutter through virtual devices that never appear there, so a
-//! remoted-in user's chord never reaches evdev. The extension grabs the chord
-//! with `Meta.Display.grab_accelerator` and re-emits press and release as
-//! D-Bus signals. The grab consumes the chord, the same way `ll_hook.rs`
-//! swallows it on Windows.
-//!
-//! Two threads, both on one session-bus connection: a worker that pushes the
-//! chords (`SetHotkeys`), and a listener for the extension's signals. The
-//! connection is never rebuilt, because the extension ties the grabs to the
-//! caller's bus name and drops them when it vanishes. A new connection would
-//! silently lose them.
-//!
-//! Absent or pre-v7 helper: nothing is owned and evdev behaves exactly as it
-//! always has.
+//! A worker pushes chords (`SetHotkeys`) and a listener routes signals, both on
+//! one connection that is never rebuilt: the extension drops the grabs when the
+//! caller's bus name vanishes, so a new connection would silently lose them.
+//! See `agent_docs/text_injection.md` for the Mutter-side release quirks.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};

@@ -1,3 +1,11 @@
+//! Text injection: types the finished transcript into whatever field has focus.
+//! `inject_text` runs a configurable chain of backends on a `spawn_blocking`
+//! thread; the first that succeeds wins.
+//!
+//! Default order — Windows: SendInput → clipboard → UIA; Linux: gnome → wtype →
+//! ydotool → clipboard. Last step of the dictation path: hotkey → orchestrator →
+//! audio → transcription → **injection**. See `agent_docs/text_injection.md`.
+
 pub mod clipboard;
 
 #[cfg(target_os = "windows")]
@@ -247,11 +255,9 @@ pub async fn inject_text(text: &str, backends: &[String], paste_shortcut: &str) 
     tokio::task::spawn_blocking(move || inject_text_blocking(&text, &backends, &paste_shortcut)).await?
 }
 
-/// Serializes concurrent injections. The GNOME helper refuses a second
-/// `TypeText` while one is in flight, and without this lock the chain would
-/// immediately fall through to the next backend while the first text is still
-/// typing — interleaving two dictations. Held across blocking work, so a
-/// plain `std` mutex (poison-tolerant), never an async one.
+/// Serializes injections. The GNOME helper refuses a second `TypeText` mid-flight,
+/// so without this the chain would fall through and interleave two dictations.
+/// Held across blocking work: a `std` mutex, never an async one.
 static DISPATCH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Keystroke-synthesis backends: fast synthetic key events, which our own
@@ -287,12 +293,9 @@ fn inject_text_blocking(text: &str, backend_names: &[String], paste_shortcut: &s
     let all = all_backends(paste_shortcut);
     let mut errors = Vec::new();
 
-    // Our own windows are webviews with controlled textareas: every keystroke
-    // round-trips JS→Rust→JS through the IPC bridge, so synthetic typing at
-    // hundreds of chars/s overwrites text still in flight and drops
-    // characters (other apps keep up fine). Skip keystroke synthesis and let
-    // the atomic clipboard paste carry it in one input event instead. The
-    // focus lookup is skipped entirely for clipboard-only chains.
+    // Our own webview textareas round-trip every keystroke JS→Rust→JS, so fast
+    // synthetic typing drops characters there. Skip keystroke backends and let
+    // the atomic clipboard paste land it. Clipboard-only chains skip the lookup.
     let self_target =
         backend_names.iter().any(|n| is_keystroke_backend(n)) && foreground_is_self();
     if self_target {

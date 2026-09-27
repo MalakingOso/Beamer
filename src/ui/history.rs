@@ -1,3 +1,7 @@
+//! Dictation history: every transcript, persisted as `history.json` in the
+//! config dir. The orchestrator appends after each injection attempt; the
+//! History page and Home's "Recent" card render it.
+
 use anyhow::Result;
 use chrono::{DateTime, Local, NaiveDate};
 use serde::{Deserialize, Serialize};
@@ -12,7 +16,8 @@ pub struct HistoryEntry {
     pub text: String,
 }
 
-/// Append-only transcription log, loaded on startup and appended after each injection.
+/// Transcript log, loaded on startup and appended after each injection. Capped
+/// at `MAX_ENTRIES`, oldest dropped first.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TranscriptionHistory {
     pub entries: Vec<HistoryEntry>,
@@ -70,8 +75,8 @@ impl TranscriptionHistory {
         }
     }
 
-    /// Persist atomically via a sibling temp file + rename, so a crash mid-write
-    /// leaves the previous history intact rather than a half-written file.
+    /// Persist atomically (temp file + rename), so a crash mid-write leaves the
+    /// previous history intact.
     pub fn save(&self) -> Result<()> {
         let dir = Config::config_dir();
         std::fs::create_dir_all(&dir)?;
@@ -102,8 +107,8 @@ impl TranscriptionHistory {
         self.entries.iter().rev().take(n).collect()
     }
 
-    /// Groups entries by calendar day, cloning so the result is independent of
-    /// `self` (suitable for caching in a `use_memo`).
+    /// Entries grouped by local calendar day, newest day first, labelled
+    /// "Today"/"Yesterday"/date. Clones so the result can live in a `use_memo`.
     pub fn grouped_by_day(&self) -> Vec<(String, Vec<HistoryEntry>)> {
         let today = Local::now().date_naive();
         let yesterday = today.pred_opt().unwrap_or(today);

@@ -1,3 +1,9 @@
+//! Settings page: four `SettingsGroup`s (Dictation, Intelligence, Sync &
+//! Updates, System), one file per card. Most cards take values and callbacks;
+//! this file owns the config handlers, and every change persists at once via
+//! `save_config` (API keys go to the OS keyring instead). Signals arrive as
+//! props from `App`; see `agent_docs/dioxus_architecture.md`.
+
 pub mod api_keys_card;
 pub mod appearance_card;
 pub mod debug_card;
@@ -43,11 +49,8 @@ pub struct SettingsPageProps {
     pub components: crate::components::Components,
 }
 
-/// Apply a mutation to the config signal, then synchronously persist it.
-///
-/// This mirrors the `config.write().<field> = v; config.read().save();`
-/// pattern repeated across the handlers below. The save stays synchronous
-/// (no spawn/async deferral) so a write is never lost on quit.
+/// Apply a mutation to the config signal, then persist it synchronously so a
+/// write is never lost on quit.
 fn save_config(mut config: Signal<Config>, mutate: impl FnOnce(&mut Config)) {
     mutate(&mut config.write());
     // A failed save must surface: silently keeping the in-memory value while
@@ -112,10 +115,8 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
             ApiKeysCard {
                 elevenlabs_key: elevenlabs_key.read().clone(),
                 on_elevenlabs_change: move |key: String| {
-                    // Saved immediately, like every other field on this page. A
-                    // key typed in and left there used to vanish on close with
-                    // no warning, since nothing else on the page hinted that
-                    // this one field needed a separate save.
+                    // Saved immediately like every other field: nothing hints at
+                    // a separate save, so deferring one silently loses keys on close.
                     crate::config::save_api_key("elevenlabs_api_key", &key);
                     elevenlabs_key.set(key);
                 },

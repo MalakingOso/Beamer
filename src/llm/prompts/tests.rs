@@ -1,32 +1,20 @@
-//! Tests for [`super`].
-//!
-//! Split into their own file so `prompts.rs` keeps room under the project's
-//! 500-line limit for the prompts themselves, which are the part that has to be
-//! read while working. Nothing changed in the move — the same suite, dedented
-//! one level.
-//!
-//! ⚠️ Same module rule as the parent: **no crate-rooted paths here.**
-//! `src/bin/task_eval.rs` `#[path]`-includes `llm/mod.rs`, and there is no
-//! `src/lib.rs` for a `crate::` path to resolve against.
+//! Tests for [`super`]: they pin the prompt phrases the parser and the
+//! precision policy depend on. A separate file keeps `prompts.rs` under the
+//! 500-line limit. Same rule as the parent: no crate-rooted paths here.
 
 use super::*;
 
 
-/// Every category the policy suppresses, in the spec's own words. Written
-/// out longhand: the point is to fail if one is dropped during an edit,
-/// and a test that iterated over the prompt's own bullets would not.
-/// The prompt for a fixed day, so the shape assertions below read one string
-/// and not a moving target. Every one of them is about text that does not
-/// depend on the date.
+/// The prompt for a fixed day, so the shape assertions below read one string.
+/// None of them depend on the date.
 fn extract_prompt() -> String {
     extract_system(chrono::NaiveDate::from_ymd_opt(2026, 8, 23).unwrap())
 }
 
 #[test]
 fn the_extraction_prompt_names_every_negative_category() {
-    // v5a gates on an explicit "category" enum (see `scan` in the prompt)
-    // rather than the bullet-list headers v2 used — naming each value here is
-    // what suppresses it, same as before.
+    // Naming a category value is what suppresses it. Written out longhand so
+    // dropping one in an edit fails; iterating the prompt's own list would not.
     for category in [
         "past",
         "someone_else",
@@ -45,21 +33,18 @@ fn the_extraction_prompt_names_every_negative_category() {
 
 #[test]
 fn the_extraction_prompt_gates_tasks_on_speaker_and_category_together() {
-    // The compliance gap `HANDOFF.md` documents (a clause's own scan row
-    // saying "someone_else" and it still leaking into `tasks` anyway) is a
-    // model-behavior problem this rule can't fully close by itself — but the
-    // rule still has to be stated, or there is nothing pushing back on it.
+    // The model sometimes leaks a clause its own scan marked "someone_else"
+    // into `tasks` (see `agent_docs/local_inference.md`). This rule can't close
+    // that alone, but without it nothing pushes back at all.
     let prompt = extract_prompt();
     assert!(prompt.contains(r#""subject_is_speaker": true AND "category": "task""#));
 }
 
 #[test]
 fn the_extraction_prompt_carries_at_least_two_hard_negative_exemplars() {
-    // Positive-only exemplars teach the model that output is always
-    // expected, which is the same over-triggering failure the negative
-    // categories exist to prevent. v5a's examples are `"scan": [...], "tasks": []`
-    // rather than v2's bare `{"tasks": []}`, so the brace is dropped from the
-    // match.
+    // Positive-only exemplars teach the model that output is always expected,
+    // the same over-triggering the negative categories exist to prevent. No
+    // leading brace in the match: exemplars put `"scan"` before `"tasks"`.
     let empty_answers = extract_prompt().matches(r#""tasks": []"#).count();
     assert!(
         empty_answers >= 2,
@@ -77,13 +62,9 @@ fn the_extraction_prompt_demands_verbatim_evidence() {
 
 #[test]
 fn the_extraction_prompt_tells_the_model_not_to_tidy_up_the_quote() {
-    // "Verbatim" alone was not enough in practice: a model will still
-    // silently capitalize a name or drop a filler word while "quoting" it,
-    // which is exactly the kind of edit that fails the grounding check.
-    // This bullet names the failure directly instead of trusting "verbatim"
-    // to rule it out on its own. v5a's worked examples are all filler-free
-    // (unlike v2's dedicated "um so i guess..." exemplar), so only the
-    // instruction text is pinned here, not a worked demonstration of it.
+    // "Verbatim" alone was not enough: a model still capitalizes a name or
+    // drops a filler word while "quoting", which fails the grounding check.
+    // The exemplars are filler-free, so only the instruction text is pinned.
     let prompt = extract_prompt();
     assert!(prompt.contains("copy-paste, not a transcription"));
     assert!(prompt.contains(r#"Preserve filler words ("um", "uh")"#));

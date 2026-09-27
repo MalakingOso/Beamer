@@ -1,3 +1,6 @@
+//! Start/stop beeps for a dictation, played by the orchestrator. Playback runs
+//! on a dedicated output thread, so callers never wait on the audio device.
+
 use std::io::Cursor;
 use std::sync::mpsc::{self, Sender};
 use std::sync::OnceLock;
@@ -18,11 +21,9 @@ pub fn play_stop_sound() {
     play(END_SOUND);
 }
 
-/// Pre-start the audio thread during warmup. On Windows this also opens the
-/// output device up front, so first playback pays no WASAPI activation
-/// cost; elsewhere device activation happens lazily on first `play`, off
-/// the caller's thread either way. Idempotent; `play` also starts it
-/// lazily.
+/// Pre-start the audio thread during warmup; on Windows this also opens the
+/// output device, so the first beep pays no WASAPI activation cost.
+/// Idempotent; `play` starts the thread lazily anyway.
 pub fn warm() {
     channel();
 }
@@ -41,20 +42,12 @@ fn channel() -> &'static Sender<&'static [u8]> {
     CHANNEL.get_or_init(spawn_audio_thread)
 }
 
-/// Dedicated thread that owns the `rodio` output device and plays beeps as
-/// they arrive on the channel.
+/// Spawn the thread that owns the `rodio` output and plays beeps as they arrive.
 ///
-/// On Windows, WASAPI device activation is expensive, so one
-/// `rodio::OutputStream` is opened here and held for the process lifetime,
-/// paying that cost once instead of per beep. `OutputStream` is not `Send`
-/// and must live on the thread that created it.
-///
-/// On other platforms, device activation is cheap, and holding a `cpal`
-/// output stream open while idle (no `Sink` ever attached, for hours at a
-/// time) produced audible intermittent hiss on some PipeWire/ALSA setups —
-/// an idle stream still occupies the device, and it can glitch on
-/// underrun. So there, the stream is opened fresh per beep and dropped as
-/// soon as playback finishes.
+/// Windows: WASAPI activation is expensive, so one `OutputStream` is held for
+/// the process lifetime (it is not `Send`, so it lives on this thread).
+/// Elsewhere: a stream is opened per beep and dropped after it, because an idle
+/// open stream caused audible hiss on some PipeWire/ALSA setups.
 fn spawn_audio_thread() -> Sender<&'static [u8]> {
     let (tx, rx) = mpsc::channel::<&'static [u8]>();
     std::thread::spawn(move || {

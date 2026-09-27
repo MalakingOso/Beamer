@@ -1,5 +1,7 @@
-//! Recording-pill window hook for `App`. Runs once from `App()`'s render body.
-//! Linux uses an AppIndicator tray-icon swap instead (see `linux_integration.rs`).
+//! The Windows/macOS recording pill window. Created hidden at startup as its own
+//! `VirtualDom`, then driven by JS calls (`beamerSetState`, `beamerSetLevel`)
+//! rather than shared Dioxus state. Component, CSS and JS live in `pill.rs`.
+//! Linux shows the GNOME extension's pill instead (see `linux_integration.rs`).
 
 #[cfg(not(target_os = "linux"))]
 use dioxus::desktop::tao::dpi::{PhysicalPosition, PhysicalSize};
@@ -21,8 +23,9 @@ use crate::ui::pill::{
     RecordingPill, PILL_CSS, PILL_INK_BOTTOM, PILL_JS, PILL_WINDOW_H, PILL_WINDOW_W,
 };
 
-// Recording pill: small, transparent, click-through, always-on-top. Linux uses
-// an AppIndicator tray-icon swap instead (see `linux_integration.rs`).
+/// Create the pill window (small, transparent, click-through, always-on-top)
+/// and drive it from recording state, capture mode and mic level. A hook: call
+/// once from `App()`.
 #[cfg(not(target_os = "linux"))]
 pub(super) fn setup_recording_pill(
     window: DesktopContext,

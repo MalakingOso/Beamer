@@ -61,7 +61,12 @@ fn note_bodies(store: &NoteStore) -> Vec<String> {
     store.notes.iter().map(|n| n.body.clone()).collect()
 }
 
-/// defeats it, which the guard below says out loud rather than passing.
+/// A document that exists but cannot be read must never be written over.
+/// Not a parse failure, so nothing is quarantined; a store that came up empty
+/// would save a one-note document over the whole corpus, with no `.corrupt` copy.
+///
+/// Unix only: mode 000 gives a real `fs::read` error on a path that exists.
+/// Running as root defeats it, which the guard below says out loud rather than passing.
 #[cfg(unix)]
 #[test]
 fn an_unreadable_document_is_never_written_over() {
@@ -195,10 +200,9 @@ fn a_fresh_install_that_has_already_saved_still_sees_an_incoming_corpus() {
     a.notes.create("and a second note".into(), NoteColor::Teal, NoteOrigin::Dictated);
     a.flush();
 
-    // A fresh install with nothing to seed. It writes one note of its own and
-    // therefore a document of its own, which is all it takes: before the
-    // genesis change existed, that document created its own root maps, and
-    // the merge below then dropped whichever side's maps lost the coin flip.
+    // A fresh install with nothing to seed writes a document of its own.
+    // Without the shared genesis change it would hold its own root maps, and
+    // the merge below would drop one side's whole corpus.
     let mut b = Machine::open(&b_dir);
     b.notes.create("made on the laptop first".into(), NoteColor::Amber, NoteOrigin::Dictated);
     b.flush();
@@ -277,13 +281,13 @@ fn two_documents_seeded_independently_both_keep_their_notes_after_a_merge() {
     assert!(bodies.iter().any(|x| x == "only on the laptop"), "the laptop's note: {bodies:?}");
 }
 
-/// Rewrite `src/notes/genesis.automerge`. Ignored, because it is a code
-/// generator rather than a check: run it by hand after an automerge upgrade
-/// that `the_genesis_document_still_has_the_object_ids_everything_depends_on`
-/// has failed on, then commit the new bytes.
+/// Rewrite `src/notes/genesis.automerge`. Ignored: a code generator, not a
+/// check. Run it by hand after an automerge upgrade that
+/// `the_genesis_document_still_has_the_object_ids_everything_depends_on`
+/// fails on, then commit the new bytes.
 ///
 /// ```text
-/// cargo test notes::sync_tests::regenerate_the_genesis_document -- --ignored
+/// cargo test notes::sync_recovery_tests::regenerate_the_genesis_document -- --ignored
 /// ```
 #[test]
 #[ignore]
@@ -326,16 +330,12 @@ fn an_unreadable_document_does_not_take_the_other_files_with_it() {
     assert!(std::fs::read_to_string(dir.join("machine.json")).unwrap().contains(&id));
 }
 
-/// Critical 1: a document save that fails on one tick must be retried on the
-/// next, even when nothing new gets reconciled in between.
+/// A document save that fails on one tick must be retried on the next, even
+/// with nothing new reconciled in between. The trap: `notes.json` saves fine
+/// and looks healthy, but is never read back once the document exists, so a
+/// save that quietly stops retrying loses the edit for good.
 ///
-/// Portable, the same trick as the test above: pre-creating the exact path
-/// `SyncDoc::save` would write its temp file to, as a directory, makes that
-/// one write fail on every platform without touching permissions.
-/// `notes.json` is a different filename and lands fine, which is exactly the
-/// trap this reproduces: the mirror looks healthy, and it is never read back
-/// once the document exists, so a document save that quietly stops being
-/// retried loses the edit for good.
+/// A directory at `SyncDoc::save`'s temp path fails that one write on every platform.
 #[test]
 fn a_document_save_that_fails_is_retried_on_the_next_clean_tick() {
     let dir = temp_dir("retry_after_failed_save");

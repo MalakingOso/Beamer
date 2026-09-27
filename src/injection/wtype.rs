@@ -1,8 +1,8 @@
 #![cfg(not(target_os = "windows"))]
 
-//! Typing via `wtype` (`zwp_virtual_keyboard_v1`). Works on wlroots-family
-//! compositors plus COSMIC with zero setup. GNOME/KDE refuse the protocol,
-//! which the availability probe detects so this backend falls through there.
+//! Typing via `wtype` (`zwp_virtual_keyboard_v1`), second in the Linux chain.
+//! Works on wlroots-family compositors plus COSMIC with zero setup. GNOME/KDE
+//! refuse the protocol, which the availability probe detects so it falls through.
 
 use super::{InjectionBackend, InjectionResult};
 use anyhow::Result;

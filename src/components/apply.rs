@@ -1,7 +1,7 @@
-//! Applying one fully staged group. One blocking call covers stop → swap →
-//! write → register → start → record, so a cancelled or dropped Dioxus task
-//! can never strand the server stopped mid-swap: `spawn_blocking` work runs
-//! to completion whatever happens to the future awaiting it.
+//! Applying one fully staged group, the last step of `reconcile`. One blocking
+//! call covers stop → swap → write → register → start → record, so a
+//! cancelled Dioxus task can never strand the server stopped mid-swap:
+//! `spawn_blocking` work runs to completion whatever happens to its awaiter.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

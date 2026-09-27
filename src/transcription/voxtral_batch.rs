@@ -1,3 +1,11 @@
+//! Mistral Voxtral batch backend. Uploads the recording as WAV (language is
+//! auto-detected), then, if the user has vocabulary, runs the transcript
+//! through a chat-completions correction pass, since this endpoint takes no
+//! keyterms. Same retry policy as `elevenlabs_batch`.
+//!
+//! Auth differs per endpoint: transcription uses `x-api-key`, chat uses
+//! `Authorization: Bearer`.
+
 use anyhow::{bail, Context, Result};
 use reqwest::multipart;
 
@@ -81,7 +89,7 @@ mod similarity_tests {
 }
 
 /// Fix vocabulary terms via the Mistral chat API. Returns the original text if
-/// vocab is empty or the correction call fails.
+/// vocab is empty, the call fails, or the result fails the `MIN_SIMILARITY` guard.
 async fn correct_with_vocab(api_key: &str, text: &str, vocab: &[String]) -> String {
     if vocab.is_empty() || text.trim().is_empty() {
         return text.to_string();

@@ -1,3 +1,11 @@
+//! Cloud speech-to-text: hotkey → orchestrator → audio → **transcription** →
+//! injection.
+//!
+//! Each backend is a plain async fn taking a whole recording's PCM and
+//! returning text; there is no backend trait. The orchestrator matches on
+//! `cfg.transcription.backend` to pick one. Shared here: the HTTP client,
+//! timeouts and the retry rule. See `agent_docs/transcription_backends.md`.
+
 mod elevenlabs_batch;
 pub(crate) mod keyterms;
 mod voxtral_batch;

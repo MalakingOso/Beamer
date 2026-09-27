@@ -1,6 +1,7 @@
-//! HTTP client for the standalone llama.cpp server: plain async `reqwest` on
-//! the dioxus-desktop runtime. Never wrap in `spawn_blocking` — that moves a
-//! future onto a thread that never polls it.
+//! The process-wide `reqwest` client, plus the `GET /v1/models` probe behind
+//! Settings' Local AI card. Plain async on the dioxus-desktop runtime: never
+//! wrap in `spawn_blocking`, which moves a future onto a thread that never
+//! polls it.
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -10,12 +11,10 @@ use serde::Deserialize;
 
 static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
-/// Build the shared client with the configured connect timeout, baked in for
-/// the process lifetime. Call once at startup before [`http_client`]; the
-/// `OnceLock` keeps the first value and a second call is a no-op. Takes a
-/// `Duration`, not the app config: this module is also path-included by
-/// `task_eval`, where that type does not exist. No live reload — the setting
-/// takes effect on restart.
+/// Build the shared client with the configured connect timeout, fixed for the
+/// process lifetime (a change applies on restart). Call once at startup before
+/// [`http_client`]; later calls are no-ops. Takes a `Duration`, not the app
+/// config, because `task_eval` path-includes this module without that type.
 pub fn init_http_client(connect_timeout: Duration) {
     let _ = CLIENT.get_or_init(|| {
         reqwest::Client::builder()
@@ -28,13 +27,10 @@ pub fn init_http_client(connect_timeout: Duration) {
     });
 }
 
-/// Shared client: one connection pool for the process, reused by `chat.rs`
-/// and (`pub(crate)`, not `pub(super)`) `components::fetch`'s downloads —
-/// that module lives outside `src/llm/` (it needs crate-rooted paths, which
-/// `src/llm/**` may not use) but still wants the same one-client-per-process
-/// pool rather than opening a second.
-/// Falls back to a default client if [`init_http_client`] never ran (tests and
-/// `task_eval` only; the app always calls it at startup).
+/// The one connection pool for the process, used by `chat.rs` and by
+/// `components::fetch` (hence `pub(crate)`: that module needs crate-rooted
+/// paths, so it cannot live under `src/llm/`). Falls back to a default client
+/// if [`init_http_client`] never ran, which only happens in tests and `task_eval`.
 pub(crate) fn http_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(reqwest::Client::new)
 }
@@ -102,9 +98,9 @@ pub fn failure_message(timed_out: bool, connect_failed: bool, status: Option<u16
     "Could not reach the server".to_string()
 }
 
-/// Ask the server what it is serving. Never on a timer or as a background
-/// check: a status read resets the per-model idle clock and would pin the
-/// extraction model in VRAM silently. Button press and settings-page open only.
+/// Ask the server what it is serving. Button press and settings-page open
+/// only, never on a timer: a status read resets the per-model idle clock and
+/// silently pins the extraction model in VRAM.
 pub async fn probe(base_url: &str, timeout: Duration) -> Result<Vec<ModelInfo>, String> {
     let url = models_url(base_url);
     let response = http_client()

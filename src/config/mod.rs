@@ -1,3 +1,8 @@
+//! User settings: `config.toml` (serde structs with per-field defaults, load
+//! migrations, atomic save), loaded at startup and edited by the settings UI.
+//! API keys are the exception: they live in the OS keyring, never on disk.
+//! `vocabulary` holds the custom STT terms. Schema: `agent_docs/config_schema.md`.
+
 pub mod vocabulary;
 
 use anyhow::Result;
@@ -89,16 +94,15 @@ pub struct TranscriptionConfig {
     pub backend: String,
     #[serde(default = "default_language")]
     pub language: String,
-    /// Drop fillers/false starts rather than transcribing literally.
-    /// ElevenLabs only; other backends ignore it. Off by default — it changes
-    /// what was said, not just spelling.
+    /// Ask ElevenLabs to drop fillers and false starts (others ignore it).
+    /// Off by default: it changes what was said, not just spelling.
     #[serde(default)]
     pub no_verbatim: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InjectionConfig {
-    /// Ordered list of injection backends to try (e.g. ["ydotool", "clipboard"]).
+    /// Ordered injection fallback chain; the default is per-OS.
     #[serde(default = "default_backends")]
     pub backends: Vec<String>,
     #[serde(default)]
@@ -108,7 +112,7 @@ pub struct InjectionConfig {
     /// "ctrl_v", or "ctrl_shift_v". Env `BEAMER_PASTE_SHORTCUT` overrides.
     #[serde(default = "default_paste_shortcut")]
     pub paste_shortcut: String,
-    /// Migration: old field from previous config format. Read but never written back.
+    /// Legacy single-backend field: migrated into `backends` on load, never written back.
     #[serde(default, skip_serializing)]
     preferred_method: Option<String>,
 }
@@ -201,11 +205,10 @@ impl Config {
         Self::config_dir().join("config.toml")
     }
 
-    /// `try_exists`, not `exists`: a stat failure must not look like a fresh
-    /// install, or defaults would be saved over the user's real settings.
-    /// Unparseable TOML is quarantined to `*.corrupt` (reloadable default),
-    /// never silently discarded — callers fall back to default on `Err` and
-    /// would otherwise save that default over the recoverable original.
+    /// Load `config.toml`, writing defaults on first run and re-saving migrations.
+    /// `try_exists`, not `exists`: a stat failure must not pass for a fresh
+    /// install that saves defaults over real settings. Bad TOML is moved to
+    /// `config.toml.corrupt` first, so the original is never overwritten.
     pub fn load() -> Result<Self> {
         let path = Self::config_path();
         match path.try_exists() {
@@ -284,10 +287,8 @@ impl Config {
     }
 }
 
-/// Migrate a stored transcription backend across the realtime removal.
-/// `"elevenlabs"` becomes `"elevenlabs_batch"`, `"voxtral"` becomes
-/// `"voxtral_batch"`. Anything else (including `"elevenlabs_medical_batch"`)
-/// is left alone. Returns `true` if the value changed (caller re-saves).
+/// Rename removed realtime backend ids (`elevenlabs`, `voxtral`) to their
+/// `_batch` successors; anything else is untouched. `true` if changed.
 fn migrate_transcription_backend(backend: &mut String) -> bool {
     let migrated = match backend.as_str() {
         "elevenlabs" => "elevenlabs_batch",
@@ -303,8 +304,7 @@ fn migrate_transcription_backend(backend: &mut String) -> bool {
 fn migrate_injection_backends(backends: &mut Vec<String>) -> bool {
         let mut dirty = false;
 
-        // Drop backends removed from this build (wtype is current again —
-        // first-class on wlroots behind a fast-failing GNOME/KDE probe).
+        // Drop removed backends. wtype is current (wlroots), not removed.
         const REMOVED: &[&str] = &["dotool", "enigo", "atspi"];
         let before = backends.len();
         backends.retain(|b| !REMOVED.contains(&b.as_str()));
@@ -312,8 +312,7 @@ fn migrate_injection_backends(backends: &mut Vec<String>) -> bool {
             dirty = true;
         }
 
-        // Legacy ["ydotool", "clipboard"] default upgrades so existing users
-        // pick up gnome/wtype. Custom orderings are left alone.
+        // Upgrade the legacy default to today's; custom orderings stay as-is.
         if backends.as_slice() == ["ydotool".to_string(), "clipboard".to_string()] {
             *backends = default_backends();
             dirty = true;

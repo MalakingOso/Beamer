@@ -1,3 +1,6 @@
+//! Tests for `archive`: zip-slip rejection, and the swap / commit / rollback /
+//! sweep cycle that keeps a last-good runtime dir on disk.
+
 use std::io::Write;
 
 use super::*;

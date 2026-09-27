@@ -1,10 +1,14 @@
+//! Clipboard-paste backend: set the clipboard, send the paste chord, then restore
+//! what was there. Second on Windows (always Ctrl+V), last on Linux (Ctrl+V or
+//! Ctrl+Shift+V per app). Also hosts `run_with_timeout`, the bounded subprocess
+//! runner `wtype.rs` uses too.
+
 use super::{InjectionBackend, InjectionResult};
 use anyhow::Result;
 use arboard::Clipboard;
 
 pub struct ClipboardBackend {
-    /// Configured paste shortcut, threaded in at construction so pastes
-    /// never re-read disk. Unused on Windows (always plain Ctrl+V).
+    /// The loaded `injection.paste_shortcut`. Unused on Windows (always Ctrl+V).
     #[cfg(not(target_os = "windows"))]
     pub paste_shortcut: String,
 }
@@ -44,10 +48,8 @@ impl InjectionBackend for ClipboardBackend {
     }
 }
 
-/// What the clipboard held before an injection, so it can be put back.
-/// Text is the common case; images (screenshots, copied files render as
-/// formats `get_text` cannot see) must survive too — restoring nothing would
-/// leave the transcript behind and destroy the original.
+/// What the clipboard held before an injection. Images must survive too:
+/// restoring nothing would leave the transcript and destroy the user's copy.
 enum SavedClipboard {
     Text(String),
     Image(arboard::ImageData<'static>),
@@ -66,11 +68,9 @@ fn save_clipboard(clipboard: &mut Clipboard) -> Option<SavedClipboard> {
     }
 }
 
-/// Put back what [`save_clipboard`] took — but only if the clipboard still
-/// holds our pasted text. If the user (or another app) copied something
-/// meanwhile, restoring would destroy *that*; if a slow target hasn't pasted
-/// yet, restoring hands it stale content, so skipping the restore is the
-/// safer failure in both directions. Either way the outcome is logged.
+/// Put back what [`save_clipboard`] took, only if the clipboard still holds our
+/// text: if something was copied since, restoring destroys it; if a slow target
+/// hasn't pasted yet, it gets stale content. Skipping is the safer failure.
 fn restore_clipboard(clipboard: &mut Clipboard, pasted: &str, saved: Option<SavedClipboard>) {
     match clipboard.get_text() {
         Ok(current) if current == pasted => {}
@@ -194,9 +194,8 @@ fn set_clipboard_linux(text: &str, clipboard: &mut Clipboard) -> Result<()> {
     Ok(())
 }
 
-/// Run a command with a hard timeout. Needed because wl-paste can hang
-/// indefinitely on some GNOME compositor states, mid-injection. Shared with
-/// the wtype/ydotool call sites, which have the same wedged-helper hazard.
+/// Run a command with a hard timeout: wl-paste can hang forever on some GNOME
+/// compositor states, and wtype/ydotool share the wedged-helper hazard.
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn run_with_timeout(
     cmd: &mut std::process::Command,
@@ -268,9 +267,8 @@ fn verify_clipboard_contains(expected: &str) -> bool {
     }
 }
 
-/// Reap a daemonized `wl-copy` child (it forks to serve the selection;
-/// the spawned process exits once waited on — never waiting leaks a zombie).
-/// Polls briefly instead of `wait()` so a foregrounded wl-copy can't block injection.
+/// Reap a forking `wl-copy` child (never waiting leaks a zombie). Polls for
+/// 500 ms instead of `wait()` so a foregrounded wl-copy can't block injection.
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn reap_daemonized(mut child: std::process::Child, what: &str) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
@@ -473,9 +471,8 @@ fn choose_use_shift_v(setting: &str, focused: Option<&str>) -> bool {
     }
 }
 
-/// Paste chord precedence: `BEAMER_PASTE_SHORTCUT` env > `configured`
-/// (loaded once at session start; mid-session config edits need a restart).
-/// "auto" picks per-app via the focus helper, defaulting to Ctrl+Shift+V.
+/// Chord choice: `BEAMER_PASTE_SHORTCUT` env > `configured` (the config as of
+/// recording start). "auto" asks the focus helper, defaulting to Ctrl+Shift+V.
 #[cfg(not(target_os = "windows"))]
 fn resolve_use_shift_v(configured: &str) -> bool {
     let setting = std::env::var("BEAMER_PASTE_SHORTCUT")
@@ -488,8 +485,7 @@ fn resolve_use_shift_v(configured: &str) -> bool {
             }
         });
 
-    // Explicit chords skip the focus lookup (a ~100ms D-Bus round trip plus a
-    // thread spawn); only "auto" needs to know what is focused.
+    // Explicit chords skip the focus lookup (a ~100 ms D-Bus round trip).
     match setting.to_ascii_lowercase().as_str() {
         "ctrl_v" | "ctrl+v" => return false,
         "ctrl_shift_v" | "ctrl+shift+v" => return true,

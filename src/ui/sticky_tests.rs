@@ -1,3 +1,7 @@
+//! Tests for `sticky.rs`'s pure helpers: the window-title contract with the
+//! GNOME extension, physical-to-logical resize sizes, and textarea rows.
+//! Included from `sticky.rs` via `#[path]`.
+
 use super::*;
 
 #[test]

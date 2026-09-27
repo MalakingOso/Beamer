@@ -1,5 +1,9 @@
 #![cfg(not(target_os = "windows"))]
 
+//! `ydotool` backend, third in the Linux chain: synthesizes keys through kernel
+//! uinput, so it works on any compositor and X11, but needs the `ydotoold` daemon
+//! and `input`-group access. ASCII only; anything else falls through.
+
 use super::{InjectionBackend, InjectionResult};
 use anyhow::Result;
 use std::path::PathBuf;
@@ -35,8 +39,8 @@ impl InjectionBackend for YdotoolBackend {
             anyhow::bail!("Text contains characters outside ydotool's ASCII range");
         }
 
-        // 25 ms delay: faster values drop characters at word boundaries on
-        // slower event loops (ydotool default is 20). Hold is the default, stated explicitly.
+        // 25 ms delay: faster drops characters at word boundaries on slow event
+        // loops (default is 20). Hold is the default, stated explicitly.
         let output = std::process::Command::new("ydotool")
             .arg("type")
             .arg("--key-delay")

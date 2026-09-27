@@ -1,3 +1,8 @@
+//! The recording pill's look and state names. `pill_state` is shared by both
+//! pills; the rest (component, CSS, JS, window size) is the Windows/macOS
+//! pill, whose window `app_pill` creates. Linux's pill is drawn by the GNOME
+//! extension's `indicator.js`, which this file's CSS/JS mirror.
+
 use dioxus::prelude::*;
 
 use crate::hotkey::CaptureMode;

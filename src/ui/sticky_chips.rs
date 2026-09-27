@@ -1,9 +1,8 @@
-//! Suggestion chips: extraction proposes, one click each way decides (a false
-//! positive costs one click, not a polluted task list). The store arrives as a
-//! prop — each sticky is its own `VirtualDom`, so `use_context` can't see the
-//! main window's providers. Chips render outside `.sticky-bar`, so no
-//! `stop_propagation` dance is needed. Confidence is not shown (it clusters
-//! 0.90–0.98 regardless); the evidence span is the signal.
+//! Suggestion chips under a sticky note's body: the tasks extraction proposed
+//! for this note, each accepted or dismissed in one click (a false positive
+//! costs a click, not a polluted task list). Rendered by `sticky.rs`, outside
+//! `.sticky-bar`, so no `stop_propagation` is needed. Confidence isn't shown
+//! (it clusters 0.90–0.98 regardless); the evidence span is the signal.
 
 use dioxus::prelude::*;
 

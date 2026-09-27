@@ -1,5 +1,7 @@
-//! Tests for the automerge-backed corpus: merging, splicing, the mtime check,
-//! the JSON mirror, and what happens when the document will not load.
+//! Content sync tests: what survives when two machines' documents merge
+//! (notes, character-level body edits, task decisions, stage states, the
+//! vocabulary). Document mechanics live in `sync_doc_tests.rs`, robustness
+//! and genesis in `sync_recovery_tests.rs`.
 //!
 //! Every test builds its own temp directory. Nothing here reads or writes
 //! anything under the real `~/.config/Beamer`, which holds the user's actual
@@ -268,17 +270,6 @@ fn decisions_made_on_two_machines_both_survive_the_merge() {
     );
 }
 
-
-/// The critical case: a document that is there and cannot be read.
-///
-/// Not a parse failure, so nothing gets quarantined, and the store used to
-/// come up empty over intact bytes. The next edit then wrote a one-note
-/// document over the user's whole corpus, with no `.corrupt` copy anywhere,
-/// because from the store's point of view nothing had gone wrong.
-///
-/// Unix only: the failure needs a real `fs::read` error on a path that
-/// `exists()`, and mode 000 is the portable way to get one. Running as root
-
 #[test]
 fn a_concurrent_failure_does_not_regress_a_synced_done() {
     let a_dir = temp_dir("stage_done_a");
@@ -315,11 +306,9 @@ fn a_concurrent_failure_does_not_regress_a_synced_done() {
 
 #[test]
 fn a_deliberate_skip_propagates_while_done_stays_put() {
-    // Skipped is what the pipeline records for a never-run stage when the
-    // feature is off — it propagates like any other state. What it can never
-    // do is overwrite Done (see `skipped_never_overwrites_done`): success is
-    // monotonic in the shared record, so turning the feature off after a pass
-    // ran leaves that pass's record alone.
+    // Skipped (a never-run stage with the feature off) propagates like any
+    // other state, but never overwrites Done (see `skipped_never_overwrites_done`):
+    // success is monotonic in the shared record.
     let a_dir = temp_dir("stage_skip_a");
     let b_dir = temp_dir("stage_skip_b");
 

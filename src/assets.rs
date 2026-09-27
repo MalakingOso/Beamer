@@ -1,3 +1,9 @@
+//! Binary assets compiled into the exe: the app icon and, on non-Linux builds,
+//! the DM Mono faces for the recording pill. Embedded, not shipped beside the
+//! exe, because a self-update replaces only the binary; never use manganis
+//! assets (`tests/packaging.rs`). Stylesheets and the other windows' fonts
+//! are embedded under `ui/` (`ui/fonts.rs`).
+
 use base64::Engine;
 use std::sync::OnceLock;
 

@@ -1,7 +1,11 @@
-//! The model-pass pipeline: one App-scoped coroutine that extracts tasks from notes.
-//! Owned by `App()` because Dioxus cancels a task with its owning scope — a pass
-//! started from a sticky window would die silently with the window.
-//! ⚠️ Dioxus `spawn`, never `tokio::spawn`: `Signal`'s arena is thread-local.
+//! The extraction pipeline: one coroutine that turns a note into suggested tasks.
+//! Requests come from `sink::do_note_capture` (a new dictated note) and the
+//! sticky footer's retry; each pass calls `llm::extract`, writes rows to
+//! `TaskStore` and the result via `lifecycle`. See `agent_docs/local_inference.md`.
+//!
+//! Owned by `App()`: Dioxus cancels a task with its owning scope, so a pass
+//! started from a sticky window would die silently with the window. Use Dioxus
+//! `spawn`, never `tokio::spawn`: `Signal`'s arena is thread-local.
 //! In-flight passes run concurrently in one `FuturesUnordered`; duplicates drop.
 
 use std::cell::RefCell;
@@ -50,18 +54,14 @@ pub fn use_pipeline(
     tasks: Signal<TaskStore>,
     status_log: Signal<StatusLog>,
 ) -> (Coroutine<PipelineRequest>, Signal<HashSet<String>>) {
-    // Read by the UI, so its membership must be a `Signal`; written at the
-    // same call sites as `in_flight` below, which stays the coroutine's own
-    // synchronous dedup guard (a `Signal` write is not visible to itself
-    // until the next poll, so the guard couldn't rely on it alone).
+    // UI-facing mirror of `in_flight` below, updated at the same call sites.
+    // The dedup guard itself stays a plain `RefCell` set, which is synchronous.
     let in_flight_signal: Signal<HashSet<String>> = use_signal(HashSet::new);
 
     let coroutine = use_coroutine(move |mut rx: UnboundedReceiver<PipelineRequest>| async move {
         let in_flight: Rc<RefCell<HashSet<String>>> = Rc::new(RefCell::new(HashSet::new()));
-        // Notes whose last failure was terminal: the footer still offers a
-        // manual retry, but the sweep leaves them alone until one succeeds.
-        // In-memory only — a restart re-attempts once, then the set rebuilds
-        // itself from the fresh failures.
+        // Notes whose last failure was terminal: skipped by the sweep until a
+        // manual retry succeeds. In-memory only; a restart re-attempts once.
         let terminal: Rc<RefCell<HashSet<String>>> = Rc::new(RefCell::new(HashSet::new()));
         let mut in_flight_signal = in_flight_signal;
         let mut running = FuturesUnordered::new();
@@ -91,8 +91,9 @@ pub fn use_pipeline(
                         terminal.borrow_mut().insert(finished.note_id.clone());
                     }
 
-                    // A succeeded request is itself the evidence the server is
-                    // reachable; have it carry the failed backlog. Never a timer.
+                    // A success is the evidence the server is reachable; let it
+                    // carry the failed backlog. Never a timer. Runs after the
+                    // `in_flight` removal above, so this same note can be swept.
                     if should_sweep(finished.succeeded, finished.swept) {
                         let backlog = sweep_requests(&notes.peek(), &terminal.borrow());
                         for request in backlog {
@@ -143,10 +144,8 @@ async fn run_request(
     };
 
     if !enabled {
-        // `mark_extract_skipped` never overwrites `Done`, so this is safe
-        // without a Pending guard — and a `Failed` pass going quiet with the
-        // feature is correct, not a loss: the sweep must not keep retrying a
-        // pass nobody wants run.
+        // Safe without a Pending guard (`Skipped` never overwrites `Done`). A
+        // `Failed` note going `Skipped` is intended: the sweep stops retrying it.
         notes.write().mark_extract_skipped(&id);
         // Not `succeeded`: nothing attempted, so no evidence the server is reachable.
         return Finished { note_id: id, swept, succeeded: false, terminal: false };
@@ -173,18 +172,17 @@ async fn run_request(
     }
 }
 
-/// A result that came back after the user switched the pass off. Writing it
-/// would record `Failed` on an error, or `Done` plus task rows on success,
-/// for a pass the user explicitly opted out of. `NotAttempted` rather than
-/// `Errored`: nothing was learned about the server, and this must not look
-/// like a reason to suppress the backlog sweep.
+/// A pass the user switched off mid-flight: its result is dropped, not written.
+/// `NotAttempted` rather than `Errored`: nothing was learned about the server,
+/// and an error would wrongly suppress the backlog sweep.
 fn abandoned(stage: &str, id: &str) -> RequestOutcome {
     tracing::info!("{} for note {} was abandoned: the pass was switched off mid-flight", stage, id);
     RequestOutcome::NotAttempted
 }
 
-/// Blank text is `NotAttempted`: `extract::extract` is never called, so
-/// nothing about reachability was learned.
+/// Extract from one note and write rows plus stage result. `extract_wanted()` is
+/// re-read from live config before every write, never the request's snapshot.
+/// Blank text is `NotAttempted`: no request went out.
 async fn run_extraction(
     id: &str,
     base_url: &str,

@@ -1,7 +1,8 @@
-//! Window, tray-menu and flush wiring hooks for `App`. Each runs once from within
-//! `App()`'s render body, so hooks still run in a fixed order every render.
-//! Splash, recording pill and menu handlers live in their own modules
-//! (`app_splash`, `app_pill`, `app_menu`).
+//! Startup wiring pulled out of `App()`: tray icon, main-window centring, the
+//! notes flush tick, load-error reporting, the update check, and (Windows) the
+//! AUMID shortcut. Each is a hook called once from `App()`'s render body, so
+//! the order must stay fixed. Splash, pill and menu handlers have their own
+//! modules (`app_splash`, `app_pill`, `app_menu`).
 
 use dioxus::desktop::tao::dpi::PhysicalPosition;
 use dioxus::desktop::trayicon::init_tray_icon;
@@ -25,6 +26,8 @@ pub(super) fn setup_tray_menu() -> TrayMenuItems {
     })
 }
 
+/// Centre the main window on the primary monitor. A no-op when
+/// `primary_monitor()` is `None`, the normal case on GNOME/Wayland (see `work_area`).
 pub(super) fn setup_window_centering(window: DesktopContext) {
     use_hook({
         let window = window.clone();
@@ -45,9 +48,9 @@ pub(super) fn setup_window_centering(window: DesktopContext) {
 /// Coalesce per-keystroke edits into at most one write per tick.
 const NOTES_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// Debounced writes for both stores. `peek()`, not `read()`: a `write()` every
-/// tick would notify every subscriber twice a second. Task done-ticks ride
-/// here too (accept/dismiss decisions flush inline instead).
+/// Debounced flush of both stores. Checks via `peek()` and takes `write()` only
+/// when something is pending: an unconditional write would notify every open
+/// window twice a second. Task done-ticks ride here; accept/dismiss flush inline.
 pub(super) fn setup_notes_flush(mut notes: Signal<NoteStore>, mut tasks: Signal<TaskStore>) {
     use_hook(move || {
         spawn(async move {

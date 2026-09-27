@@ -1,3 +1,9 @@
+//! Hotkey chord picker (modifier pills + trigger-key dropdown) and the
+//! push-to-talk/toggle radio, shared by the Recording card's dictation and note
+//! rows. Chords are strings like "Ctrl+Alt+Space"; `hotkey::HotkeyConfig::parse`
+//! reads the same format independently, and the tests pin the two together.
+//! Win/Super can only be the trigger, never a modifier.
+
 use dioxus::prelude::*;
 
 use crate::ui::components::Select;

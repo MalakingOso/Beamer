@@ -8,12 +8,11 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// No manganis `asset!()` in app code. Its output is a content-hashed file
-/// beside the exe, and a self-update swaps only the exe, so the new binary
-/// asks for a filename the old install never had (1.0.4 shipped exactly this:
-/// an unstyled main window). Everything the UI needs is compiled in with
-/// `include_str!`/`include_bytes!` instead. Comment lines are skipped so the
-/// reason can still be written down next to the code.
+/// No manganis `asset!()` in app code: it emits a content-hashed file beside
+/// the exe, so an updated binary asks for a file the old install never had
+/// (1.0.4 shipped an unstyled main window this way). Embed with
+/// `include_str!`/`include_bytes!`. Comment lines are skipped so the reason
+/// can still be written next to the code.
 #[test]
 fn app_source_has_no_manganis_assets() {
     fn walk(dir: &std::path::Path, hits: &mut Vec<String>) {

@@ -33,10 +33,8 @@ use super::task_store::TaskStore;
 /// and the migration still has to lift into `machine.json`.
 const FIXTURE: &str = include_str!("../../tests/fixtures/notes-14.json");
 
-/// The fixture with the machine-local keys removed, which is what the mirror
-/// looks like once they have been lifted out. `Note` stopped serializing them
-/// two tasks ago, so this is the only honest thing to compare against.
-/// `clean_state` goes too: the cleanup pass was removed, so the key loads
+/// The fixture as the mirror exports it: `Note` no longer serializes the
+/// machine-local keys, and the removed cleanup pass's `clean_state` loads
 /// (ignored) and is dropped on the next export.
 fn fixture_without_window_keys() -> serde_json::Value {
     let mut value: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
@@ -139,8 +137,7 @@ fn an_existing_notes_json_round_trips_through_the_document_and_back_out_unchange
     let dir = temp_dir("roundtrip");
     std::fs::write(dir.join("notes.json"), FIXTURE).unwrap();
 
-    // Seed the document from the legacy file, exactly as an install upgrading
-    // to this task does.
+    // Seed the document from the legacy file, as an upgrading install does.
     let mut seeded = Machine::open(&dir);
     assert_eq!(seeded.notes.notes.len(), 14, "every note in the file must reach the document");
 

@@ -1,3 +1,11 @@
+//! Microphone input for a dictation: hotkey → orchestrator → **audio** →
+//! transcription → injection.
+//!
+//! `capture` runs the cpal callback (downmix + resample to 16 kHz mono f32);
+//! the chunker thread started by `AudioPipeline::start` converts that to
+//! 16-bit LE PCM for the orchestrator and publishes a live level for the
+//! recording pill. No VAD, no WAV encoding here. See `agent_docs/audio_pipeline.md`.
+
 pub mod capture;
 
 use anyhow::Result;
@@ -7,8 +15,8 @@ use tokio::sync::{mpsc, watch};
 
 use self::capture::AudioCapture;
 
-// Bounded channels throughout the audio/transcription path are sized for
-// >=60s of buffering; see each construction site for its capacity math.
+// Both audio channels are bounded and sized for >=60s of buffering; a stalled
+// consumer drops audio rather than growing memory.
 
 /// Outcome of a bounded-channel send. `Full` means backpressure (worth a
 /// warning); `Closed` means the receiver went away — normal teardown, dropped
@@ -74,13 +82,14 @@ fn publish_level(level: f32) {
 const LEVEL_FLOOR_DBFS: f32 = -55.0;
 const LEVEL_CEIL_DBFS: f32 = -12.0;
 
-/// Map raw f32 sample RMS to a 0.0–1.0 display level.
-///
-/// ⚠️ Do not "boost" this with a multiplier: it saturates ordinary speech at
-/// 1.0 and the meter stops moving. The `powf` below is monotonic with fixed
-/// endpoints, so it only stretches contrast in the range where speech lives.
+/// Exponent applied after the dB mapping in `normalize_rms`.
 const LEVEL_CONTRAST: f32 = 1.4;
 
+/// Map raw f32 sample RMS to a 0.0–1.0 display level.
+///
+/// Don't "boost" this with a multiplier: ordinary speech saturates at 1.0 and
+/// the meter stops moving. The `powf` is monotonic with fixed endpoints, so it
+/// only stretches contrast in the range where speech lives.
 fn normalize_rms(rms: f32) -> f32 {
     if rms <= 0.0 {
         return 0.0;
@@ -335,11 +344,12 @@ mod f32_to_i16_bytes_tests {
     }
 }
 
-/// Converted-PCM chunk channel capacity: same worst-case cadence as the sample
-/// channel (60s * 200 msgs/sec at the 5ms cpal callback floor) = 12_000.
+/// PCM chunk channel capacity: 60s at the 5ms cpal callback floor (200/sec).
 /// No sentinel travels here, so no reserved headroom.
 const CHUNK_CHANNEL_CAPACITY: usize = 12_000;
 
+/// The default input device plus the chunker thread that turns its samples
+/// into PCM chunks.
 pub struct AudioPipeline {
     capture: AudioCapture,
 }
@@ -351,15 +361,15 @@ impl AudioPipeline {
         })
     }
 
-    /// Start capturing audio. Returns 16-bit LE PCM byte chunks suitable for
-    /// streaming directly to transcription WebSocket backends.
+    /// Start capturing. Returns the cpal `Stream` (keep it alive; dropping it
+    /// stops capture) and a receiver of 16-bit LE, 16 kHz, mono PCM chunks.
     pub fn start(&self) -> Result<(Stream, mpsc::Receiver<Vec<u8>>)> {
         let (stream, mut sample_rx) = self.capture.start()?;
         let (tx, rx) = mpsc::channel(CHUNK_CHANNEL_CAPACITY);
 
-        // Dedicated thread: cpal callbacks are real-time sensitive and must not
-        // block on async channel operations. Named like the other
-        // long-lived threads, so crash dumps and thread lists say what it is.
+        // A plain thread, off the async runtime, keeps PCM conversion and level
+        // metering out of the real-time cpal callback. Named for thread lists
+        // and crash dumps.
         std::thread::Builder::new()
             .name("beamer-audio-chunker".into())
             .spawn(move || {

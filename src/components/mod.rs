@@ -1,14 +1,14 @@
-//! Every part of an install that lives outside the exe, declared in a catalog
-//! compiled into the exe itself. The running exe reconciles the disk to *its
-//! own* catalog at launch, so exe version N always ends up with exactly what N
-//! expects, however it got installed (self-update, installer, hand copy).
-//! Changing the model means editing one entry here and cutting a release. No
-//! manifest is fetched, so the exe and its catalog can never disagree.
+//! Installs the local extraction server (llama.cpp runtime, preset, launchers,
+//! Scheduled Task, model) that `llm/` talks to. Everything is declared in a
+//! catalog compiled into the exe, and at launch the running exe reconciles
+//! the disk to *its own* catalog, so version N always ends up with what N
+//! expects however it was installed. No manifest is fetched, so exe and
+//! catalog cannot disagree. Windows on ARM64 only; the catalog is empty elsewhere.
 //!
-//! `plan` is the pure diff (catalog + recorded state + what's on disk →
-//! groups to apply); `reconcile` stages and applies it; `state` is the record
-//! of what was applied (`components.json`). Not under `src/llm/`: this needs
-//! crate-rooted paths, which `src/llm/**` may not use.
+//! `plan` (here) is the pure diff; `reconcile` stages and applies it via
+//! `apply`; `state` records what was applied (`components.json`). The only
+//! code allowed to touch the server's lifecycle. Not under `src/llm/` because
+//! it needs crate-rooted paths. See `agent_docs/local_inference.md`.
 
 mod apply;
 mod archive;
@@ -76,13 +76,10 @@ impl Root {
 
 #[derive(Debug, Clone, Copy)]
 pub enum Kind {
-    /// Text compiled into the exe. Written with LF line endings whatever the
-    /// checkout had: git stores these files LF but a Windows checkout may
-    /// convert them to CRLF, so normalizing keeps the bytes (and their hash)
-    /// the same wherever the release was built. LF, not CRLF, because it's
-    /// what the server has been validated with: the preset ini, `.cmd` and
-    /// `.vbs` on bearcave are all LF today, and nothing proves the fork's ini
-    /// parser strips a trailing `\r` from a section name or value.
+    /// Text compiled into the exe, always written LF so the bytes (and hash)
+    /// don't depend on whether the building checkout converted to CRLF. LF
+    /// because that is what the server was validated with; nothing proves the
+    /// fork's ini parser strips a trailing `\r` from a section name or value.
     Text(&'static str),
     /// One file, downloaded and sha256-verified.
     File { url: &'static str, sha256: &'static str, size: u64 },
@@ -174,11 +171,10 @@ pub const MODEL_ID: &str = "k2h-model";
 
 const RUNTIME_DIR: &str = "llama-k2horizon";
 
-/// The K2-Horizon local extraction server (Windows on ARM64 only: the only
-/// target the fork's `llama-server.exe` is built for). Keep the model's
-/// filename stem, the preset ini's `[section]` and
-/// `llm::default_extract_model()` in step (tests below pin the first two
-/// against the third).
+/// The K2-Horizon local extraction server (Windows on ARM64 only: the fork's
+/// `llama-server.exe` is built for nothing else). Keep the model's filename
+/// stem, the preset ini's `[section]` and `llm::default_extract_model()` in
+/// step (`tests.rs` pins them).
 static LLAMA_SERVER: &[Component] = &[
     Component {
         id: "k2h-runtime",
@@ -231,9 +227,8 @@ static LLAMA_SERVER: &[Component] = &[
     Component {
         id: MODEL_ID,
         label: "K2-Horizon model",
-        // Re-verify against `GET https://huggingface.co/api/models/
-        // NANI-Nithin/K2-Horizon-0.9B-GGUF?blobs=true` if this file is ever
-        // swapped: url, sha256 and size must all describe the file served.
+        // If swapped, re-check url, sha256 and size together against `GET
+        // https://huggingface.co/api/models/NANI-Nithin/K2-Horizon-0.9B-GGUF?blobs=true`.
         version: "K2-Horizon-0.9B-Q8_0",
         kind: Kind::File {
             url: "https://huggingface.co/NANI-Nithin/K2-Horizon-0.9B-GGUF/resolve/main/K2-Horizon-0.9B-Q8_0.gguf",

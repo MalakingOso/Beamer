@@ -3,16 +3,16 @@ import GLib from 'gi://GLib';
 import St from 'gi://St';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
-// Recording pill in the app's Deploy Purple design language: light surface,
-// structural border, hard-offset shadow, at bottom-center of the active
-// monitor (the focused window's — where dictated text lands), with a
-// purple-gradient waveform while recording and a "Transcribing…" label while
-// processing. Added directly to
-// uiGroup (layout.js documents this as the supported way to place actors
-// above all windows) rather than via addTopChrome: GNOME 50 removed the
-// affectsInputRegion chrome param, and an untracked non-reactive actor is
-// click-through on every shell version — so the pill can never take focus
-// (which would break text injection into the previously focused window).
+// The GNOME recording pill, drawn by the Shell itself and driven by
+// extension.js's ShowIndicator/UpdateLevel/HideIndicator. Sits bottom-center
+// of the focused window's monitor (where dictated text lands): a purple
+// waveform while recording or taking a note, "Transcribing…" while processing.
+// Styling in stylesheet.css (Beamer Purple).
+//
+// Added straight to uiGroup (layout.js's supported way to sit above all
+// windows), not addTopChrome, whose affectsInputRegion param GNOME 50 removed.
+// An untracked non-reactive actor is click-through on every Shell version, so
+// the pill can never steal focus from the window being typed into.
 
 const BAR_COUNT = 12;
 const BAR_WIDTH = 3;
@@ -78,9 +78,7 @@ export class BeamerIndicator {
         const wasVisible = this._pill.visible && this._state !== null;
         this._state = state;
 
-        // `show()` never touched style_class before, so the pill was stuck with
-        // whatever it was constructed with. Note capture needs a visually
-        // distinct ring, so the class is now driven by state.
+        // Note capture gets a distinct ring, so the class follows the state.
         this._pill.style_class = state === 'note'
             ? 'beamer-pill beamer-pill-note'
             : 'beamer-pill';
@@ -169,11 +167,8 @@ export class BeamerIndicator {
         const rate = target > this._smoothLevel ? 0.45 : 0.15;
         this._smoothLevel += (target - this._smoothLevel) * rate;
         for (let i = 0; i < BAR_COUNT; i++) {
-            // The per-bar sine shimmer is scaled by the level itself, so it
-            // reads as "reacting to speech" rather than a decorative sweep
-            // that runs the same whether or not you're talking: near-silent
-            // bars sit almost still, and the shimmer's full swing only shows
-            // up once the level is actually high.
+            // Shimmer scales with the level, so near-silent bars sit almost
+            // still and the motion reads as reacting to speech, not decoration.
             const shimmer = 0.35 + 0.65 * Math.abs(Math.sin(this._phase + i * 0.55));
             const wave = 1 - this._smoothLevel * (1 - shimmer);
             const h = BAR_MIN_H

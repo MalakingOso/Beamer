@@ -1,10 +1,12 @@
-//! Note-allowed region: desktop usable rect, main-window keep-clear points, and
-//! the launch scatter seed. Split from `sticky_windows` (windowing queries, not
-//! reconciliation; `note_layout` must stay pure and Dioxus-free). ⚠️ Two silent
-//! traps: `primary_monitor()` returns `None` on this GNOME/Wayland session while
-//! `available_monitors()` works — never ask only for primary. And
-//! `MonitorHandle` geometry is physical px while `move_frame` takes logical —
-//! always divide by the monitor's own scale.
+//! Where sticky notes may go: the desktop's usable rect, keep-clear points
+//! around the main window, and the per-launch scatter seed. `sticky_windows`
+//! feeds these to `note_layout::place_next`; they live here because they query
+//! the windowing system, and `note_layout` must stay pure and Dioxus-free.
+//!
+//! Two silent traps: `primary_monitor()` returns `None` on GNOME/Wayland while
+//! `available_monitors()` works, so never ask only for primary; and
+//! `MonitorHandle` geometry is physical px while `move_frame` takes logical, so
+//! always divide by each monitor's own scale.
 
 use dioxus::desktop::DesktopContext;
 
@@ -48,7 +50,7 @@ fn union_work_area(monitors: &[Rect]) -> Rect {
 
 /// Note region in compositor logical coords. Every monitor contributes, and each
 /// monitor's physical geometry is divided by its own scale (they agree only at
-/// 1x). ⚠️ Known gaps: mixed-DPI unions pretend per-monitor logical rects share
+/// 1x). Known gaps: mixed-DPI unions pretend per-monitor logical rects share
 /// one space (true only at uniform DPI), and the shared union can extend past a
 /// shorter/taskbar-bearing monitor's usable bottom on Windows.
 pub fn work_area(window: &DesktopContext) -> Rect {

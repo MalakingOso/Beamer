@@ -1,11 +1,12 @@
-//! Measure the extraction prompt against the user's own accept/dismiss history
-//! in `tasks.json` — the corpus is real notes, labelled by the user. Precision
-//! is the headline metric (a fabricated task poisons the list); recall is also
-//! reported.
+//! Dev-only CLI that measures task extraction against the user's own
+//! accept/dismiss history in `tasks.json`: real notes, labelled by the user.
+//! Precision is the headline metric (a fabricated task poisons the list);
+//! recall is also reported. Needs the extraction server running.
 //!
 //! No `src/lib.rs`, so this binary `#[path]`-includes `llm/` plus the note and
-//! task types. `notes/mod.rs` can't be included (it needs `crate::config`),
-//! so the JSON envelopes are re-declared locally.
+//! task types; any `crate::` path under `src/llm/` breaks it. `notes/mod.rs`
+//! can't be included (it needs `crate::config`), so the JSON envelopes are
+//! re-declared locally.
 //!
 //! ```text
 //! cargo run --bin task_eval -- --limit 20
@@ -261,12 +262,10 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Match one proposal to a decided row, consuming each row at most once. Text
-/// first (normalized: trim, collapse whitespace, lowercase — the model doesn't
-/// reproduce its own wording across runs), then the evidence span, which is
-/// quoted from the note and therefore stabler. Evidence is second because two
-/// tasks from one sentence share a span and could cross-match; consumed rows
-/// bound that to a sibling pairing, never an invented match.
+/// Match one proposal to a decided row, consuming each row at most once.
+/// Normalized text first, then the evidence span (quoted from the note, so
+/// stabler across runs). Evidence is second because two tasks from one
+/// sentence share a span; consuming rows bounds that to a sibling pairing.
 fn match_row(p: &ProposedTask, decided: &[&Task], taken: &[bool]) -> Option<usize> {
     let text = norm(&p.text);
     if !text.is_empty() {

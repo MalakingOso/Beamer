@@ -1,8 +1,8 @@
-//! `POST /v1/chat/completions` against the standalone llama.cpp server.
-//! The body carries model, messages and nothing else: sampling and the thinking
-//! switch live server-side in `deploy/llama-models.ini`. A misconfigured model
-//! answers HTTP 200 anyway, so a test pins that Beamer sends no sampling
-//! parameters.
+//! `POST /v1/chat/completions` and the `ChatError` classification the pipeline
+//! branches on. The body carries model, messages and (optionally)
+//! `response_format`, nothing else: sampling and the thinking switch belong to
+//! the server's preset ini. Two owners of a setting would disagree silently
+//! (the server answers 200 either way), so a test pins their absence.
 
 use std::time::Duration;
 
@@ -68,11 +68,9 @@ pub enum ChatError {
 }
 
 impl ChatError {
-    /// Whether retrying unchanged could succeed. Unreachable hosts, timeouts
-    /// and 5xx are transient; 4xx (wrong model name), malformed bodies and a
-    /// misconfigured server preset need a config or server change first. The
-    /// pipeline still records both as `Failed` — only the backlog sweep
-    /// treats them differently.
+    /// Whether retrying unchanged could succeed: unreachable, timeout and 5xx
+    /// yes; 4xx (e.g. wrong model name), malformed bodies and a misconfigured
+    /// preset no. Both record `Failed`; only the backlog sweep tells them apart.
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Unreachable(_) => true,

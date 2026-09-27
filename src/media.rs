@@ -1,13 +1,17 @@
+//! Pause media playback while recording. The orchestrator holds a `MediaPause`
+//! guard for the session; dropping it resumes. Windows detects playback with a
+//! WASAPI peak meter and toggles the (broadcast) play/pause media key; Linux
+//! pauses one MPRIS player over D-Bus and resumes that same player.
+
 /// Check if audio is currently being output on the default render device.
 #[cfg(target_os = "windows")]
 fn is_audio_playing() -> bool {
     is_audio_playing_wasapi()
 }
 
-/// Guard proving Beamer paused playback; `Drop` resumes it, so all exit paths
-/// (including errors) restore playback. On Linux it remembers the specific
-/// player's D-Bus bus name — resuming "any paused player" once resumed the
-/// wrong one.
+/// Guard proving Beamer paused playback; `Drop` resumes it on every exit path.
+/// On Linux it remembers the player's D-Bus bus name: resuming "any paused
+/// player" resumes the wrong one.
 #[must_use = "dropping this immediately resumes playback; hold it for the duration of the recording"]
 pub struct MediaPause {
     /// Absent on Windows, where play/pause is broadcast, not addressed.

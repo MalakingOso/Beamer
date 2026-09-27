@@ -1,9 +1,11 @@
-//! The Tasks page — accepted tasks, grouped by the note they came from (a
-//! heading click opens that note). Dismissed rows are absent on purpose: they
-//! stay in `tasks.json` as labelled negatives for the eval corpus and must
-//! never be deleted. Undecided proposals live on their note's chips.
+//! Tasks page: accepted tasks grouped by the note they came from (a heading
+//! click opens that note), with fully-done notes under a Completed disclosure.
+//! Undecided proposals live on their note's chips (`ui::sticky_chips`).
+//! Dismissed rows are absent on purpose: they stay in `tasks.json` as labelled
+//! negatives for the eval corpus and must never be deleted.
 //!
-//! Store and registry arrive as props (`notes_page.rs` explains why).
+//! Children: `group` (one note's box), `rows` (one task), `calendar` (due-date
+//! picker). Store and registry arrive as props (`notes_page.rs` explains why).
 
 use std::collections::HashSet;
 
@@ -55,10 +57,9 @@ struct Heading {
     badge: Option<&'static str>,
 }
 
-/// Three cases: `None` means genuinely gone (`get` covers archived notes), so
-/// orphaned rows still list under a "deleted" badge rather than vanishing.
-/// Archived notes resolve but are not openable — the reconciler only opens
-/// `open && !archived`, so a click would no-op; badge instead.
+/// Heading for a group's note. `None` means deleted (`get` covers archived
+/// notes), so orphaned rows still list under a "deleted" badge. Archived notes
+/// get a badge and aren't openable: the reconciler only opens `open && !archived`.
 fn heading_for(note: Option<&Note>) -> Heading {
     match note {
         None => Heading {
@@ -128,11 +129,9 @@ fn due_rank(task: &Task, today: NaiveDate) -> (u8, i64) {
     }
 }
 
-/// Group already-accepted, already-sorted rows by note (`TaskStore::accepted`
-/// owns filtering and order; this only groups). Done rows sink within their
-/// group behind a disclosure; an all-done group graduates whole to the
-/// page-level Completed section, never row by row. Stable sort, so ticking a
-/// box moves one row and leaves the rest in place.
+/// Group accepted rows by note, keeping `TaskStore::accepted`'s order between
+/// groups, then stable-sort each group by `due_rank` so ticking a box moves only
+/// that row. An all-done group graduates whole to Completed, never row by row.
 fn group_accepted(rows: Vec<Task>, today: NaiveDate) -> Vec<(String, Vec<Task>)> {
     let mut groups: Vec<(String, Vec<Task>)> = Vec::new();
     for task in rows {
@@ -184,9 +183,9 @@ pub fn TasksPage(props: TasksPageProps) -> Element {
     // Same day as the memo's in every case that matters.
     let today = chrono::Local::now().date_naive();
 
-    // Open disclosures, keyed by note id (not position: accepting a task
-    // reshuffles groups). One page-level set because hooks can't be created
-    // inside the `for` below. Written by `TaskGroup`, never here. Not persisted.
+    // Open disclosures, keyed by note id (position shifts as groups reshuffle).
+    // Page-level because hooks can't be created inside the `for` below. Written
+    // only by `TaskGroup`; not persisted.
     let expanded = use_signal(HashSet::<String>::new);
 
     // Page-level Completed disclosure. Separate from `expanded`: no note id keys it.

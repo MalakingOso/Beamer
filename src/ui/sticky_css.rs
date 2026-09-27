@@ -1,9 +1,9 @@
-//! Sticky note styling, in Beamer Purple. Split out of `sticky.rs` to keep
-//! that file inside the 500-line limit.
+//! Sticky note stylesheet, in Beamer Purple. Injected into every note window by
+//! `sticky_windows`; split out of `sticky.rs` for the 500-line limit.
 
-/// Sticky note styling, in Beamer Purple. Injected as an inline `<style>` per
-/// window, so self-contained (no `@import`); `embedded_font_css()` prepends the
-/// faces. Corner radius is the 8px design-system max.
+/// Injected as an inline `<style>` per window, so self-contained (no `@import`,
+/// no main-stylesheet tokens); `embedded_font_css()` is prepended for the faces.
+/// Corner radius is the 8px design-system max.
 pub const STICKY_CSS: &str = r#"
 :root {
   /* Duplicated app tokens — an inline <style> can't reach the main stylesheet. */

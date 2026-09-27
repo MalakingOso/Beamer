@@ -1,3 +1,7 @@
+//! Tray menu and icon images. Not on the dictation path: `ui::app_setup`
+//! registers the tray, `ui::app_menu` handles clicks, and on Linux
+//! `ui::linux_integration` swaps in the recording icon while recording.
+
 use muda::{Menu, MenuItem, PredefinedMenuItem};
 use std::sync::OnceLock;
 use tray_icon::Icon;

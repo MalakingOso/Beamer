@@ -1,3 +1,16 @@
+//! The root component of the main window. `App()` owns every long-lived piece
+//! of app state as a `Signal` (config, recording state, history, notes, tasks,
+//! status log, ...) and hands them down as props; there is no context provider.
+//! It also starts the long-lived workers: the orchestrator coroutine fed by the
+//! keyboard hook, the note-pipeline coroutine, the sticky-window reconciler, the
+//! notes flush tick, live sync and the component reconcile. Then it renders the
+//! sidebar + page shell.
+//!
+//! Hook order is fixed: each `setup_*`/`use_*` call runs once per render, in the
+//! same order, never behind a runtime condition. Sticky windows are separate
+//! `VirtualDom`s that receive these signals as props. See
+//! `agent_docs/dioxus_architecture.md` and `agent_docs/sticky_notes.md`.
+
 use std::rc::Rc;
 
 use dioxus::desktop::use_window;
@@ -32,6 +45,7 @@ use crate::ui::vocab_page::VocabPage;
 use crate::ui::settings::SettingsPage;
 use crate::ui::status_log::StatusLog;
 
+/// Which page the main window shows (sidebar selection, also set by tray items).
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum Page {
     Home,
@@ -62,13 +76,10 @@ pub fn App() -> Element {
     let notes = use_signal(NoteStore::load);
     // After the notes, from the same automerge document (the note store owns the handle).
     let tasks = use_signal(|| TaskStore::load_beside(&notes.peek()));
-    // Taken *before* `Config::load()`, which creates the file as a side
-    // effect when it's missing — this is the only point that can still tell
-    // "fresh install" from "upgrade of an existing install". `Ok(false)`
-    // only: an `Err` (can't tell) is treated as "not fresh", the same
-    // conservative call `Config::load()` itself documents for the same stat.
-    // Read by the component reconcile below: a fresh install auto-accepts
-    // prompted downloads (the model), an upgrade asks in Settings.
+    // Must precede `Config::load()`, which creates a missing file: the only point
+    // that can still tell a fresh install from an upgrade. An `Err` counts as
+    // "not fresh". The component reconcile below auto-accepts prompted downloads
+    // (the model) on a fresh install; an upgrade asks in Settings.
     let fresh_install = matches!(Config::config_path().try_exists(), Ok(false));
     let config = use_signal(|| Config::load().unwrap_or_default());
     let status_log = use_signal(StatusLog::new);
@@ -104,7 +115,8 @@ pub fn App() -> Element {
         )
     });
 
-    // Low-level keyboard hook for hotkey detection (supports Win key combos)
+    // Low-level keyboard hook (supports Win-key combos); its events are forwarded
+    // into the orchestrator coroutine.
     let hotkey_handle = use_hook(move || {
         let (hook_tx, mut hook_rx) = tokio::sync::mpsc::unbounded_channel::<HotkeyEvent>();
 
@@ -158,10 +170,9 @@ pub fn App() -> Element {
     app_setup::setup_notes_flush(notes, tasks);
 
     // Live sync, off unless `config.sync.url` names a server. The handle feeds
-    // `SyncCard`'s live state without a second connection.
-    //
-    // `sync_doc` is its own statement, not an inline argument: `use_sync_client`
-    // writes `notes`, and an inline `peek()` would hold its borrow past that write.
+    // `SyncCard`'s live state without a second connection. `sync_doc` is its own
+    // statement: `use_sync_client` writes `notes`, and an inline `peek()` would
+    // hold its borrow past that write.
     let sync_doc = notes.peek().sync_doc();
     let sync_client_handle = sync_client::use_sync_client(config, sync_doc, notes, tasks);
 

@@ -1,3 +1,8 @@
+//! Settings → Sync & Updates → Updates: current version, auto-check toggle, and
+//! the check → download → restart flow for self-update (`src/update/`). Also
+//! lists install components (`crate::components`) that need a download
+//! decision or failed.
+
 use dioxus::prelude::*;
 
 use crate::components::{Components, Status};
@@ -82,13 +87,10 @@ pub fn UpdateCard(props: UpdateCardProps) -> Element {
                         button {
                             class: "btn btn-primary",
                             onclick: move |_| {
-                                // Flush here, on the render thread, while
-                                // `write()` is still valid to call. The
-                                // spawned thread below never returns, so this
-                                // is the only chance any note edit still
-                                // sitting in memory gets to reach disk before
-                                // `restart_app`'s `process::exit` skips the
-                                // flush tick along with everything else.
+                                // Flush here, on the render thread where `write()`
+                                // is valid: `restart_app` never returns and its
+                                // `process::exit` skips the flush tick, so unsaved
+                                // note edits would be lost.
                                 crate::notes::flush_stores(&mut notes.write(), &mut tasks.write());
                                 std::thread::spawn(|| update::restart_app());
                             },

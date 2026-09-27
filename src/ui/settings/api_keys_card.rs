@@ -1,3 +1,7 @@
+//! Settings → Intelligence → API Keys: masked inputs for the ElevenLabs and
+//! Mistral keys. The parent saves each to the OS keyring on change (never to
+//! the config file).
+
 use dioxus::prelude::*;
 
 use crate::ui::components::MaskedInput;

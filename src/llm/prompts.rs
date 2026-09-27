@@ -1,22 +1,15 @@
-//! The task-extraction prompt. Tunable text, load-bearing shape — see
-//! `EXTRACT_BODY`'s doc. No crate-rooted paths here: `task_eval`
-//! path-includes this module directly.
+//! The task-extraction system prompt, sent by `extract::build_request`. The
+//! wording is tunable; the shape is load-bearing (see `EXTRACT_BODY`).
+//! No crate-rooted paths: `task_eval` path-includes this module.
 
-/// Extraction policy as tunable prompt text, but its shape is load-bearing: a per-clause `scan` pass
-/// (`subject_is_speaker` + `category`) precedes and gates `tasks`, so a
-/// clause only becomes a task when both fields agree, catching commitments
-/// misattributed to a third party and recurring-problem statements dressed
-/// up as commitments alike. `TaskEnvelope` in `extract.rs` ignores the extra
-/// `scan` field on deserialize — no parser change needed to carry it.
-/// Verbatim `evidence`/`due_phrase` (rejected downstream if not grounded),
-/// strict-or-null dates. Aspirations excluded deliberately — a poisoned list
-/// cannot be un-poisoned. Private body with `{TODAY}` filled per request by
-/// [`extract_system`]. Swept all 6 hand-written regression notes plus most of
-/// a broader 14-note edge-case set; see `agent_docs/local_inference.md` for
-/// the two known open gaps (an occasional misattribution the model's own
-/// `scan` correctly rejects but `tasks` includes anyway, and relative-date
-/// math beyond "tomorrow" — e.g. "next Tuesday" — sometimes resolving to the
-/// wrong day).
+/// The extraction policy, with `{TODAY}` filled per request by
+/// [`extract_system`]. Its shape is load-bearing: a per-clause `scan`
+/// (`subject_is_speaker` + `category`) precedes and gates `tasks`, which
+/// catches third-party commitments and recurring problems posing as
+/// commitments. `TaskEnvelope` ignores `scan`, so the parser needs no change.
+/// Verbatim `evidence`/`due_phrase` (rejected downstream if ungrounded),
+/// strict-or-null dates, aspirations excluded. Known open gaps (scan/tasks
+/// disagreement, relative dates past "tomorrow"): `agent_docs/local_inference.md`.
 const EXTRACT_BODY: &str = r#"You extract tasks from a personal note. You are a strict judge, not a summarizer.
 
 Today is {TODAY}. Resolve every relative date against that.

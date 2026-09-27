@@ -1,3 +1,8 @@
+//! Settings → Dictation → Transcription: the cloud STT backend (ElevenLabs
+//! Scribe v2, its medical variant, or Mistral Voxtral), language, and filler-word
+//! removal. The backends themselves are `src/transcription/`; see
+//! `agent_docs/transcription_backends.md`.
+
 use dioxus::prelude::*;
 
 use crate::ui::components::{language_options, Select, Toggle};
@@ -42,9 +47,9 @@ pub fn TranscriptionCard(props: TranscriptionCardProps) -> Element {
                         onchange: move |v: String| props.on_language_change.call(v),
                     }
                 }
-                // ElevenLabs' `no_verbatim`. Hidden rather than disabled on the
-                // Voxtral backends, which have no equivalent — a switch that
-                // silently does nothing is worse than a switch that isn't there.
+                // ElevenLabs' `no_verbatim`. Hidden, not disabled, on Voxtral,
+                // which has no equivalent: a switch that silently does nothing
+                // is worse than none.
                 div { class: "card-row",
                     span { class: "card-label", "Remove filler words" }
                     Toggle {

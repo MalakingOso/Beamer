@@ -1,6 +1,8 @@
-//! Note footer: pure function of the extraction field. Keyed to the pass, not
-//! the note's origin, so a failed pass stays retryable. Normally a single
-//! icon + tooltip; words appear only on the failure path.
+//! The sticky note footer's decisions, as pure functions `sticky.rs` renders:
+//! which glyph to show (from `extract_state` and whether a pass is in flight)
+//! and when the failure text flashes. Normally a single icon + tooltip; words
+//! appear only on failure. Keyed to the pass, not the note's origin, so a
+//! failed pass stays retryable.
 
 use crate::notes::StageState;
 
@@ -60,17 +62,10 @@ pub fn footer(extract: StageState, in_flight: bool) -> Footer {
     }
 }
 
-/// Whether the footer's red failure text should (re)start its temporary
-/// display. Two cases, and only these two:
-///
-/// - first mount with the note already failed (a restart, or a window opened
-///   after the pass finished): show it once, then let it go quiet;
-/// - a pass for this note just finished failed: flash it again.
-///
-/// Anything else leaves visibility alone: a pass still running never shows
-/// words (the Running icon outranks a stale failure), a fresh success shows
-/// nothing, and a note that stays failed across unrelated re-renders must not
-/// restart its own timer.
+/// Whether the red failure text should (re)start its timed display: the note is
+/// failed, no pass is running, and either this is first mount (opened
+/// already-failed) or a pass just finished. Anything else leaves it alone — a
+/// note that stays failed across unrelated re-renders must not restart its timer.
 pub fn should_flash_error(
     is_mount: bool,
     just_finished: bool,

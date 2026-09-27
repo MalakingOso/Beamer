@@ -1,8 +1,10 @@
-//! The one place the automerge document is written. Ordering is the point:
-//! 1. reconcile notes, reconcile tasks 2. merge the incoming file, if moved
-//! 3. hydrate both stores back, only if the merge brought something new
-//! 4. save the document, then the JSON mirrors. Merging before reconciling would
-//! read as a deliberate revert of the other machine's edits.
+//! The app's only writer of the automerge document, plus the JSON mirrors
+//! (`notes.json`, `tasks.json`). Run by the 500 ms tick and on quit.
+//!
+//! Ordering is the point: reconcile notes and tasks, merge the incoming file
+//! if it moved, sync the vocabulary, hydrate both stores only if the merge
+//! brought something new, then save the document and the mirrors. Merging
+//! before reconciling would read as a deliberate revert of the other machine's edits.
 
 use super::task_store::TaskStore;
 use super::{doc_notes, doc_tasks, doc_vocab, NoteStore};
@@ -18,8 +20,9 @@ struct DocPass {
     settled: bool,
 }
 
-/// Reconcile, merge, save. Returns whether anything was written. Called from the
-/// 500 ms tick and the tray's Quit handler (which must write before `process::exit`).
+/// Reconcile, merge, save. Returns whether anything was written. Called from
+/// the 500 ms tick, the tray's Quit handler (which must write before
+/// `process::exit`), and the few paths that need an immediate write.
 pub fn flush_stores(notes: &mut NoteStore, tasks: &mut TaskStore) -> bool {
     prune_orphan_rows(notes, tasks);
     let pass = run_document_pass(notes, tasks);
@@ -48,13 +51,10 @@ pub fn flush_stores(notes: &mut NoteStore, tasks: &mut TaskStore) -> bool {
     wrote
 }
 
-/// Drop task rows whose note is gone. Deleting a note mutates both stores in
-/// memory before one `flush_stores` call, but a crash between the two mirror
-/// writes still strands rows for a deleted note; left alone they linger on no
-/// page and poison the eval corpus with labels for text that no longer
-/// exists. Only when the notes side is trustworthy — never over a failed
-/// load, where "gone" means "unreadable" — and rows for unreadable (kept, not
-/// deleted) notes are spared with it.
+/// Drop task rows whose note is gone. A crash between the two mirror writes
+/// can strand them, showing on no page and poisoning the eval corpus. Skipped
+/// over a failed or read-only load (there "gone" means "unreadable"), and rows
+/// for unreadable-but-kept notes are spared.
 fn prune_orphan_rows(notes: &NoteStore, tasks: &mut TaskStore) {
     if notes.load_error.is_some() || notes.document_read_only() {
         return;

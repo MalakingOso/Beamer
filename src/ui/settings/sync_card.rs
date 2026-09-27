@@ -1,5 +1,6 @@
-//! Settings card for the sync client: a toggle, one address field, and the
-//! live connection state. Reads `status` (owned by `use_sync_client`); never
+//! Settings → Sync & Updates → Sync: a toggle, the other machine's address, and
+//! the live connection state for cross-machine note sync (`notes::sync_client`,
+//! `agent_docs/sync.md`). Reads `status` (owned by `use_sync_client`); never
 //! opens its own socket, which would register a second peer server-side.
 
 use dioxus::prelude::*;
@@ -22,12 +23,10 @@ pub struct SyncCardProps {
 
 #[component]
 pub fn SyncCard(props: SyncCardProps) -> Element {
-    // Shown iff a URL is configured. Turning the toggle off clears `url`
-    // outright (off means unconfigured, not paused); turning it on just
-    // reveals an empty field, since there is no default server to propose.
-    // `show_field` is only the toggle's intent — visibility also derives
-    // from the live prop, so a URL set anywhere but here still reveals the
-    // field instead of going stale behind the first render's snapshot.
+    // Toggle off clears `url` (off = unconfigured, not paused); on just reveals
+    // an empty field, as there's no default server. `show_field` is only the
+    // toggle's intent: visibility also derives from the live prop, so a URL
+    // set elsewhere still shows instead of going stale behind the first render.
     let mut show_field = use_signal(|| !props.url.trim().is_empty());
     let field_visible = *show_field.read() || !props.url.trim().is_empty();
 
@@ -65,9 +64,8 @@ pub fn SyncCard(props: SyncCardProps) -> Element {
                 }
             }
 
-            // Stays visible while a pre-toggle connection is still running:
-            // the client reads the address once at startup, so turning the
-            // toggle off doesn't drop it until restart.
+            // Stays visible after toggling off: the client reads the address
+            // once at startup, so the old connection runs until restart.
             if field_visible || !props.started_url.is_empty() {
                 div { class: "card-row",
                     span { class: "sync-status {line.class}", "{line.headline}" }

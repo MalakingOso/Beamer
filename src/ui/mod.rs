@@ -1,3 +1,10 @@
+//! The Dioxus desktop UI. `main.rs` calls `launch_app`, which blocks the main
+//! thread in Dioxus's event loop (owner of the process's only tokio runtime)
+//! with `app::App` as the root component. Windows: main (home/settings),
+//! splash, recording pill (Windows/macOS), and one per open sticky note.
+//! Also holds helpers every window shares (`open_external`, `webview_data_dir`).
+//! See `agent_docs/dioxus_architecture.md`.
+
 pub mod app;
 mod app_menu;
 mod app_pill;
@@ -124,7 +131,6 @@ mod open_external_tests {
 /// WebView user-data dir. `data_local_dir`, not `data_dir`: on Windows the latter
 /// is Roaming `%APPDATA%`, where WebView2's open file handles would collide with
 /// resets/cleanups and roam a browser cache at logon. No-op elsewhere (same dir).
-/// Existing Windows installs get a fresh profile once: one slower first launch.
 pub fn webview_data_dir() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(std::env::temp_dir)

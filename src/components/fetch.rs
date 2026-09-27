@@ -1,7 +1,6 @@
-//! Download + verify, generalized over (url, sha256, size, destination).
-//! Moved out of the old first-run `model_setup` so the model and the runtime
-//! archive share one path. No HTTP Range resume: a `.part` is always
-//! overwritten from scratch, never appended to.
+//! Download + sha256 verify for catalog `File` and `Archive` components (the
+//! model and the runtime zip share this path). No HTTP Range resume: a
+//! `.part` is always overwritten from scratch, never appended to.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -49,10 +48,9 @@ pub async fn download(
     Ok(())
 }
 
-/// Size check first (cheap, catches a truncated file without hashing it),
-/// then a streamed sha256 over a 64KB buffer so a large file is never read
-/// fully into memory. Blocking: 1.1 GB takes seconds, so call it from
-/// `spawn_blocking`.
+/// Whether `path` has the expected size and sha256. The size check runs first
+/// (cheap, catches truncation), then a streamed hash. Blocking: 1.1 GB takes
+/// seconds, so call it from `spawn_blocking`.
 pub fn verify_against(path: &Path, expected_size: u64, expected_sha256: &str) -> anyhow::Result<bool> {
     let metadata = std::fs::metadata(path)?;
     if metadata.len() != expected_size {

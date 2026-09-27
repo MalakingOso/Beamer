@@ -1,5 +1,7 @@
-//! The shape of an extracted task. Types only, no persistence.
-//! Each row is both a chip the user acts on and a labelled eval-corpus example.
+//! The `Task` type: one row the extraction pass proposed. Types only;
+//! `task_store` persists them. Each row is both a chip the user accepts or
+//! dismisses and a labelled eval-corpus example. `src/bin/task_eval.rs`
+//! `#[path]`-includes this file, so it must stay free of `crate::` paths.
 
 use chrono::{DateTime, Local, NaiveDate, NaiveDateTime};
 use serde::{Deserialize, Serialize};

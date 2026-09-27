@@ -1,8 +1,9 @@
-//! One accepted task into a calendar entry. Hand-written RFC 5545, one-way:
-//! the file lands in the temp dir for the user's calendar app, and Beamer
-//! cannot edit or remove it afterwards.
-//! ⚠️ Timed values are emitted **floating** (no offset, no `Z`): an offset
-//! suffix like `20260825T090000+01:00` is malformed RFC 5545. Only `DTSTAMP` is UTC.
+//! Calendar export: one task into a `.ics` file, on an explicit click on the
+//! tasks page. Hand-written RFC 5545, one-way: the file lands in the temp dir
+//! for the user's calendar app, and Beamer cannot edit or remove it afterwards.
+//!
+//! Timed values are emitted **floating** (no offset, no `Z`): an offset suffix
+//! like `20260825T090000+01:00` is malformed RFC 5545. Only `DTSTAMP` is UTC.
 
 use anyhow::Result;
 use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, Utc};

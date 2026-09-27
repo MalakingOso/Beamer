@@ -1,6 +1,9 @@
-//! Persistence for extracted tasks. A separate file from `notes.json`: notes
-//! dirty per keystroke and debounce, decisions write instantly, and tasks
-//! outlive their notes as corpus rows.
+//! `TaskStore`: the extracted task rows behind a sticky's suggestion chips and
+//! the tasks page. Shares `NoteStore`'s automerge document (its `tasks` root);
+//! `tasks.json` is its own JSON mirror, separate from `notes.json` because
+//! note edits debounce per keystroke while decisions write instantly.
+//! Decided rows (dismissed too) are kept as eval-corpus labels; only deleting
+//! the note removes them.
 
 use anyhow::Result;
 use chrono::Local;
@@ -295,10 +298,9 @@ impl TaskStore {
         removed
     }
 
-    /// Build an undecided row. The id comes from `notes::next_synced_id`,
-    /// not a timestamp, since one pass mints several rows in the same
-    /// millisecond — and carries the machine suffix, since rows sync keyed
-    /// by id. Takes a whole [`Proposal`] so a row can't be written half-dated.
+    /// Build an undecided row. Ids come from `notes::next_synced_id`: one pass
+    /// mints several rows per millisecond, and rows sync keyed by id. Takes a
+    /// whole [`Proposal`] so a row can't be written half-dated.
     pub fn new_suggestion(note_id: &str, proposal: Proposal, machine_id: &str) -> Task {
         Task {
             id: next_synced_id(machine_id),

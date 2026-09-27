@@ -1,7 +1,10 @@
-//! Mapping between `vocabulary.txt` and the `vocabulary` scalar at the document root.
+//! Mapping between the machine-local `vocabulary.txt` and the `vocabulary`
+//! scalar at the synced document's root. Run by `flush` after each merge.
+//!
 //! A last-write-wins scalar at `ROOT` (not a map): the list's order decides which
 //! terms survive the `keyterms` cap, and in-place renames must not become
 //! remove-then-add. `ROOT` is shared by every document, so no genesis entry is needed.
+//! Concurrent edits don't merge: the document side wins on both machines.
 
 use anyhow::Result;
 use automerge::ROOT;

@@ -1,12 +1,15 @@
+//! Settings → Dictation → Text Injection: on GNOME Wayland, install/enable/
+//! remove the GNOME Shell helper extension; everywhere, a collapsed read-only
+//! view of which fallback backends are available. The chain itself is
+//! `src/injection/`; see `agent_docs/text_injection.md`.
+
 use dioxus::prelude::*;
 use crate::ui::settings::layout::SubSection;
 
 #[component]
 pub fn InjectionCard() -> Element {
-    // Probed off the render thread: on Windows this runs Win32 calls
-    // (`GetForegroundWindow`, `OpenProcess`) plus `Clipboard::new()`, on
-    // Linux a `wtype` probe and a D-Bus handshake — none of which may run
-    // inline in a render. Same spawn_blocking pattern as the GNOME probe below.
+    // Probed in `spawn_blocking`: it makes Win32 calls and opens the clipboard on
+    // Windows, and runs a `wtype` probe and a D-Bus handshake on Linux.
     let mut availability: Signal<
         Option<Vec<(&'static str, &'static str, Result<(), String>)>>,
     > = use_signal(|| None);
@@ -33,15 +36,11 @@ pub fn InjectionCard() -> Element {
                 {
                     use crate::install::gnome_extension::{self, Status as HelperStatus};
 
-                    // Hooks must run unconditionally to satisfy Dioxus's hook
-                    // ordering contract, so they sit outside the desktop check.
-                    //
-                    // `None` = the probe hasn't answered yet. Every call into
-                    // `gnome_extension` shells out to `gnome-extensions` (the
-                    // status probe alone runs ~110ms; install additionally
-                    // copies files), so they all go through `spawn_blocking`
-                    // rather than running inline in a render or an event
-                    // handler, where they would freeze the window.
+                    // Hooks run unconditionally (fixed hook order), so they sit
+                    // outside the desktop check. `None` = probe hasn't answered.
+                    // Every `gnome_extension` call shells out to `gnome-extensions`
+                    // (~110ms for status alone), so all go through `spawn_blocking`
+                    // or they'd freeze the window.
                     let mut status: Signal<Option<HelperStatus>> = use_signal(|| None);
                     let mut busy = use_signal(|| false);
 
@@ -96,8 +95,8 @@ pub fn InjectionCard() -> Element {
                                                             gnome_extension::enable_installed(),
                                                         HelperStatus::Enabled =>
                                                             gnome_extension::uninstall(),
-                                                        // These render no button; match is exhaustive
-                                                        // for safety if the render and click race.
+                                                        // No button for these; covered in case
+                                                        // render and click race.
                                                         HelperStatus::PendingRestart
                                                         | HelperStatus::UpdatePendingRestart => Ok(()),
                                                     };
@@ -138,12 +137,10 @@ pub fn InjectionCard() -> Element {
                 }
             }
 
-            // Read-only availability of the fallback chain, collapsed by
-            // default behind a disclosure row. The order is fixed (config
-            // `injection.backends` is still honored if hand-edited in
-            // config.toml); the helper row above covers the "gnome" backend.
-            // The paste shortcut for the clipboard backend has no UI either —
-            // `injection.paste_shortcut` stays on "auto" unless hand-edited.
+            // Read-only; the helper row above covers the "gnome" backend. Chain
+            // order and the clipboard paste shortcut have no UI; both are still
+            // read from config.toml if hand-edited (`injection.backends`,
+            // `injection.paste_shortcut`, default "auto").
             button {
                 class: "injection-fallbacks-toggle",
                 onclick: move |_| show_fallbacks.toggle(),

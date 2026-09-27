@@ -1,6 +1,6 @@
-//! The backlog sweep's pure decision logic: plain values in, decisions out.
-//! No `Signal`, no coroutine, no server. Fired only from `use_pipeline`'s
-//! success path, never a timer.
+//! The backlog sweep: after a successful pass, re-request every `Failed` note.
+//! Pure decision logic (no `Signal`, coroutine or server), so it is testable.
+//! Fired only from `use_pipeline`'s success path, never a timer.
 
 use std::collections::HashSet;
 

@@ -1,3 +1,7 @@
+//! cpal input stream for the default mic. The callback converts whatever the
+//! device delivers (any sample format, rate, channel count) to 16 kHz mono f32
+//! and hands it to the chunker in `audio/mod.rs` without ever blocking.
+
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, FromSample, SampleFormat, SampleRate, SizedSample, Stream, StreamConfig};
@@ -5,16 +9,16 @@ use tokio::sync::mpsc;
 
 use super::{try_send_reserving, warn_channel_full, SendOutcome};
 
-/// Raw-sample channel capacity, sized for the fastest realistic callback cadence
-/// (5ms per callback → 200/sec) so it holds >= 60s of audio: 60 * 200 = 12_000.
+/// Raw-sample channel capacity: >= 60s at the fastest realistic callback
+/// cadence (5ms → 200/sec), 60 * 200 = 12_000.
 pub(crate) const SAMPLE_CHANNEL_CAPACITY: usize = 12_000;
 
 /// Slots withheld from sample data so the rare device-error sentinel (empty
 /// `Vec` from the cpal error callback) always has room to `try_send`.
 const SENTINEL_RESERVE: usize = 4;
 
-/// cpal device setup producing a mono 16 kHz f32 sample stream, resampling and
-/// downmixing from the device's native rate/channels when they differ.
+/// The default input device, producing mono 16 kHz f32 samples; resamples and
+/// downmixes from the device's native rate/channels when they differ.
 pub struct AudioCapture {
     device: Device,
     config: StreamConfig,
@@ -162,10 +166,9 @@ impl AudioCapture {
             },
             move |err| {
                 tracing::error!("Audio capture error: {}", err);
-                // Empty Vec marks a capture error. The consumer skips empty
-                // batches; reserved slots keep this deliverable. `Full` here
-                // is unexpected enough to always log; `Closed` means the
-                // consumer already tore down, so drop silently.
+                // Empty Vec marks a capture error; the reserved slots keep it
+                // deliverable, so `Full` is always logged. `Closed` is normal
+                // teardown.
                 match err_tx.try_send(Vec::new()) {
                     Ok(()) => {}
                     Err(mpsc::error::TrySendError::Full(_)) => {

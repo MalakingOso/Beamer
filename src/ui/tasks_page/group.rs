@@ -1,8 +1,8 @@
-//! One note's box of tasks, heading and all. Shared because the box renders in
-//! two places (main list and page-level Completed); a duplicate would drift.
+//! One note's box of tasks, heading and all, rendered in both the main list and
+//! the page-level Completed section. Done rows hide behind a per-group
+//! disclosure unless the whole group is finished.
 //!
-//! `pub(super)`: a `pub` props struct may not expose a private field type like
-//! `Heading`, but nothing outside the parent needs this module.
+//! `pub(super)`: a `pub` props struct may not expose the private `Heading` type.
 
 use std::collections::HashSet;
 

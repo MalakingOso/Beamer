@@ -1,9 +1,11 @@
-//! The automerge document behind the note and task corpus (`notes.automerge`).
-//! The stores' `Vec`s stay the in-memory source of truth; this is where they
-//! persist and where another machine's copy merges in. Character-level merge
-//! keeps both machines' concurrent edits to one note.
-//! ⚠️ Written from one place, `notes::flush::flush_stores`: both stores
+//! The automerge document behind the synced note and task corpus
+//! (`<config>/sync/notes.automerge`). The stores' `Vec`s stay the in-memory
+//! source of truth; this is where they persist and where another machine's
+//! copy merges in, character by character. See `agent_docs/sync.md`.
+//!
+//! In the app, only `notes::flush::flush_stores` saves it: both stores
 //! reconcile before any merge, or a stale vec reverts the merge on next tick.
+//! `bin/sync_server.rs` `#[path]`-includes this directory, so no crate paths here.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -24,7 +26,7 @@ pub const TASKS_KEY: &str = "tasks";
 /// Without it, two fresh documents hold different `Map` objects at one root key;
 /// the merge leaves a conflict, one side wins whole, and the loser's corpus is
 /// pruned. Shared genesis gives both root maps the same object id, so documents
-/// merge per note. Regenerate via the ignored test in `sync_tests.rs`.
+/// merge per note. Regenerate via the ignored test in `sync_recovery_tests.rs`.
 const GENESIS: &[u8] = include_bytes!("../genesis.automerge");
 
 /// The actor that authored [`GENESIS`]. No machine ever writes as it; every
@@ -307,17 +309,16 @@ impl SyncDoc {
 
     /// Record the file on disk as seen, without merging it. Used after a merge
     /// that brought nothing new, or `file_moved` would stay true forever.
-    /// ⚠️ Racy by nature: a rewrite between `merge_incoming`'s read and this
-    /// stat records a newer mtime against older content. Live sync (not mtime)
-    /// is the real fix; until then the window is one flush interval wide.
+    /// Racy: a rewrite between `merge_incoming`'s read and this stat records a
+    /// newer mtime against older content (a one-flush-interval window).
     pub fn mark_seen(&mut self) {
         self.last_write = mtime(&self.path);
     }
 
     /// Write the document out atomically (temp file plus rename). A no-op on a
     /// read-only document: the unreadable bytes at `path` are the only copy.
-    /// ⚠️ The temp name carries this process's pid, since `sync_server` may
-    /// share this file on the same machine. Sets/clears `save_failed` itself.
+    /// The temp name carries the pid because `sync_server` may share this file
+    /// on the same machine. Sets/clears `save_failed` itself.
     pub fn save(&mut self) -> Result<()> {
         if self.path.as_os_str().is_empty() || self.read_only {
             return Ok(());

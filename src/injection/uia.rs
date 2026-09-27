@@ -1,5 +1,10 @@
 #![cfg(target_os = "windows")]
 
+//! UI Automation `SetValue` backend, last in the Windows chain on purpose:
+//! `SetValue` replaces the control's *entire* content instead of inserting at
+//! the cursor, so dictating into a non-empty field silently wipes it.
+//! Callers run it on a `spawn_blocking` thread; each entry point initializes COM itself.
+
 use super::{InjectionBackend, InjectionResult};
 use anyhow::Result;
 use windows::Win32::System::Com::{

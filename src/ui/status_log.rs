@@ -1,3 +1,6 @@
+//! In-memory status log shown in Settings → Debug. Background tasks (e.g. the
+//! notes pipeline) push timestamped entries through a `Signal<StatusLog>`.
+
 use dioxus::prelude::*;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -16,7 +19,7 @@ pub struct StatusEntry {
 
 const MAX_ENTRIES: usize = 50;
 
-/// Debug-card log. Oldest entries evicted past `MAX_ENTRIES`.
+/// Debug-card log; the oldest entry is dropped past `MAX_ENTRIES`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StatusLog {
     pub entries: Vec<StatusEntry>,

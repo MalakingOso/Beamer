@@ -1,8 +1,10 @@
 #![cfg(target_os = "linux")]
 
-//! Client for the GNOME Shell extension's recording pill. One worker thread fed
-//! by a channel (fire-and-forget from anywhere); level updates coalesced to the
-//! newest; silent no-op when the helper isn't active.
+//! Linux: D-Bus client for the GNOME extension's in-shell recording pill
+//! (`ShowIndicator` / `UpdateLevel` / `HideIndicator`), called from
+//! `linux_integration`. One worker thread fed by a channel, so callers
+//! fire-and-forget; queued level updates collapse to the newest. A silent no-op
+//! when the helper is absent or older than v2.
 
 use std::sync::mpsc::{self, Sender};
 use std::sync::OnceLock;

@@ -1,4 +1,5 @@
-//! Delete tests for [`super`].
+//! `NoteStore::delete` tests for [`super`]: deletion is final (unlike archive)
+//! and takes the note's machine-local window state with it.
 
 use super::*;
 use crate::notes::{NoteColor, NoteOrigin};

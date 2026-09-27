@@ -1,3 +1,7 @@
+//! History page: every dictation grouped by day, newest first, each with a
+//! copy-to-clipboard button. Reads the `TranscriptionHistory` signal owned by
+//! `App` (`ui::history`).
+
 use dioxus::prelude::*;
 
 use crate::ui::history::TranscriptionHistory;

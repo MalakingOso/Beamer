@@ -1,4 +1,6 @@
-//! Machine writes from the extraction pass: never bump `modified`, never touch `raw`.
+//! Records extraction results on a note (`extract_state`). The only code that
+//! writes a stage result; `pipeline` calls it. These are machine writes: they
+//! never bump `modified` (user-facing ordering) and never touch `raw`.
 
 use super::model::StageState;
 use super::{Note, NoteStore};
@@ -13,9 +15,8 @@ impl NoteStore {
     }
 
     /// Extraction deliberately not run (disabled in config). Never overwrites
-    /// `Done`: asking for a pass while the feature is off must not erase the
-    /// record that it once ran. Enforced here rather than at the call sites,
-    /// so no future caller can get it wrong.
+    /// `Done`, so a pass requested while disabled cannot erase the record that
+    /// it once ran. Enforced here, not at call sites.
     pub fn mark_extract_skipped(&mut self, id: &str) {
         if let Some(note) = Self::find_mut(&mut self.notes, id) {
             if note.extract_state != StageState::Done {
@@ -32,8 +33,8 @@ impl NoteStore {
         }
     }
 
-    /// Not `touch()`: background passes must not bump `modified`. Missing id is
-    /// a no-op that does not dirty the store. `pub(super)` so `edit.rs` shares it.
+    /// Lookup without `touch()`: background passes must not bump `modified`.
+    /// Missing id is a no-op that does not dirty the store.
     pub(super) fn find_mut<'a>(notes: &'a mut [Note], id: &str) -> Option<&'a mut Note> {
         notes.iter_mut().find(|n| n.id == id)
     }

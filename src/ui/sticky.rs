@@ -1,9 +1,11 @@
-//! Sticky note windows: one ordinary (not always-on-top) Dioxus window per open
-//! note. Wayland clients can't position themselves, so placement goes through
-//! the GNOME extension (`shell_window`), matched by window title; position is
-//! never read back, but size is (`WindowEvent::Resized`) and is remembered.
-//! Each window is its own `VirtualDom`, so the store arrives as a prop —
+//! One sticky note window's UI: `StickyNote` (drag bar, textarea body,
+//! suggestion chips, pass footer, resize grip). An ordinary, not always-on-top
+//! window per open note, opened by `sticky_windows` and placed on Linux by the
+//! GNOME extension (`shell_window`), matched by window title. Position is never
+//! read back; size is (`WindowEvent::Resized`) and is remembered.
+//! Each window is its own `VirtualDom`, so the stores arrive as props —
 //! `use_context` can't see the main window's providers across that boundary.
+//! See `agent_docs/sticky_notes.md`.
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -20,6 +22,8 @@ use crate::ui::icons::{IconAsterisk, IconCheck, IconPlus};
 use crate::ui::sticky_chips::StickyChips;
 use crate::ui::sticky_footer::{self, FooterIcon};
 
+/// Note windows are titled `TITLE_PREFIX + id`, and the GNOME extension finds
+/// them by that exact title: changing it silently breaks placement.
 pub const TITLE_PREFIX: &str = "Beamer Note ";
 
 pub fn window_title(id: &str) -> String {
@@ -28,10 +32,9 @@ pub fn window_title(id: &str) -> String {
 
 pub const PALETTE: [NoteColor; 6] = NoteColor::ALL;
 
-/// Convert a `Resized` event's physical size to the logical one the store keeps.
-/// ⚠️ `Resized` is physical, the window was built logical — swapped, notes
-/// reopen at double/half size on HiDPI (invisible at 1x). A zero axis is a
-/// minimize, not a resize, and must not be stored.
+/// Convert a `Resized` event's physical size to the logical size the store keeps.
+/// The window was built logical; storing physical reopens notes at double size
+/// on HiDPI (invisible at 1x). A zero axis is a minimize and yields `None`.
 pub fn logical_size(physical: (u32, u32), scale: f64) -> Option<(u32, u32)> {
     if physical.0 == 0 || physical.1 == 0 || scale <= 0.0 {
         return None;
@@ -65,9 +68,8 @@ pub struct StickyNoteProps {
     pub passes_in_flight: Signal<HashSet<String>>,
 }
 
-/// How long the footer keeps showing red failure text before going quiet.
-/// Middle of the 5-10s range the user asked for — the sweep is still the
-/// real recovery mechanism, this only calms the visible alarm.
+/// How long the footer shows red failure text before going quiet. Cosmetic
+/// only: the sweep is still what actually retries.
 const FAILURE_TEXT_TIMEOUT: Duration = Duration::from_secs(7);
 
 #[component]
@@ -83,21 +85,15 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
         use_memo(move || notes.read().get(&id).cloned())
     };
 
-    // Whether the footer's red failure text is currently shown. Starts true
-    // so a note opened already-Failed still shows it once; the effect below
-    // hides it ~7s after each flash and shows it again on the next one
-    // (e.g. a retry that fails again).
+    // Whether the red failure text is showing. Starts true so a note opened
+    // already-Failed shows it once; the effect hides it after each flash.
     let mut show_error_text = use_signal(|| true);
     {
         let id = id.clone();
-        // Detected via the in-flight signal, not the note's own fields: a
-        // retry that fails the same way it failed before leaves
-        // `extract_state` unchanged (`Failed` -> `Failed`), so the note
-        // itself carries no detectable transition. Passing through `in_flight`
-        // on every retry
-        // does. Mount is the separate second case: a note opened
-        // already-Failed never crosses that edge in this window, so without
-        // it the text would show forever (see `should_flash_error`).
+        // Triggered by this note leaving the in-flight set, not by the note: a
+        // retry that fails the same way leaves an identical `Note`, so the memo
+        // never changes. Mount is the second trigger, or a note opened
+        // already-Failed would show the text forever (see `should_flash_error`).
         let mut was_running = use_signal(|| false);
         let mut mounted = use_signal(|| false);
         let mut generation = use_signal(|| 0u64);
@@ -127,11 +123,10 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
         });
     }
 
-    // Hooks stay above the early return below (fixed hook order). The event
-    // handler must register here, not in `App()`: handlers are keyed to the
-    // registering window, so `App()` would only ever see the main window's events.
-    // No double-fire guard needed — programmatic `close()` never produces a
-    // `WindowEvent`, only user/compositor closes do.
+    // Hooks stay above the early return below (fixed hook order). This handler
+    // must register here, not in `App()`: wry handlers are per-window, so one in
+    // `App()` would compile, run, and silently see only the main window's events.
+    // No double-fire guard: programmatic `close()` never emits a `WindowEvent`.
     {
         let id = id.clone();
         let window = window.clone();
@@ -184,7 +179,8 @@ pub fn StickyNote(props: StickyNoteProps) -> Element {
         div { class: "{color_class}",
             div {
                 class: "sticky-bar",
-                // The bar is the title bar; positions are not persisted.
+                // The bar is the only drag handle (undecorated window). Dioxus
+                // discards `drag_window`'s `Result`, so a failure here is silent.
                 onmousedown: {
                     let window = window.clone();
                     move |_| window.drag()

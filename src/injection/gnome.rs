@@ -4,12 +4,14 @@
 //!
 //! The extension types through a `Clutter.VirtualInputDevice` (same mechanism
 //! as the on-screen keyboard): no uinput permissions, no portal dialogs, no
-//! clipboard. The only first-class injection path on GNOME Wayland.
+//! clipboard. The only first-class injection path on GNOME Wayland, so it
+//! heads the Linux chain; elsewhere its availability probe fails and it is skipped.
 
 use super::{InjectionBackend, InjectionResult};
 use anyhow::Result;
 
-/// Helper interface version that provides `TypeText`/`SendPasteChord`.
+/// Helper interface version that provides `TypeText`/`SendPasteChord`: the real
+/// capability floor. Raise only when depending on a genuinely new method.
 const REQUIRED_VERSION: u32 = 2;
 
 /// Live helper version, or `None` when absent (v1 has no `GetVersion`,

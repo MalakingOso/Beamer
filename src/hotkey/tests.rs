@@ -1,10 +1,6 @@
 //! Tests for [`super`]: `HotkeyEvent`/`CaptureMode`, `HotkeyConfig::parse`,
-//! and the platform-neutral binding-matching layer shared by
-//! `linux_hotkey.rs` and `ll_hook.rs`.
-//!
-//! Split into its own file per the project's 500-line cap. `mod.rs` holds
-//! two backends' worth of shared matching logic plus its own config parsing,
-//! and the test suite for all of that does not fit alongside it.
+//! the shared binding-matching layer, and (Linux) how the GNOME desktop grab
+//! and evdev share one state machine. Split out of `mod.rs` for the 500-line cap.
 
 use super::*;
 
@@ -71,15 +67,10 @@ fn two_bindings() -> Vec<BindingConfig> {
     ]
 }
 
-/// Two bindings that share a trigger key and differ only by a modifier.
-///
-/// This is the real-world pairing: `Ctrl+Super` dictates, `Ctrl+Alt+Super`
-/// captures a note. Both resolve to `trigger_vk == VK_LWIN`, because the
-/// parser can only express Super as a trigger, and `HotkeyConfig` has no
-/// Super/Meta modifier field at all. Nothing separates them except the
-/// exact modifier comparison in `matching_binding`, so it is worth pinning:
-/// a future `mods.ctrl >= b.config.ctrl`-style relaxation would make every
-/// note chord also fire dictation.
+/// Two bindings sharing a trigger, differing only by a modifier: the real-world
+/// `Ctrl+Super` (dictate) / `Ctrl+Alt+Super` (note) pair, both `VK_LWIN`.
+/// Pins exact modifier matching: a `mods.ctrl >= b.config.ctrl`-style relaxation
+/// would make every note chord also fire dictation.
 #[test]
 fn chords_sharing_a_trigger_key_are_told_apart_by_modifiers_alone() {
     let bindings = vec![

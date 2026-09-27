@@ -1,7 +1,7 @@
-//! Embedded webfonts for secondary windows. Those inject CSS as an inline
-//! `<style>` via `with_custom_head`, which carries no `@font-face` — without
-//! this every `font-family:"DM Mono"` there silently falls back to a system
-//! font. `data:` URIs can't fail to resolve; three faces, ~85 KB, encoded once.
+//! Embedded webfonts as `data:` URI `@font-face` rules, prepended to the inline
+//! `<style>` of the main window and sticky-note windows. Without them every
+//! `font-family:"DM Mono"` silently falls back to a system font. Three faces,
+//! ~85 KB, encoded once.
 
 use std::sync::OnceLock;
 

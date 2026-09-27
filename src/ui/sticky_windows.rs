@@ -1,8 +1,12 @@
-//! Reconcile sticky note windows against the note store: one effect makes the
-//! live windows match the notes that should be showing (covers both new and
-//! restored notes). Invariant: the effect reads `notes`, peeks the registry,
-//! writes only the registry — writing `notes` inside its own trigger loops.
-//! Notes are placed (`note_layout::place_next`), never restored to where they were.
+//! Opens and closes sticky note windows. One effect (`setup_sticky_windows`)
+//! makes the live windows match the notes that should be showing, covering
+//! both new and restored notes, and tracks them in a registry the notes board
+//! also uses (`reopen_note`). Notes are placed fresh (`note_layout::place_next`),
+//! never restored to where they were.
+//!
+//! Invariant: the effect reads `notes`, peeks the registry, and writes only the
+//! registry — writing `notes` inside its own trigger loops. See
+//! `agent_docs/sticky_notes.md` ("The reconciler and its invariant").
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;

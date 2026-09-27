@@ -1,6 +1,9 @@
-//! Mapping between `Vec<Note>` and the `notes` root of the automerge document.
-//! `reconcile` pushes the vec in as a diff; `hydrate` reads it back after a merge.
-//! A map keyed by note id (not a list), so concurrent creations on two machines merge.
+//! Mapping between `Vec<Note>` and the `notes` root of the synced automerge
+//! document. `reconcile` pushes the vec in as a diff; `hydrate` reads it back
+//! after a merge. Driven by `flush` (file merges) and `sync_client` (live sync).
+//!
+//! A map keyed by note id (not a list), so concurrent creations on two machines
+//! merge. Only `body` is an automerge `Text`; every other field is a scalar.
 
 use anyhow::Result;
 use automerge::transaction::Transactable;
@@ -42,13 +45,11 @@ pub fn reconcile(sync: &mut SyncDoc, notes: &[Note], unreadable: &[String]) -> R
         put_str(doc, &obj, "origin", &enum_name(&note.origin))?;
         put_str(doc, &obj, "color", &enum_name(&note.color))?;
         put_bool(doc, &obj, "archived", note.archived)?;
-        // Attachments were removed: drop the map left behind by older
-        // documents so it does not linger in the shared corpus.
+        // Drop keys of removed features (attachments, the cleanup pass) that
+        // older documents still carry, so they don't linger in the shared corpus.
         if doc.get(&obj, "attachments")?.is_some() {
             doc.delete(&obj, "attachments")?;
         }
-        // The cleanup pass was removed: drop the stage key left behind by
-        // older documents for the same reason.
         if doc.get(&obj, "clean_state")?.is_some() {
             doc.delete(&obj, "clean_state")?;
         }

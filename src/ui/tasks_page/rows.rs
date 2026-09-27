@@ -1,8 +1,7 @@
-//! Row-level components of the Tasks page: everything here renders one task,
-//! while the parent owns grouping, ordering and disclosure state.
-//!
-//! `due_label` and `picked_due` stay in the parent: they are pure and directly
-//! tested, and moving them would drag the date suite along for no gain.
+//! One task row on the Tasks page: checkbox, text, due date (chip + calendar
+//! export, or the raw phrase + picker), and the words it came from. The parent
+//! owns grouping, ordering and disclosure state; `due_label`/`picked_due` stay
+//! there beside their tests.
 
 use dioxus::prelude::*;
 
@@ -30,9 +29,8 @@ pub fn DueRow(props: DueRowProps) -> Element {
     let DueRowProps { task, mut tasks, today } = props;
     let id = task.id.clone();
 
-    // First, before any early return: hooks must run on every render in the
-    // same order, including renders that take the chip branch below after a
-    // pick resolves the phrase.
+    // Before any early return: hooks must run in the same order every render,
+    // including after a pick switches this row to the chip branch.
     let mut open = use_signal(|| false);
 
     if let Some(due) = task.due_parsed() {

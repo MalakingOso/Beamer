@@ -1,7 +1,12 @@
 #![cfg(not(target_os = "windows"))]
 #![allow(dead_code)]
 
-//! Install/enable/disable helper for the bundled GNOME Shell extension.
+//! Install, enable, and version-check the GNOME Shell extension in
+//! `extension/beamer-focus@beamer.app`, which gives the Linux build focus
+//! lookup, typing, the pill, note placement, and hotkey grabs over D-Bus.
+//! Driven from Settings → Injection. Shell rescans extensions only at login,
+//! so a first install or update needs a log out/in (the `*PendingRestart`
+//! states). See `agent_docs/text_injection.md`.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -9,6 +14,7 @@ use anyhow::Result;
 
 pub const EXTENSION_UUID: &str = "beamer-focus@beamer.app";
 
+/// Helper extension state, as shown on the Injection settings card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     /// ACTIVE in GNOME Shell; the D-Bus interface is live.
@@ -70,8 +76,8 @@ const EMBEDDED: &[(&str, &[u8])] = &[
 ];
 
 /// Dev override only: `$BEAMER_EXTENSION_DIR`, to try extension edits
-/// without rebuilding. Every other run uses the embedded files. (The .deb and
-/// `install-linux.sh` still ship a `share/` copy; nothing reads it now.)
+/// without rebuilding; otherwise the embedded files are used. Nothing reads
+/// the `share/` copy older installs left (`install-linux.sh` deletes it).
 pub fn locate_source_dir() -> Option<PathBuf> {
     let p = PathBuf::from(std::env::var_os("BEAMER_EXTENSION_DIR")?);
     p.join("metadata.json").exists().then_some(p)

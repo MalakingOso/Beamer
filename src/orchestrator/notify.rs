@@ -1,3 +1,6 @@
+//! User-facing fallbacks for the orchestrator: desktop notifications for
+//! errors, and the clipboard-only last resort when every injection backend fails.
+
 /// Last-resort fallback: put text on the clipboard without sending Ctrl+V;
 /// the user pastes manually.
 pub(super) async fn clipboard_only_fallback(text: &str) -> anyhow::Result<()> {
@@ -29,8 +32,8 @@ pub(super) async fn clipboard_only_fallback(text: &str) -> anyhow::Result<()> {
     .await?
 }
 
-/// Show a desktop notification. Falls back to tracing-only if the platform
-/// notification mechanism is unavailable.
+/// Show a desktop notification. Always logs it too, so a failed toast still
+/// leaves a trace.
 pub(super) fn show_notification(title: &str, message: &str) {
     tracing::info!("Notification: {} - {}", title, message);
     #[cfg(target_os = "windows")]

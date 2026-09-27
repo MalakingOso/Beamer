@@ -1,10 +1,11 @@
 #![cfg(target_os = "windows")]
 
 //! Register Beamer's AppUserModelID with Windows via a Start Menu shortcut
-//! carrying `System.AppUserModel.ID`. Unpackaged apps need this or toasts are
-//! silently suppressed (`Toast::show()` still returns `Ok`). Four places must
-//! agree on the string — this property, `WINDOWS_APP_USER_MODEL_ID`, the
-//! `Toast::new` app id, `Dioxus.toml`'s identifier — and nothing checks it.
+//! carrying `System.AppUserModel.ID`, run once at startup from `app_setup`.
+//! Unpackaged apps need this or toasts are silently suppressed (`Toast::show()`
+//! still returns `Ok`). Four places must agree on the string — this property,
+//! `WINDOWS_APP_USER_MODEL_ID`, the `Toast::new` app id, `Dioxus.toml`'s
+//! identifier — and nothing checks it.
 
 use std::path::{Path, PathBuf};
 
@@ -25,8 +26,9 @@ use windows::Win32::UI::Shell::{
 const SHORTCUT_FILE_NAME: &str = "Beamer.lnk";
 
 /// Create or repair the Start Menu shortcut registering `WINDOWS_APP_USER_MODEL_ID`.
-/// Best-effort (warn + swallow). Runs on a `spawn_blocking` thread with COM
-/// initialized by the caller (see `app_setup::setup_windows_aumid_shortcut`).
+/// Best-effort (warn + swallow). Blocking COM + fs work: call it via
+/// `spawn_blocking` (see `app_setup::setup_windows_aumid_shortcut`); it
+/// initializes COM on that thread itself.
 pub fn ensure_shortcut() {
     // S_OK/S_FALSE take an apartment ref we must release; RPC_E_CHANGED_MODE means
     // another apartment owns the thread and we took none.

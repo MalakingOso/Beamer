@@ -1,3 +1,7 @@
+//! Home page: recording status and hotkey, Quick Settings (language, mode,
+//! medical model) that save config immediately, and the five most recent
+//! transcripts. The default page of the main window.
+
 use dioxus::prelude::*;
 
 use crate::config::Config;

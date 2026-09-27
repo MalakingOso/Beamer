@@ -1,7 +1,7 @@
 //! Machine-local note state (`pos`/`size`/`open`): window geometry, not content.
-//! Persisted at `<config_dir>/machine.json` and **never synced** — syncing it let a
-//! window close win a merge over a real edit. Also carries `machine_id`, the
-//! per-install suffix keeping note ids unique across machines.
+//! Persisted at `<config_dir>/machine.json` and **never synced**: syncing it would
+//! let a window close win a merge over a real edit. Also carries `machine_id`, the
+//! per-install suffix keeping note and task ids unique across machines.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,7 @@ pub struct WindowState {
     pub open: bool,
 }
 
+/// The contents of `machine.json`: this install's id plus per-note window state.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MachineStore {
     pub machine_id: String,
@@ -50,11 +51,9 @@ impl Default for MachineStore {
 }
 
 impl MachineStore {
-    /// Sixteen hex digits (64 bits) distinguishing installs. Not a uuid on
-    /// purpose: `RandomState` is already per-instance seeded, salted here with
-    /// wall clock + pid. Older four-digit ids keep working — ids are opaque
-    /// strings, never parsed — but all newly minted ids carry the full width,
-    /// since these back the cross-machine uniqueness of note and task ids.
+    /// Sixteen hex digits (64 bits) distinguishing installs: `RandomState`'s
+    /// per-instance seed salted with wall clock + pid, no uuid needed. Older
+    /// four-digit ids keep working, since ids are opaque and never parsed.
     fn generate_machine_id() -> String {
         let mut hasher = RandomState::new().build_hasher();
         hasher.write_i64(chrono::Local::now().timestamp_nanos_opt().unwrap_or_default());

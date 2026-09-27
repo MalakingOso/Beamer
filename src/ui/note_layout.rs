@@ -1,9 +1,9 @@
-//! Where to put the next sticky note. Beamer places notes rather than
-//! remembering where they were (Wayland offers no position read-back).
+//! Where to put the next sticky note. Beamer places notes fresh each launch
+//! rather than remembering where they were (Wayland offers no position read-back).
 //! Best-candidate sampling: try a handful of points, keep the furthest from
-//! every open note — hand-scattered spacing, no lattice. A tiny inline LCG
-//! keeps it deterministic (same inputs, same layout) without a `rand`
-//! dependency; the caller supplies the seed per launch (see `seed_for`).
+//! every open note — hand-scattered spacing, no lattice. Pure (no I/O, no
+//! Dioxus): an inline LCG makes it deterministic without a `rand` dependency,
+//! and the caller (`sticky_windows`) supplies the per-launch seed (see `seed_for`).
 
 /// A rectangle in the compositor's logical coordinate space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

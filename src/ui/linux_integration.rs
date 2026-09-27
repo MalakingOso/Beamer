@@ -1,8 +1,10 @@
 #![cfg(target_os = "linux")]
 
-//! Linux: tray icon follows recording state; on GNOME the helper extension
-//! additionally shows a shell-native recording pill (a Wayland window can't be
-//! positioned or kept always-on-top, so the pill lives inside Shell).
+//! Linux stand-in for the recording pill window: the tray icon follows
+//! recording state, and on GNOME the helper extension shows a shell-native pill
+//! driven over D-Bus (`shell_indicator`). A Wayland window can't be positioned
+//! or kept always-on-top, so the pill lives inside Shell. A hook called once
+//! from `App()`.
 
 use dioxus::prelude::*;
 

@@ -1,3 +1,6 @@
+//! Settings → System → Appearance: recording-pill and launch-at-login toggles.
+//! The parent persists both and applies auto-start off the UI thread.
+
 use dioxus::prelude::*;
 
 use crate::ui::components::Toggle;

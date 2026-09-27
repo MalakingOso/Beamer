@@ -1,7 +1,6 @@
-//! Tests for `mod.rs`, split out under `#[path]` for the same reason
-//! `task_store/tests.rs` and `pipeline/tests.rs` are: `mod.rs` was closing in
-//! on the project's 500-line limit and this task added a machine-id scheme
-//! and a migration path, each of which wants its own tests.
+//! Tests for `NoteStore` in `mod.rs` (split out for the 500-line limit): `raw`
+//! stays verbatim, window state never moves `modified`, archive and restore
+//! never pop windows, and ids carry the machine suffix.
 
 use super::*;
 
@@ -96,11 +95,8 @@ fn save_leaves_no_temp_file_behind() {
 
 #[test]
 fn notes_round_trip_through_disk() {
-    // `pos` and `size` used to be asserted here too, back when they were
-    // fields on `Note` itself. They round-trip through `machine.json` now
-    // instead (see `machine::tests`), and `notes.json` no longer carries
-    // them at all, which this test also pins. `serde_json::to_string`
-    // must not mention them.
+    // Also pins that window state (`pos`/`size`/`open`) stays out of
+    // `notes.json`; it round-trips through `machine.json` (see `machine::tests`).
     let mut store = temp_store("roundtrip");
     store.create("first".into(), NoteColor::Amber, NoteOrigin::Dictated);
     store.flush_if_dirty();
@@ -142,11 +138,8 @@ fn set_open_with_an_unchanged_value_does_not_dirty_the_store() {
 
 #[test]
 fn set_open_does_not_move_the_modified_timestamp_even_on_a_real_change() {
-    // The stronger claim than the unchanged-value test above: `set_open`
-    // must never touch `modified`, not even when it does change the
-    // value. This is the exact scenario the brief calls out. Closing a
-    // sticky must not be able to outrank a real edit under a
-    // last-write-wins sync merge.
+    // Stronger than the test above: even a real change must not touch
+    // `modified`, or closing a sticky could outrank a real edit in a sync merge.
     let mut store = temp_store("set_open_modified");
     let id = store.create("hello".into(), NoteColor::Purple, NoteOrigin::Dictated);
     let before = store.get(&id).unwrap().modified.clone();

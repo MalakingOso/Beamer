@@ -1,15 +1,7 @@
-//! Pure tests for `pipeline.rs`. Split out under `#[path]` for the same
-//! reason `task_store.rs` does: the parent file was already close to the
-//! 500-line limit before this task's sweep logic landed.
-//!
-//! Everything here is a function of plain values (`NoteStore`, `StageState`,
-//! `PipelineRequest`), with no coroutine, no signal and no server. That is
-//! deliberate: there is no llama.cpp server reachable in CI or in this
-//! sandbox, so the sweep's actual trigger (a real request completing inside
-//! `use_pipeline`) is not something a test here can exercise. What is tested
-//! is the two functions that trigger is built on: `sweep_requests`, which
-//! decides what a sweep asks for, and `should_sweep`, which decides whether
-//! one fires at all.
+//! Pure tests for `pipeline.rs` (split out for the 500-line limit). No
+//! coroutine, signal or server: CI has no llama.cpp server, so the sweep is
+//! tested through `sweep_requests` (what it asks for) and `should_sweep`
+//! (whether it fires).
 
 use super::*;
 use crate::notes::{Note, NoteColor, NoteOrigin, StageState};
@@ -42,9 +34,7 @@ fn store(notes: Vec<Note>) -> NoteStore {
     }
 }
 
-/// Marks a note archived, for the one test that needs it. A free function
-/// rather than a `note()` parameter: every other test wants an active note,
-/// and threading an unused `bool` through all of them would be noise.
+/// Marks a note archived (kept out of `note()`, which every other test uses as-is).
 fn archived(mut n: Note) -> Note {
     n.archived = true;
     n
@@ -59,9 +49,8 @@ fn a_new_note_asks_for_a_pass() {
 
 #[test]
 fn requests_are_compared_by_note() {
-    // The in-flight set keys on `note_id` alone, deliberately: a second
-    // request for a note already being worked on is a duplicate, because
-    // both would race writing the same suggestion rows.
+    // The in-flight set keys on `note_id` alone, not the whole request: two
+    // passes for one note would race writing the same suggestion rows.
     let a = PipelineRequest::new("n");
     let b = PipelineRequest { note_id: "n".into(), swept: true };
     assert_ne!(a, b);
@@ -119,9 +108,8 @@ fn a_mixed_backlog_sweeps_only_the_failed_notes() {
 
 #[test]
 fn an_archived_notes_failed_pass_is_not_swept() {
-    // Archiving is the user saying they are done with the note. Without this
-    // filter a `Failed` pass on an archived note would be retried forever,
-    // once per success, for as long as the app runs.
+    // Archiving means the user is done with the note. Without this filter its
+    // `Failed` pass would be retried on every success, forever.
     let notes = store(vec![
         archived(note("gone", StageState::Failed)),
         note("active", StageState::Failed),
@@ -133,19 +121,15 @@ fn an_archived_notes_failed_pass_is_not_swept() {
 
 #[test]
 fn a_terminal_failure_is_not_swept() {
-    // A failure that needs a config or server change first (wrong model
-    // name, broken preset) would fail identically on every sweep. The footer
-    // still offers a manual retry; the sweep just leaves it alone.
+    // A failure that needs a config or server change (wrong model name,
+    // broken preset) would fail identically on every sweep. Manual retry only.
     let notes = store(vec![note("a", StageState::Failed)]);
     let terminal: HashSet<String> = ["a".to_string()].into_iter().collect();
     assert!(sweep_requests(&notes, &terminal).is_empty());
 }
 
-// A pass abandoned mid-flight — the user switched it off while its request
-// was in the air. What matters is that this reports `NotAttempted` and not
-// `Errored`: nothing was learned about the server either way, and an
-// `Errored` here would wrongly suppress the backlog sweep for a request that
-// never actually failed.
+// A pass switched off mid-flight must report `NotAttempted`, not `Errored`:
+// nothing was learned about the server, and an error would suppress the sweep.
 
 #[test]
 fn abandoning_a_pass_reports_nothing_attempted_rather_than_a_failure() {
@@ -163,9 +147,8 @@ fn abandoning_a_pass_reports_nothing_attempted_rather_than_a_failure() {
 
 #[test]
 fn a_swept_requests_completion_never_triggers_another_sweep() {
-    // The guard the brief calls out by name: without it, a note that keeps
-    // failing would re-sweep the whole backlog on every other note's success,
-    // forever.
+    // Without this guard a note that keeps failing would re-sweep the whole
+    // backlog on every other note's success, forever.
     assert!(!should_sweep(true, true));
 }
 
@@ -176,8 +159,7 @@ fn an_ordinary_successful_request_does_trigger_a_sweep() {
 
 #[test]
 fn a_failed_request_never_triggers_a_sweep() {
-    // Failure is not evidence the server is reachable. It is the opposite case
-    // the brief's rationale rests on.
+    // A failure is no evidence the server is reachable.
     assert!(!should_sweep(false, false));
 }
 

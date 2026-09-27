@@ -1,3 +1,7 @@
+//! ElevenLabs Scribe v2 (and Scribe v2 medical) batch backend: one multipart
+//! POST of the whole recording as WAV. Timeouts, connect errors, 429 and 5xx
+//! are retried up to 3 times (1s, 2s, 4s backoff) within `BATCH_OVERALL_TIMEOUT`.
+
 use anyhow::{bail, Context, Result};
 use reqwest::multipart;
 
@@ -10,11 +14,10 @@ use bytes::Bytes;
 pub const SCRIBE_V2: &str = "scribe_v2";
 pub const SCRIBE_V2_MEDICAL: &str = "scribe_v2_medical";
 
-/// Transcribe raw 16-bit LE, 16 kHz, mono PCM via the ElevenLabs Scribe v2 batch API.
-/// Wraps the PCM in a WAV container before uploading.
+/// Transcribe raw 16-bit LE, 16 kHz, mono PCM with Scribe v2.
 ///
-/// Vocabulary goes up as repeated `keyterms` multipart fields. ⚠️ The field is
-/// `keyterms`, not `keyterms[]` — the bracketed spelling is silently ignored.
+/// Vocabulary goes up as repeated `keyterms` multipart fields. The field is
+/// `keyterms`, not `keyterms[]`: the bracketed spelling is silently ignored.
 /// `no_verbatim` drops filler words and false starts.
 pub async fn transcribe_batch(
     api_key: &str,

@@ -1,5 +1,7 @@
-//! Zip extraction into a staging dir, then a rename swap with the old dir
-//! kept as `<dest>.old` until the whole group succeeds. Blocking throughout.
+//! How the runtime zip becomes a live directory: extract into
+//! `<dest>.staging` during `reconcile`'s staging, then `apply` renames it in,
+//! keeping the old dir as `<dest>.old` until the whole group succeeds (commit)
+//! or fails (rollback). Blocking throughout.
 
 use std::path::{Component as PathPart, Path, PathBuf};
 use std::time::Duration;
@@ -143,10 +145,10 @@ pub fn sweep(dest: &Path) {
     }
 }
 
-/// Renaming a directory on Windows fails with access-denied or a sharing
-/// violation while any file in it is still open, which is normal for a
-/// moment after `taskkill` returns. `rename_with_retry` gives up after 150ms
-/// and only on sharing violations; this waits out either, up to ~3s.
+/// Rename with retries for up to ~3s. On Windows a directory rename fails
+/// (access-denied or sharing violation) while any file in it is open, normal
+/// briefly after `taskkill`. `rename_with_retry` only retries sharing
+/// violations, for ~100ms, so it is not enough here.
 fn rename_patiently(from: &Path, to: &Path) -> std::io::Result<()> {
     const ATTEMPTS: u32 = 20;
     let mut last = None;

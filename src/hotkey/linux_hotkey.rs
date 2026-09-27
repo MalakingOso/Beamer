@@ -1,3 +1,9 @@
+//! Linux hotkey listener: reads every keyboard under `/dev/input` via evdev (one
+//! thread per device, rescanned for hotplug), so it works on X11 and Wayland but
+//! needs the `input` group. Can't swallow keys, and never sees RDP input, so on
+//! GNOME `gnome_grab.rs` runs alongside it. Both feed one state machine,
+//! `on_trigger`, with per-binding ownership rules against double-firing.
+
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -59,11 +65,9 @@ impl HookState {
     }
 }
 
-/// Whether a device looks like it can produce hotkey chords. Deliberately
-/// broad: macro pads, foot pedals and numpad-only devices fail a strict
-/// A+Z+Space test and would otherwise be silently never listened to.
-/// Non-keyboard devices are filtered by `supported_keys` being absent, and
-/// every skip is logged so a missed device is diagnosable.
+/// Whether a device might produce hotkey chords. Deliberately broad: macro pads,
+/// pedals and numpads fail a strict A+Z+Space test and would silently go unheard.
+/// Devices with no keys at all are filtered out; every skip is logged.
 fn looks_like_keyboard(keys: &evdev::AttributeSetRef<KeyCode>) -> bool {
     keys.contains(KeyCode::KEY_A)
         || keys.contains(KeyCode::KEY_ENTER)
@@ -178,9 +182,8 @@ fn evdev_key_to_vk(key: KeyCode) -> Option<u32> {
 /// RDP, where evdev sees nothing) would never end the in-flight recording.
 fn apply_pending_reset(state: &mut HookState) {
     if state.reset_flag.swap(false, Ordering::Relaxed) {
-        // A config edit resets both bindings, not just one. Any in-flight
-        // recording ends first (mirrors ll_hook.rs): without this a toggle
-        // latched on before the edit desyncs.
+        // Reset both bindings, ending any in-flight recording first (mirrors
+        // ll_hook.rs), or a toggle latched on before the edit desyncs.
         for bs in state.binding_state.iter_mut() {
             if bs.armed || bs.toggled_on {
                 let _ = state.tx.send(HotkeyEvent::RecordStop);

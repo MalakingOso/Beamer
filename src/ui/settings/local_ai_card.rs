@@ -1,4 +1,8 @@
-//! Local model server connection settings. Owns only the probe result.
+//! Settings → Intelligence → Local AI: connection settings for the local
+//! llama.cpp server that extracts tasks from notes (`src/llm/`), a live
+//! "Test connection" probe, and K2-Horizon install status from
+//! `crate::components`. Owns only the probe result; the parent persists config.
+//! See `agent_docs/local_inference.md`.
 
 use dioxus::prelude::*;
 
@@ -30,7 +34,7 @@ pub struct LocalAiCardProps {
     pub on_connect_timeout_ms_change: EventHandler<u64>,
     pub on_extract_model_change: EventHandler<String>,
     /// K2-Horizon's model and server setup, from the component reconcile.
-    /// Always quiet off Windows ARM64, whose catalog is empty.
+    /// Always quiet except on Windows ARM64; elsewhere the catalog is empty.
     pub components: Components,
 }
 

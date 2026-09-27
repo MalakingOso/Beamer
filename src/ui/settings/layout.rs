@@ -1,8 +1,6 @@
-//! Grouping chrome for the Settings page. `SettingsGroup` is the single
-//! bordered container per functional group (Dictation, Intelligence, ...);
-//! `SubSection` replaces the old per-card `Card` wrapper inside a group, so
-//! what used to be nine separate bordered boxes becomes labeled sections
-//! inside four.
+//! Grouping chrome for the Settings page. `SettingsGroup` is the one bordered
+//! container per functional group (Dictation, Intelligence, ...); each card
+//! inside renders as a labeled `SubSection` rather than its own `Card`.
 
 use dioxus::prelude::*;
 

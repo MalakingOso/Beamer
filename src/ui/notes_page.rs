@@ -1,5 +1,6 @@
-//! The notes board — every note in one place, searchable. Clicking a card is
-//! the way back to a closed note's window.
+//! Notes board: every note in one place, searchable, with archive/restore/
+//! delete. Clicking a card is the way back to a closed note's window. The notes
+//! themselves live in `notes::NoteStore`; their windows in `ui::sticky_windows`.
 //!
 //! Store and registry arrive as props: nothing in `src/` calls
 //! `provide_context`, so `use_context` here would panic rather than resolve.
@@ -95,12 +96,9 @@ pub fn NotesPage(props: NotesPageProps) -> Element {
                         };
                         rsx! { span { class: "notes-count", "{label}" } }
                     }
-                    // Bulk window control. Not a true minimize: notes skip the
-                    // taskbar on Windows and are undecorated everywhere, so a
-                    // minimized window would be unrecoverable except from here.
-                    // Closing through `set_all_open` keeps every note one board
-                    // click away instead. Hidden in the archived view, which it
-                    // does not act on.
+                    // Bulk close/reopen, not minimize: notes skip the taskbar on
+                    // Windows and are undecorated, so a minimized note would be
+                    // unrecoverable. Hidden in the archived view it doesn't act on.
                     if !showing_archived && active_total() > 0 {
                         if open_count() > 0 {
                             button {
@@ -126,10 +124,9 @@ pub fn NotesPage(props: NotesPageProps) -> Element {
                         class: "notes-new-btn",
                         title: "New note",
                         onclick: move |_| {
-                            // No pipeline request: typed notes reach a model only
-                            // via the note's own footer affordance, never unasked.
-                            // No `new_window` call: `create` sets `open: true`,
-                            // which is what the reconciler opens.
+                            // No pipeline request: typed notes reach the model only
+                            // via their footer button. No `new_window` either:
+                            // `create` sets `open: true` and the reconciler opens it.
                             notes.write().create(
                                 String::new(),
                                 NoteColor::random(),

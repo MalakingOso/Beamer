@@ -1,3 +1,20 @@
+//! The conductor of a dictation: hotkey → **orchestrator** → audio →
+//! transcription → injection (or a sticky note).
+//!
+//! `run` is a Dioxus coroutine fed `HotkeyEvent`s by `hotkey/`. One dictation:
+//! 1. `RecordStart(mode)` arrives; `handle_recording` picks the backend and
+//!    loads its API key from the keyring (missing key → notification, no recording).
+//! 2. `handle_batch_recording` opens the mic (`audio/`), sets `Recording`,
+//!    pauses media, plays the start sound, and appends PCM chunks to one buffer.
+//! 3. `RecordStop` (or a dead mic) ends capture: stop sound, `Processing`,
+//!    media resumes, then (unless the mic died) ~400 ms of tail audio (`session`).
+//! 4. The buffer is POSTed to the chosen `transcription/` backend.
+//! 5. `sink::deliver` injects the text (`injection/`) or makes a note, and
+//!    `run` returns the state to `Idle`.
+//!
+//! Dictations run one at a time: the hotkey channel isn't read while a
+//! transcript is in flight, which is why every network call has a timeout.
+
 use anyhow::Result;
 use dioxus::prelude::*;
 use futures_util::StreamExt;
@@ -18,7 +35,8 @@ mod sink;
 use notify::show_notification;
 use session::{buffer_tail_audio, StopReason};
 
-/// Recording lifecycle state, drives both the pill overlay and home-page status dot.
+/// Recording lifecycle state; drives the pill overlay, the home-page status dot
+/// and (on Linux) the tray icon.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum RecordingState {
     #[default]
@@ -27,8 +45,9 @@ pub enum RecordingState {
     Processing,
 }
 
-/// Central orchestration loop: hotkey events → audio capture → transcription → text injection.
-/// Runs as a Dioxus coroutine, receiving `HotkeyEvent`s and driving recording sessions.
+/// The orchestrator coroutine: runs one recording session per `RecordStart`
+/// until the hotkey channel closes. Session errors are logged and notified,
+/// never fatal.
 pub async fn run(
     mut hotkey_rx: UnboundedReceiver<HotkeyEvent>,
     config: Signal<Config>,
@@ -75,8 +94,8 @@ pub async fn run(
     }
 }
 
-/// Drive one recording session: connect WebSocket → capture mic → stream audio → inject text.
-/// On stop, sends a commit signal and drains final transcripts before returning.
+/// Validate the configured backend and its API key, then run the session.
+/// A config problem is reported to the user and returns `Ok` (nothing recorded).
 async fn handle_recording(
     config: &Signal<Config>,
     rec_state: &mut Signal<RecordingState>,
@@ -129,7 +148,7 @@ async fn handle_recording(
     .await
 }
 
-/// Drive one batch recording session: capture mic → buffer all PCM → POST to the batch API.
+/// One session: capture mic → buffer all PCM → POST to the batch API → deliver.
 async fn handle_batch_recording(
     backend: &str,
     api_key: &str,

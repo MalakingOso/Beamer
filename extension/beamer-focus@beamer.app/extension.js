@@ -1,3 +1,10 @@
+// Beamer Focus Helper: a GNOME Shell extension that does from inside Mutter
+// what a Wayland client can't. It exports `app.beamer.FocusProvider` on the
+// session bus: focused-app lookup, virtual-keyboard typing and paste chords
+// (the `gnome` injection backend), the recording pill (indicator.js), sticky
+// note placement, and hotkey grabs. Embedded in the Beamer exe and installed
+// by src/install/gnome_extension.rs; see agent_docs/text_injection.md.
+
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
@@ -8,24 +15,17 @@ import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
 import { BeamerIndicator } from './indicator.js';
 
-// v5 added PlaceWindow/GetWindowFrame (sticky note placement) and the 'note'
-// pill state. The capability floor Beamer requires is still v2 (see
-// REQUIRED_VERSION in src/injection/gnome.rs) — every caller of a v5-only
-// method degrades to a silent no-op against an older helper.
+// D-Bus contract version, and also the *deploy trigger*: `status()` in
+// src/install/gnome_extension.rs compares this (read live over D-Bus) with
+// metadata.json's "version"; while they match, Beamer reports Enabled and
+// never re-copies the files. Bump BOTH on every code change here, even a
+// behaviour tweak that adds no method, or the edit silently never deploys.
 //
-// ⚠️ This number is not only the D-Bus contract version, it is the *deploy
-// trigger*. `status()` in src/install/gnome_extension.rs compares what this
-// returns over D-Bus against metadata.json's "version"; while they match,
-// Beamer reports Enabled and never re-copies the files, so an edit to any
-// .js file here silently never reaches ~/.local/share/gnome-shell/. Bump
-// BOTH this and metadata.json on every change to this directory, even a
-// pure behaviour tweak that adds no method. v6 is exactly that: the pill
-// waveform change in 7f83eeb, which sat undeployed because v5 shipped it
-// without a bump.
-//
-// v7 added SetHotkeys and the Hotkey*/Helper* signals: the dictation chord
-// grabbed inside Mutter, so input injected by gnome-remote-desktop (which
-// never touches /dev/input) still reaches Beamer.
+// Beamer's floor is v2 (REQUIRED_VERSION in src/injection/gnome.rs); callers
+// of newer methods degrade to a silent no-op against an older helper.
+// v5: PlaceWindow/GetWindowFrame and the 'note' pill state. v7: SetHotkeys and
+// the Hotkey*/Helper* signals, so gnome-remote-desktop input (which never
+// touches /dev/input) still triggers the chord.
 const HELPER_VERSION = 7;
 
 // Release events are looked up with the modifier state *at release time*, so
@@ -151,10 +151,8 @@ export default class BeamerFocusExtension extends Extension {
             GLib.source_remove(this._typeSource);
             this._typeSource = 0;
         }
-        // A TypeText in flight owes its caller a reply. Cancelling the timeout
-        // above without answering left Beamer blocked until its own client-side
-        // timeout fired (seconds, scaled to text length). Answer `false` so it
-        // falls through to the next injection backend immediately.
+        // A TypeText in flight still owes a reply; without one Beamer waits out
+        // its own timeout. `false` sends it straight to the next backend.
         this._finishTyping(false);
         if (this._indicator) {
             this._indicator.destroy();
@@ -280,16 +278,12 @@ export default class BeamerFocusExtension extends Extension {
     // `window_title` in src/ui/sticky.rs) — the only handle a client and the
     // shell reliably share.
 
-    /// Find a note window by its exact title, preferring one that actually
-    /// belongs to Beamer.
+    /// Find a note window by exact title, preferring one whose app id says Beamer.
     ///
-    /// Title is the only handle a Wayland client and the shell reliably share,
-    /// but titles are not owned: any window may call itself `Beamer Note <id>`
-    /// and be moved or pinned across workspaces in the real note's place. The
-    /// app id narrows that to windows Beamer plausibly owns. It is a preference
-    /// rather than a requirement because a hard filter that guessed the app id
-    /// wrong would break placement silently, and diagnosing it costs a full
-    /// GNOME log out — so a title-only match is still honoured, and logged.
+    /// Titles aren't owned, so any window could claim `Beamer Note <id>`; the
+    /// app id narrows that. Only a preference: a hard filter with a wrong
+    /// app-id guess would break placement silently, and each fix costs a GNOME
+    /// log out. A title-only match is still honoured, and logged.
     _findWindowByTitle(title) {
         let fallback = null;
         for (const actor of global.get_window_actors()) {
@@ -328,10 +322,9 @@ export default class BeamerFocusExtension extends Extension {
 
     /// Read a window's frame rect back in stage coordinates.
     ///
-    /// Nothing in Beamer calls this today: notes are auto-placed and their
-    /// positions are deliberately not remembered. It ships anyway because
-    /// every extension change costs a full GNOME log out, and this is the only
-    /// way to verify that a `PlaceWindow` actually landed where it was asked to.
+    /// Unused by Beamer today (note positions aren't remembered). Kept as the
+    /// only way to verify a `PlaceWindow` landed, since adding it later would
+    /// cost a GNOME log out.
     GetWindowFrame(title) {
         const win = this._findWindowByTitle(title);
         if (!win)

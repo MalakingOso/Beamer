@@ -1,10 +1,7 @@
-//! Tests for [`super`].
-//!
-//! Split into their own file so `extract.rs` keeps room under the project's
-//! 500-line limit for the validation gates, which are the part that has to be
-//! read while working.
-//!
-//! ⚠️ Same module rule as the parent: **no crate-rooted paths here.**
+//! Tests for [`super`]: the parse-time gates (grounding, confidence floor,
+//! leaked reasoning, fences) and the date gates, each on its own. A separate
+//! file keeps `extract.rs` under the 500-line limit. Same rule as the parent:
+//! no crate-rooted paths here.
 
 use super::*;
 
@@ -156,9 +153,7 @@ fn malformed_json_is_an_error_not_an_empty_list() {
 #[test]
 fn the_extraction_request_asks_the_server_to_constrain_the_grammar() {
     let req = build_request(&ExtractConfig::default(), NOTE, today());
-    // Only a bundled aarch64 build defaults to K2-Horizon; every other
-    // target defaults back to Gemma — see `default_extract_model` in
-    // `src/llm/mod.rs`.
+    // K2-Horizon on aarch64, Gemma elsewhere; see `default_extract_model`.
     #[cfg(target_arch = "aarch64")]
     assert_eq!(req.model, "K2-Horizon-0.9B-Q8_0");
     #[cfg(not(target_arch = "aarch64"))]

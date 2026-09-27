@@ -1,3 +1,7 @@
+//! Vocabulary page: add, rename, remove and filter the custom terms sent to the
+//! STT backend. Every edit writes straight through to `config::vocabulary`
+//! (`vocabulary.txt`); the local signal just mirrors it for rendering.
+
 use dioxus::prelude::*;
 
 use crate::ui::icons::{IconPencil, IconTrash};

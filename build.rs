@@ -1,35 +1,21 @@
+//! Build script: for Windows targets, embeds an app manifest (asInvoker,
+//! PerMonitorV2 DPI awareness) into the `beamer` binary. The icon and
+//! VERSIONINFO come from `dx`, via the `[bundle]` settings in Dioxus.toml.
+
 use std::io::Write;
 
 fn main() {
-    // This has to be a runtime `std::env::var("CARGO_CFG_TARGET_OS")` check,
-    // not `#[cfg(target_os = "windows")]` or `cfg!(target_os = "windows")`.
-    // Both of those read as obviously correct and are not: build.rs is
-    // compiled and run for the *host*, so any `cfg`-based check evaluates
-    // against the host's OS. Cross-compiling from Linux to Windows would make
-    // the whole block vanish silently, with no error and no manifest.
-    // `CARGO_CFG_TARGET_OS` is the one thing Cargo sets to the *target*
-    // triple's OS, which is what this block needs to know.
+    // Must be a runtime `CARGO_CFG_TARGET_OS` check, not `cfg!`/`#[cfg]`:
+    // build.rs runs on the host, so a cfg check silently drops the manifest
+    // when cross-compiling from Linux to Windows.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
 
-    // Only the manifest is emitted here, and deliberately not through a
-    // resource file.
-    //
-    // `dx` writes its own Windows resource (icon plus VERSIONINFO, from the
-    // `[bundle]` settings in Dioxus.toml) and links it unconditionally, with no
-    // opt-out. A second resource carrying its own VERSIONINFO makes the
-    // resource compiler fail the whole link:
-    //
-    //   CVTRES : fatal error CVT1100: duplicate resource. type:VERSION, name:1
-    //   LINK : fatal error LNK1123: failure during conversion to COFF
-    //
-    // `winresource` always emits a VERSIONINFO block and offers no way to skip
-    // it, so a resource file here can never coexist with dx's. The manifest is
-    // the one thing dx does not provide, and the MSVC linker can embed it
-    // directly without a resource, which sidesteps the collision entirely.
-    //
-    // The icon comes from dx, driven by `icon_path` in Dioxus.toml.
+    // Embedded by the MSVC linker, deliberately not via a resource file: dx
+    // always links its own resource with VERSIONINFO, and a second one (which
+    // `winresource` always emits) fails the link with
+    // `CVT1100: duplicate resource. type:VERSION` / `LNK1123`.
     let manifest = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
@@ -53,8 +39,7 @@ fn main() {
     file.write_all(manifest.as_bytes())
         .expect("failed to write the manifest file");
 
-    // Scoped to the app binary. sync_server is a headless console program and
-    // has no use for a DPI or execution-level manifest.
+    // App binary only: the headless sync_server has no use for a manifest.
     println!("cargo:rustc-link-arg-bin=beamer=/MANIFEST:EMBED");
     println!(
         "cargo:rustc-link-arg-bin=beamer=/MANIFESTINPUT:{}",

@@ -1,3 +1,9 @@
+//! Self-update from GitHub Releases (`self_update` crate): check, replace the
+//! running exe, relaunch. Triggered by the launch-time check
+//! (`appearance.auto_check_updates`), the tray menu, and the Update settings
+//! card. Only the exe is replaced, so everything the app needs at runtime must
+//! be compiled in (`tests/packaging.rs`).
+
 use anyhow::Result;
 
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -63,9 +69,8 @@ pub fn apply_update_blocking() -> Result<()> {
 /// Like the tray Quit handler this `process::exit`s, skipping destructors and
 /// the flush tick — callers must flush the note stores first.
 pub fn restart_app() -> ! {
-    // Not `current_exe()`: on Linux the update just renamed a new binary over
-    // this process's own path, and a fresh query resolves to the old,
-    // now-unlinked inode (`<path> (deleted)`). Use the path cached at launch.
+    // Not `current_exe()`: on Linux the update just unlinked this process's
+    // file, so a fresh query returns `<path> (deleted)`. Use the launch path.
     let exe = crate::launch_exe_path();
     crate::release_single_instance();
     match std::process::Command::new(exe).spawn() {

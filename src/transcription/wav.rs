@@ -1,3 +1,6 @@
+//! Hand-written 44-byte WAV header, applied once at upload time; capture
+//! stays raw PCM. The header's format must match what `audio/` emits.
+
 /// Wrap raw PCM (16-bit LE, 16 kHz, mono) in a minimal WAV container.
 pub fn pcm_to_wav(pcm: &[u8]) -> Vec<u8> {
     let data_len = pcm.len() as u32;

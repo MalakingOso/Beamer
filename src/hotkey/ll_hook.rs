@@ -1,3 +1,11 @@
+//! Windows hotkey listener: a `WH_KEYBOARD_LL` hook that turns the configured
+//! chords into `HotkeyEvent`s and swallows them so the focused app never sees them.
+//!
+//! The one exception to the spawn_blocking rule for Win32: the hook must own a
+//! dedicated thread running a `GetMessageW` loop, never a runtime pool thread.
+//! The hook proc runs on that thread, hence the `thread_local!` state.
+//! Unelevated, it never sees keys bound for elevated windows (UIPI).
+
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -95,20 +103,18 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
         }
 
         if is_press {
-            // No repeat bit in KBDLLHOOKSTRUCT, so held-state is the only
-            // repeat detector. Gate on the physical key *before* matching so a
-            // modifier brushed mid-hold can't reroute an auto-repeat to a
-            // different binding sharing this trigger. Trade-off: a dropped
-            // key-up swallows one press; the next release self-heals it.
+            // KBDLLHOOKSTRUCT has no repeat bit, so held-state detects repeats.
+            // Check it *before* matching so a modifier brushed mid-hold can't
+            // reroute a repeat to another binding sharing this trigger. A dropped
+            // key-up costs one swallowed press; the next release self-heals.
             let already_held = bindings
                 .iter()
                 .enumerate()
                 .any(|(i, b)| b.config.trigger_vk == norm_vk && state.binding_state[i].trigger_held);
 
-            // A press the hook consumes must not also reach the focused app:
-            // the default Ctrl+Space would otherwise type a space (or, e.g.,
-            // clear Word's character formatting) on every press. Repeats count
-            // as consumed while the trigger is still held from the first press.
+            // A consumed press must not reach the focused app: Ctrl+Space would
+            // type a space (or clear Word's formatting). Repeats of a held
+            // trigger count as consumed.
             let mut consumed = already_held;
 
             if !already_held {

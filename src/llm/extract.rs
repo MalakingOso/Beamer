@@ -1,9 +1,12 @@
-//! Task extraction. Model-agnostic: no branch here reads which
-//! model is configured. A precision problem: a fabricated
-//! task poisons a list nobody then trusts, so every check here assumes the
-//! model misbehaves. Parse-time gates: fences tolerated, evidence must ground
-//! in the sent note, confidence floor applied before the store. Date gates in
-//! `resolve_date` downgrade (drop the date, keep the task), never discard.
+//! Task extraction: one note in, validated `ProposedTask`s out. Called by the
+//! `notes::pipeline` coroutine and by `task_eval`.
+//! Model-agnostic: nothing here branches on which model is configured.
+//!
+//! A precision problem (a fabricated task poisons a list nobody then trusts),
+//! so every check assumes the model misbehaves: leaked reasoning and fences
+//! are stripped, evidence must ground in the sent note, and the confidence
+//! floor applies before the store. Date gates in `resolve_date` downgrade
+//! (drop the date, keep the task), never discard.
 
 use std::time::Duration;
 
@@ -81,11 +84,10 @@ struct ResolvedDate {
 /// its task, but the date does not reach the calendar.
 const MAX_FUTURE_DAYS: i64 = 366;
 
-/// Apply the date gates; never fails — worst outcome is no date. `due_phrase`
-/// must ground in the note, `due` must parse, `due` may be at most a day
-/// in the past (one day of slack for just-after-midnight passes) and at most
-/// a year in the future. `today` is a parameter so the gates are testable
-/// without mocking time.
+/// Apply the date gates; never fails, the worst outcome is no date.
+/// `due_phrase` must ground in the note, `due` must parse, and `due` may be at
+/// most a day in the past (slack for just-after-midnight passes) and at most
+/// `MAX_FUTURE_DAYS` ahead.
 fn resolve_date(raw: &RawTask, note: &str, today: NaiveDate) -> ResolvedDate {
     let phrase = raw
         .due_phrase
@@ -179,9 +181,9 @@ pub fn strip_fences(body: &str) -> &str {
     rest.trim_end().strip_suffix("```").unwrap_or(rest).trim()
 }
 
-/// Strip a leaked reasoning block: some servers leave `reasoning_content` in
-/// `content` (a llama.cpp fork's tag detection misses some tag variants), so
-/// it arrives as trace + closing tag + JSON. Take everything after the last
+/// Strip a leaked reasoning block. K2-Horizon at `medium`/`low` effort puts
+/// trace + closing tag + JSON all in `content` (the fork only splits the
+/// `high` tag), with HTTP 200. Takes everything after the last
 /// `</...think...>`-shaped tag; tagless bodies pass through unchanged.
 pub fn strip_think_tags(body: &str) -> &str {
     let lower = body.to_ascii_lowercase();

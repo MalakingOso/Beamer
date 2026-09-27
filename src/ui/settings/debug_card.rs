@@ -1,3 +1,6 @@
+//! Settings → System → Debug: the debug-logging toggle, the last injection
+//! result, and the in-app status log (`ui::status_log`), newest first.
+
 use dioxus::prelude::*;
 
 use crate::ui::components::Toggle;

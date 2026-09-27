@@ -1,7 +1,7 @@
-//! The launch-time reconcile, as a Dioxus task: plan, stage each group
-//! (downloads + verification, nothing live touched), then hand a fully
-//! staged group to `apply` in one blocking call. Statuses drive the Settings
-//! rows (`update_card`, `local_ai_card`).
+//! The launch-time reconcile, started from `App()` via `use_components`, as a
+//! Dioxus task: plan, stage each group (downloads + verification, nothing live
+//! touched), then hand a fully staged group to `apply` in one blocking call.
+//! Statuses drive the Settings rows (`update_card`, `local_ai_card`).
 //!
 //! Groups are all-or-nothing. A member that needs a prompt nobody has
 //! accepted yet, or a member that fails to stage, makes its whole group wait,
@@ -38,10 +38,10 @@ pub struct Components {
     task: CopyValue<Option<Task>>,
 }
 
-/// Create the handle and start the launch-time reconcile. A fresh install
-/// (no `config.toml` before this launch) pre-accepts every prompt, which
-/// keeps first-run behavior: the model downloads without asking. This is not
-/// "no `components.json`": every 1.0.x install upgrading has none yet.
+/// Create the handle and start the launch-time reconcile. A fresh install (no
+/// `config.toml` before this launch) pre-accepts every prompt, so the model
+/// downloads without asking. Not keyed on a missing `components.json`: every
+/// upgrading 1.0.x install lacks one too.
 pub fn use_components(fresh_install: bool) -> Components {
     let status = use_signal(HashMap::new);
     let accepted = use_hook(|| {

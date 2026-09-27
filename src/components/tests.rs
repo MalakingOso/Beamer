@@ -1,3 +1,9 @@
+//! Tests for `plan` (staleness, group expansion, apply order) against a toy
+//! catalog, then consistency checks on the real one: the model's filename
+//! stem must match the preset's `[section]` and (on aarch64) the default
+//! extraction model, and the launchers, preset and task must land where each
+//! other expects.
+
 use std::collections::HashMap;
 
 use super::state::Record;

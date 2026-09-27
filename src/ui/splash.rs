@@ -1,7 +1,10 @@
+//! The startup splash window's component and CSS: icon, a progress bar and
+//! "Starting…". Opened and closed by `app_splash::setup_splash`.
+
 use dioxus::prelude::*;
 
-/// Loading splash while `warmup::warm_all` runs. Own transparent always-on-top
-/// window; progress pushed in via `webview.evaluate_script` (pill pattern).
+/// Splash shown while `warmup::warm_all` runs, in its own transparent
+/// always-on-top window. The bar is a fixed 1500ms CSS animation, not real progress.
 #[component]
 pub fn SplashWindow() -> Element {
     let icon_data_url = crate::assets::icon_png_data_url();

@@ -1,14 +1,10 @@
-//! Tests for [`super`].
-//!
-//! Split into their own file because `task_store.rs` reached 472 of the
-//! project's 500-line limit with roughly 200 of that being tests, and the next
-//! method could not be added without breaking the cap. Nothing here changed in
-//! the move — this is the same suite, dedented one level.
+//! Tests for [`super`] (`TaskStore`), split out for the 500-line limit. Most pin
+//! the corpus rules: decisions are kept, stamped, and flushed inline.
 
 use super::*;
 use crate::notes::task::TaskKind;
 
-/// A proposal with no date, which is what every pre-dating test assumed.
+/// An undated proposal.
 fn proposal(text: &str, evidence: &str, confidence: f32) -> Proposal {
     Proposal {
         text: text.into(),

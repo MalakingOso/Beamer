@@ -1,8 +1,10 @@
-//! `components.json`: what was last applied, per component id. Written only
-//! after a whole group applied (and its server started), so a record always
-//! describes a consistent set. Same shape as `notes::machine::MachineStore`:
-//! serde defaults, `.corrupt` quarantine, `.tmp` + rename save, and a stat
-//! failure latches read-only rather than looking like a first run.
+//! `components.json` in the config dir: what was last applied, per component
+//! id. `plan` treats a component as current only if its record matches the
+//! catalog sha256. Written only after a whole group applied and its server
+//! started, so a record always describes a consistent set. Same shape as
+//! `notes::machine::MachineStore`: serde defaults, `.corrupt` quarantine,
+//! `.tmp` + rename save, and a stat failure latches read-only rather than
+//! looking like a first run.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

@@ -1,4 +1,7 @@
-//! Tray menu and tray-click event wiring for `App`. Runs once from `App()`'s render body.
+//! What the tray does: menu-item actions, the "Hide/Show All Notes" label, and
+//! left-click to toggle the main window. The menu itself is built by
+//! `tray::build_tray_menu` (via `app_setup::setup_tray_menu`). Each function is
+//! a hook called once from `App()`'s render body, in a fixed order.
 
 use dioxus::desktop::trayicon::{MouseButton, MouseButtonState, TrayIconEvent};
 use dioxus::desktop::{use_muda_event_handler, use_tray_icon_event_handler};

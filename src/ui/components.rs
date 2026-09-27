@@ -1,7 +1,12 @@
+//! Shared widgets for the main window's pages and settings cards (`Card`,
+//! `Select`, `Toggle`, `MaskedInput`, `TagChip`), plus the language list and a
+//! char-safe `truncate_chars`. Styling lives in `assets/styles.css`; see
+//! `agent_docs/design_system.md`.
+
 use dioxus::prelude::*;
 
-/// Transcription languages as (ISO 639-1 code, label). Single source of truth
-/// for Settings and Home's Quick Settings — separate lists drifted before.
+/// Transcription languages as (ISO 639-1 code, label). The one list shared by
+/// Settings and Home's Quick Settings, so the two can't drift.
 pub static LANGUAGE_OPTIONS: &[(&str, &str)] = &[
     ("en", "English"),
     ("es", "Spanish"),
@@ -22,8 +27,8 @@ pub fn language_options() -> Vec<(String, String)> {
 }
 
 /// Truncate to at most `max_chars` characters, appending "..." when cut.
-/// Counts characters, not bytes: byte-slicing panics inside multi-byte
-/// sequences, which STT transcripts routinely contain.
+/// Counts chars, not bytes: byte-slicing panics mid-character, and transcripts
+/// routinely contain multi-byte text.
 pub fn truncate_chars(text: &str, max_chars: usize) -> String {
     let mut out: String = text.chars().take(max_chars).collect();
     if text.chars().nth(max_chars).is_some() {

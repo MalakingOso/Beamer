@@ -1,3 +1,9 @@
+//! Global hotkeys: the start of the dictation path (**hotkey** → orchestrator →
+//! audio → transcription → injection). Two bindings, dictate and note, each
+//! hold-to-talk or toggle, sent to the orchestrator as `HotkeyEvent`s. This file holds
+//! the chord parsing and matching both platform listeners share: `ll_hook.rs`
+//! (Windows) and `linux_hotkey.rs` + `gnome_grab.rs` (Linux).
+
 /// Which sink a finished transcript reaches. Both hotkeys share the
 /// audio/ASR pipeline and differ only here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -42,6 +48,9 @@ impl Default for HotkeyConfig {
 }
 
 impl HotkeyConfig {
+    /// Parse a chord like `"Ctrl+Shift+N"`. `None` (unbound) for a chord with no
+    /// modifier, or Super plus another key: callers fall back to the default
+    /// chord (dictation) or leave it unbound (note).
     pub fn parse(hotkey_str: &str, is_toggle: bool) -> Option<Self> {
         let mut ctrl = false;
         let mut alt = false;
@@ -59,12 +68,8 @@ impl HotkeyConfig {
             }
         }
 
-        // No Meta modifier field exists, so "Super+N" would parse as bare N
-        // and fire on every N press. Reject it (`None` = unbound) instead.
-        // Same for any chord with no modifier at all: a global hotkey that
-        // fires on an unmodified keypress (bare "N", "Space", "F9", or an
-        // empty string) is a misconfiguration, never intent. Callers fall
-        // back to the default chord (dictation) or unbound (note capture).
+        // A modifier-less global hotkey fires on every plain keypress: never intent.
+        // And with no Meta field, "Super+N" would silently become bare N.
         if !ctrl && !alt && !shift && !has_win {
             return None;
         }

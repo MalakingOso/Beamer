@@ -1,7 +1,14 @@
-//! Sticky note storage. The `Vec<Note>` is the in-memory source of truth,
-//! persisted to an automerge document shared with `TaskStore`; `notes.json` is
-//! a derived export, written but never read. Writes are debounced; notes are
-//! archived rather than evicted, so there is no entry cap.
+//! The notes subsystem: sticky notes, the tasks extracted from them, and their
+//! storage. This file is `NoteStore`, whose `Vec<Note>` is the in-memory source
+//! of truth. It persists to an automerge document shared with `TaskStore`;
+//! `notes.json` is a derived mirror, read only by the one-time legacy seed.
+//! Writes are debounced by a 500 ms tick. Notes are archived, not evicted.
+//!
+//! Map: types in `model` (notes) and `task` (tasks); store edits here, in
+//! `edit` (size, delete) and `lifecycle` (extraction results); the extraction
+//! coroutine in `pipeline`; task rows in `task_store`; `.ics` export in `ics`.
+//! Persistence and sync: `sync_doc`, `doc_*`, `flush`, `machine`, `legacy`,
+//! `sync_client`. See `agent_docs/sticky_notes.md`, `local_inference.md`, `sync.md`.
 
 use anyhow::Result;
 use chrono::Local;
@@ -84,18 +91,15 @@ impl Default for NoteStore {
     }
 }
 
-/// Millis plus a per-install suffix, so same-millisecond ids stay distinct
-/// without a uuid dependency. Task ids sync across machines keyed by id in
-/// the shared document, so they need the same cross-machine uniqueness note
-/// ids got — two machines extracting in the same millisecond must not mint
-/// the same task id.
+/// A task id, minted like `next_note_id`: task rows sync keyed by id, so two
+/// machines extracting in the same millisecond must not collide.
 pub(crate) fn next_synced_id(machine: &str) -> String {
     let (millis, n) = raw_id_parts();
     format_note_id(millis, n, machine)
 }
 
-/// Millis plus a per-install suffix. Without it, two machines creating a note
-/// in the same millisecond would mint the same id, and a sync merge would
+/// `{millis:x}-{counter:04x}-{machine}`. Without the machine suffix, two machines
+/// creating a note in the same millisecond would collide, and a sync merge would
 /// silently reparent one machine's tasks onto the other's note.
 pub(crate) fn next_note_id(machine: &str) -> String {
     let (millis, n) = raw_id_parts();
@@ -343,14 +347,9 @@ impl NoteStore {
         self.machine.set_open(id, open);
     }
 
-    /// Machine-local bulk open/close for every **active** note. Backs the
-    /// board's Hide-all/Show-all toggle; the reconciler opens or closes the
-    /// windows from these flags.
-    ///
-    /// Archived notes are skipped in both directions. Closing one would be
-    /// redundant (`archive` already did it); opening one would be wrong — a
-    /// restored note must not pop a window just because show-all ran while
-    /// it was archived.
+    /// Machine-local bulk open/close for every **active** note (the board's
+    /// Hide-all/Show-all); the window reconciler acts on the flags. Archived
+    /// notes are skipped, or a later restore would pop a window unasked.
     pub fn set_all_open(&mut self, open: bool) {
         let ids: Vec<String> =
             self.notes.iter().filter(|n| !n.archived).map(|n| n.id.clone()).collect();

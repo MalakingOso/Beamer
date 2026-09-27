@@ -1,5 +1,6 @@
-//! Size and deletion edits. Machine writes here never bump `modified`
-//! (`set_size` lives in `machine.json`); a missing id is a no-op that dirties nothing.
+//! More `NoteStore` methods: window size and outright deletion. Neither bumps
+//! `modified` (`set_size` writes `machine.json`, not the synced note); a
+//! missing id is a no-op that dirties nothing.
 
 use super::NoteStore;
 

@@ -1,9 +1,5 @@
-//! Tests for [`super`].
-//!
-//! Split into their own file when the page gained due chips, the
-//! unresolved-phrase picker and calendar export: `tasks_page.rs` had about 124
-//! lines of headroom under the project's 500-line limit and the additions did
-//! not fit beside 180 lines of tests.
+//! Tests for [`super`]: grouping, Completed promotion, headings, and due-date
+//! labels/ordering. Own file to keep `tasks_page.rs` under the 500-line limit.
 
 use super::*;
 
@@ -38,16 +34,14 @@ fn texts(groups: &[(String, Vec<Task>)]) -> Vec<&str> {
     groups.iter().flat_map(|(_, rows)| rows).map(|t| t.text.as_str()).collect()
 }
 
-/// A `fn` rather than a closure: a closure here infers one lifetime for both
-/// the borrow of the slice and the borrow inside it, and refuses to compile.
+/// A `fn`, not a closure: a closure infers one lifetime for both borrows and
+/// won't compile.
 fn names<'a>(rows: &[&'a Task]) -> Vec<&'a str> {
     rows.iter().map(|t| t.text.as_str()).collect()
 }
 
-/// Which rows reach this page is `TaskStore::accepted`'s rule, pinned by
-/// `accepted_excludes_suggested_and_dismissed_rows`. What is pinned here is
-/// that grouping does not quietly re-sort what it was handed — the caller
-/// owns newest-first order, and a sort re-added here would fight it.
+/// Pins that grouping doesn't re-sort within a band: the caller
+/// (`TaskStore::accepted`) owns newest-first order, and a sort here would fight it.
 #[test]
 fn grouping_preserves_the_order_it_was_given() {
     let rows = vec![
@@ -117,17 +111,15 @@ fn a_group_is_finished_only_when_every_row_in_it_is_done() {
 
 #[test]
 fn an_empty_group_is_not_finished() {
-    // `all()` is true on an empty slice, so the guard in `group_finished` is
-    // the only thing between a note with no tasks at all and a promotion into
-    // the Completed section, where it would read as work that was done.
+    // `all()` is true on an empty slice; without the guard a task-less note
+    // would be promoted to Completed and read as finished work.
     assert!(!group_finished(&[]));
 }
 
 #[test]
 fn a_half_done_note_stays_put_while_a_finished_one_is_promoted() {
-    // The behaviour actually asked for, and the one a later refactor is most
-    // likely to break: promotion is decided per group, so a note with anything
-    // outstanding keeps its place even when another note is entirely ticked.
+    // Promotion is per group: a note with anything outstanding keeps its
+    // place even when another note is entirely ticked.
     let mut half = dated("Half done", Some("2026-08-24"), true, false);
     half.note_id = "n2".into();
     let mut half_ticked = dated("Half ticked", Some("2026-08-01"), true, true);
@@ -192,16 +184,9 @@ fn the_completed_disclosure_splits_a_group_without_losing_a_row() {
 
 #[test]
 fn a_group_with_nothing_left_to_do_is_promoted_whole() {
-    // This test used to say the group keeps an inner disclosure, on the
-    // grounds that without one a fully-ticked note is a bare heading with no
-    // way to reach its rows. That is now the *intended* rendering: the group
-    // leaves the main list entirely and its rows show directly under the
-    // page-level Completed section, so an inner caret would be a control with
-    // nothing left to hide.
-    //
-    // What still has to hold is that the rows survive the move. `split_done`
-    // puts every one of them in the done half, which is the half the promoted
-    // rendering draws — so a group cannot lose a row by being promoted.
+    // A finished group leaves the main list and draws its rows directly under
+    // Completed, with no inner disclosure. Pins that no row is lost in the move:
+    // `split_done` puts all of them in the done half, which is what gets drawn.
     let rows = vec![dated("Done", Some("2026-08-01"), true, true)];
     let (outstanding, done) = split_done(&rows);
     assert!(outstanding.is_empty());
@@ -265,8 +250,7 @@ fn dated(text: &str, due: Option<&str>, all_day: bool, done: bool) -> Task {
 
 #[test]
 fn a_near_date_reads_as_a_word_and_a_far_one_as_a_date() {
-    // "In 9 days" is not something anyone can plan against, and "23 Aug" is
-    // not what the user said about tomorrow. The switch is the point.
+    // Words for near days ("Tomorrow"), dates beyond; the switch is the point.
     let day = |s: &str| parse_due(s, true).unwrap();
     assert_eq!(due_label(day("2026-08-23"), today()), "Today");
     assert_eq!(due_label(day("2026-08-24"), today()), "Tomorrow");
@@ -316,8 +300,7 @@ fn a_ticked_task_never_counts_as_overdue() {
 
 #[test]
 fn a_task_due_today_is_not_overdue() {
-    // Days, not instants: something due at 09:00 today is not late at 17:00 in
-    // the sense the word is being used here.
+    // Days, not instants: due 09:00 today is not "overdue" at 17:00.
     assert!(!dated("Today", Some("2026-08-23T09:00:00"), false, false).is_overdue(today()));
 }
 
@@ -337,8 +320,7 @@ fn the_date_picker_understands_both_shapes_and_an_empty_field() {
 
 #[test]
 fn grouping_still_keeps_a_dated_row_under_its_own_note() {
-    // The provenance the page exists for outranks the date: sorting is within
-    // a group, never across groups.
+    // Provenance outranks the date: sorting is within a group, never across.
     let mut other = dated("Other note, due sooner", Some("2026-08-24"), true, false);
     other.note_id = "n2".into();
     let rows = vec![dated("This note, due later", Some("2026-09-30"), true, false), other];

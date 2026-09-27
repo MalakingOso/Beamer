@@ -1,6 +1,5 @@
-//! Tests for [`super`]. Split into their own file for the same reason
-//! `task_store/tests.rs` and `pipeline/tests.rs` are: the parent module was
-//! closing in on the project's 500-line limit.
+//! `set_size` tests for [`super`]: a window resize is not an edit, so it never
+//! moves `modified`, and an unchanged size never dirties the store.
 
 use super::*;
 use crate::notes::{NoteColor, NoteOrigin};

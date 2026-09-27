@@ -1,5 +1,10 @@
 #![cfg(target_os = "windows")]
 
+//! Win32 `SendInput` backend, first in the Windows chain: types each UTF-16 unit
+//! as a `KEYEVENTF_UNICODE` key event, layout-independent, inserting at the cursor.
+//! Input into elevated windows is blocked by UIPI (dictation there does nothing);
+//! see `agent_docs/text_injection.md`.
+
 use super::{InjectionBackend, InjectionResult};
 use anyhow::Result;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -7,9 +12,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VIRTUAL_KEY,
 };
 
-/// Processes whose input pipelines drop synthetic Unicode events, so
-/// SendInput silently does nothing there. Undetectable via the SendInput
-/// return value (events are still accepted into the queue) — skip to next backend.
+/// Processes that accept synthetic Unicode events into the queue and then drop
+/// them, so SendInput silently types nothing. Undetectable from the return value,
+/// hence skipped by name. `notepad.exe` is deliberately absent (verified working).
 const SKIP_SENDINPUT_PROCESSES: &[&str] = &["warp.exe"];
 
 pub struct SendInputBackend;
@@ -69,10 +74,9 @@ pub fn inject_via_sendinput(text: &str) -> Result<bool> {
     }
     tracing::warn!("SendInput: sent {} of {} events", sent, inputs.len());
 
-    // Retry the unsent tail once before giving up: the accepted prefix is
-    // already typed, and falling through to clipboard would paste the whole
-    // text over it (visible duplication). A still-short retry falls through
-    // as a failure — partial text stays, nothing is silently lost.
+    // Retry the unsent tail once: the accepted prefix is already typed, and the
+    // clipboard fallback would paste the whole text after it (duplication).
+    // A still-short retry fails through; the partial text stays.
     let tail = &inputs[sent.min(inputs.len())..];
     if tail.is_empty() {
         return Ok(false);
@@ -111,10 +115,8 @@ fn make_unicode_input(char_code: u16, key_up: bool) -> INPUT {
     }
 }
 
-/// True when the foreground window belongs to this process — our own sticky
-/// notes, settings, or board. Checked in the dispatch path, never in
-/// `available()`: the Settings card queries availability while our own window
-/// is focused, and must still report SendInput as working.
+/// True when the foreground window belongs to this process (sticky notes,
+/// settings, board). Dispatch-only, never in `available()`; see `super::foreground_is_self`.
 pub(crate) fn foreground_is_self() -> bool {
     use windows::Win32::System::Threading::GetCurrentProcessId;
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};

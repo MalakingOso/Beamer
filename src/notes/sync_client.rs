@@ -1,9 +1,12 @@
-//! Live sync client: converges the local automerge document with `sync_server`
-//! over a WebSocket. Offline-first: a dropped connection only loses live
-//! propagation, never data. The socket task holds no `Signal`; incoming changes
-//! are applied on the Dioxus coroutine. Nobody here writes the file — the 500 ms
-//! tick still owns `SyncDoc::save`. Like `flush.rs`, reconcile precedes merge,
-//! or a pending local edit would be thrown away by the wholesale hydrate.
+//! Live sync client: converges the local automerge document with
+//! `bin/sync_server.rs` over a WebSocket. Started once from `App()` via
+//! `use_sync_client`; off when `config.sync.url` is empty. See `agent_docs/sync.md`.
+//!
+//! Offline-first: a dropped connection only loses live propagation, never data.
+//! The socket task holds no `Signal`; incoming changes are applied on the Dioxus
+//! coroutine. Nothing here writes the file: the 500 ms tick (`flush`) still owns
+//! `SyncDoc::save`, so a merge here calls `mark_pending_save`. Like `flush.rs`,
+//! reconcile precedes merge, or the wholesale hydrate throws away a pending local edit.
 
 use std::time::Duration;
 

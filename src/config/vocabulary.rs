@@ -1,9 +1,12 @@
+//! Custom vocabulary: domain terms (names, jargon) the transcription backends
+//! are primed with, stored one per line in `vocabulary.txt` beside
+//! `config.toml`. The orchestrator reads it per dictation; the Vocab page edits
+//! it. Synced between machines by `notes::doc_vocab`, not by copying the file.
+
 use anyhow::Result;
 use std::path::PathBuf;
 
-/// Custom vocabulary terms sent to STT backends to improve recognition of
-/// domain-specific words (product names, jargon, etc.). Stored as one term
-/// per line in `%APPDATA%/Beamer/vocabulary.txt`.
+/// The term list plus the file it was loaded from; every edit saves at once.
 pub struct Vocabulary {
     terms: Vec<String>,
     path: PathBuf,
@@ -54,6 +57,7 @@ impl Vocabulary {
 
     /// Replace `old` with `new` in place (no-op if `old` is missing or `new`
     /// is blank; drops `old` if `new` already exists, so no duplicates).
+    /// Don't rebuild this as `remove` + `add`: `add` appends, moving the term.
     pub fn rename(&mut self, old: &str, new: &str) -> Result<()> {
         let new = new.trim();
         if new.is_empty() || old == new {

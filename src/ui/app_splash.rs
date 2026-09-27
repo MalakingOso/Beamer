@@ -1,4 +1,7 @@
-//! Cold-start warmup splash hook for `App`. Runs once from `App()`'s render body.
+//! Startup splash hook. Opens the splash window, runs `warmup::warm_all`, then
+//! closes it and flips `app_ready`. Called once from `App()`'s render body like
+//! the other `setup_*` hooks (fixed hook order; see
+//! `agent_docs/dioxus_architecture.md`). The splash UI itself is `ui::splash`.
 
 use dioxus::desktop::tao::dpi::{PhysicalPosition, PhysicalSize};
 #[cfg(target_os = "windows")]
@@ -9,8 +12,7 @@ use dioxus::prelude::*;
 use crate::ui::splash::{SplashWindow, SPLASH_CSS};
 use crate::warmup::{self, WarmupProgress};
 
-/// Cold-start warmup splash: pays the one-time costs that would otherwise stall
-/// the first recording, then closes itself and flips `app_ready`.
+/// Pays the one-time startup costs that would otherwise stall the first recording.
 pub(super) fn setup_splash(window: DesktopContext, mut app_ready: Signal<bool>) {
     let warmup_progress = use_signal(WarmupProgress::default);
     let mut splash_ctx: Signal<Option<DesktopContext>> = use_signal(|| None);

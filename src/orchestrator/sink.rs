@@ -1,4 +1,5 @@
-//! Terminal sinks for a finished transcript: injection or sticky note.
+//! Last step of a dictation: send the finished transcript to injection or a
+//! sticky note.
 //!
 //! `deliver` is the single place the inject-vs-note decision is made; every
 //! finished transcript funnels through it.

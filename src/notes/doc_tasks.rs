@@ -1,6 +1,9 @@
-//! Mapping between `Vec<Task>` and the `tasks` root of the automerge document.
-//! Same shape as `doc_notes`: a map keyed by task id. Rows are decided once,
-//! so nothing is character-merged; keying by id keeps both machines' decisions.
+//! Mapping between `Vec<Task>` and the `tasks` root of the synced automerge
+//! document. Same shape as `doc_notes`: a map keyed by task id. Rows are decided
+//! once, so nothing is character-merged; keying by id keeps both machines' decisions.
+//!
+//! Look (a third peer) ticks `tasks[id].done` here; the value-guarded `put_*`
+//! is what keeps a stale in-memory row from reverting it (`sync_peer_tests.rs`).
 
 use anyhow::Result;
 use automerge::{AutoCommit, ObjId, ReadDoc};
