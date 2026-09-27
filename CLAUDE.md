@@ -76,8 +76,8 @@ is now the only local model pass. The GNOME extension ships inside the
 .deb and `deploy/install-linux.sh`, so Settings → Injection can install it
 without a checkout; a GNOME log-out/in is still needed to pick up a new
 extension version, but it's no longer a separate manual deploy step. The
-feature set is large and growing — run `cargo test` (keep `-D warnings`
-clean) rather than trusting any count here.
+feature set is large and growing — run `cargo test` (CI enforces it with
+`-D warnings`) rather than trusting any count here.
 
 The detailed docs are the source of truth:
 - `agent_docs/sticky_notes.md` — Note windows, Wayland placement, cross-window state

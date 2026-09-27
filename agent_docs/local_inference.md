@@ -507,7 +507,7 @@ full walkthrough. Three things worth knowing if touching this code:
   the generated `.nsi` or its staging directory; only manganis `asset!()`
   output does). `hooks.nsh` instead embeds the runtime files directly via
   NSIS's own `File /nonfatal "<path>\*.*"`, which also downgrades a
-  zero-match glob (e.g. a clean checkout — `vendor/llama-k2horizon/` is gitignored
+  zero-match glob (the CI scenario — `vendor/llama-k2horizon/` is gitignored
   and never populated there) from a compile error to a harmless warning,
   verified both ways.
 
