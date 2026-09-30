@@ -187,11 +187,11 @@ mod ll_hook;
 #[allow(unused_imports)]
 pub use ll_hook::{start_ll_hook, HotkeyHandle};
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 mod gnome_grab;
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 mod linux_hotkey;
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 #[allow(unused_imports)]
 pub use linux_hotkey::{start_ll_hook, HotkeyHandle};
 

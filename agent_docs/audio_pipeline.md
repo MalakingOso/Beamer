@@ -14,12 +14,17 @@ chunker thread (src/audio/mod.rs, AudioPipeline::start)
   → f32 → i16 LE PCM conversion, live-level RMS publish
   → mpsc::Sender<Vec<u8>>  (CHUNK_CHANNEL_CAPACITY)
       ↓
-orchestrator.rs
-  → concatenated into one Vec<u8>, wrapped in a WAV header at send time
+orchestrator/mod.rs (`record` + `session::buffer_tail_audio`)
+  → concatenated into one Vec<u8>, queued as a `transcribe::Job`,
+    wrapped in a WAV header at send time
 ```
 
 `AudioPipeline::start()` returns `(cpal::Stream, mpsc::Receiver<Vec<u8>>)`.
-The caller must keep the `Stream` alive — dropping it stops capture.
+The caller must keep the `Stream` alive — dropping it stops capture. `record`
+drops it right after the tail capture, so the mic is closed during the upload.
+A cpal stream error reaches the orchestrator as an empty chunk, which it
+reports once per recording in the status log ("Microphone reported an
+error"); capture continues.
 
 ## cpal Setup (`src/audio/capture.rs`)
 
@@ -129,7 +134,7 @@ throttle back down to ~15 Hz.
 
 ## Consumers
 
-`orchestrator.rs` owns the `cpal::Stream` and drains the PCM-chunk
+`orchestrator/mod.rs` owns the `cpal::Stream` and drains the PCM-chunk
 `Receiver`:
 
 Chunks are simply concatenated into one `Vec<u8>` PCM buffer until

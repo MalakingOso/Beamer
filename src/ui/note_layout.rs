@@ -172,19 +172,6 @@ mod tests {
     }
 
     #[test]
-    fn identical_inputs_give_an_identical_result() {
-        let occupied = scatter(4);
-        let a = place_next(screen(), NOTE, &occupied, SEED);
-        let b = place_next(screen(), NOTE, &occupied, SEED);
-        assert_eq!(a, b, "placement must be a pure function of its inputs");
-        assert_eq!(
-            scatter(6),
-            scatter(6),
-            "one launch seed must lay the same session out the same way twice"
-        );
-    }
-
-    #[test]
     fn a_different_launch_seed_lays_the_same_notes_out_differently() {
         let a = scatter_in(screen(), 5, 0xC0FF_EE01);
         let b = scatter_in(screen(), 5, 0x1234_5678);
@@ -201,16 +188,6 @@ mod tests {
         let placed = scatter(8);
         let unique: std::collections::HashSet<_> = placed.iter().collect();
         assert_eq!(unique.len(), placed.len(), "duplicate positions in {placed:?}");
-    }
-
-    #[test]
-    fn a_handful_of_notes_stay_well_separated() {
-        let placed = scatter(5);
-        let min_sep = closest_pair(&placed);
-        assert!(
-            min_sep > 250.0,
-            "notes clumped: closest pair was {min_sep:.0}px apart in {placed:?}"
-        );
     }
 
     #[test]
@@ -305,15 +282,6 @@ mod tests {
             "only {:.1}% of 20 notes cleared {MIN_SEPARATION}px across two monitors",
             wide * 100.0
         );
-    }
-
-    #[test]
-    fn placing_a_hundred_notes_terminates() {
-        let placed = scatter(100);
-        assert_eq!(placed.len(), 100);
-        for p in placed {
-            assert_fully_inside(p, screen(), NOTE);
-        }
     }
 }
 

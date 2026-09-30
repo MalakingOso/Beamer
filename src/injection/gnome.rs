@@ -1,4 +1,4 @@
-#![cfg(not(target_os = "windows"))]
+#![cfg(target_os = "linux")]
 
 //! Direct typing via the Beamer GNOME Shell extension (v2).
 //!

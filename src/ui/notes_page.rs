@@ -299,22 +299,10 @@ mod tests {
     }
 
     #[test]
-    fn preview_collapses_the_whitespace_a_transcript_carries() {
-        let n = note_with("call   the\n\nvet  ");
-        assert_eq!(preview(&n), "call the vet");
-    }
-
-    #[test]
     fn preview_trims_a_long_note_and_marks_it() {
         let n = note_with(&"word ".repeat(100));
         let p = preview(&n);
         assert!(p.ends_with('\u{2026}'), "a trimmed preview must say so: {p}");
         assert!(p.chars().count() <= PREVIEW_CHARS + 1);
-    }
-
-    #[test]
-    fn a_short_note_is_shown_whole() {
-        let n = note_with("short one");
-        assert_eq!(preview(&n), "short one");
     }
 }

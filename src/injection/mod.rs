@@ -13,13 +13,13 @@ pub mod sendinput;
 #[cfg(target_os = "windows")]
 pub mod uia;
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 pub mod ydotool;
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 pub mod focus;
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 pub mod gnome;
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 pub mod wtype;
 
 use anyhow::Result;
@@ -50,7 +50,7 @@ pub trait InjectionBackend: Send + Sync {
 /// Prepare text for keystroke typing (gnome/wtype/ydotool).
 /// Newlines/tabs become spaces — a typed Enter would submit forms
 /// mid-injection. The clipboard path keeps newlines (atomic paste).
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 pub(crate) fn sanitize_for_typing(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     // Tracks a '\r' mapping so "\r\n" yields one space, not two.
@@ -85,7 +85,7 @@ pub(crate) fn sanitize_for_typing(text: &str) -> String {
     out
 }
 
-#[cfg(all(test, not(target_os = "windows")))]
+#[cfg(all(test, target_os = "linux"))]
 mod sanitize_tests {
     use super::sanitize_for_typing;
 
@@ -173,7 +173,7 @@ mod self_target_tests {
             assert!(!is_keystroke_backend("clipboard"));
             assert!(!is_keystroke_backend("uia"));
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "linux")]
         {
             assert!(is_keystroke_backend("gnome"));
             assert!(is_keystroke_backend("wtype"));
@@ -205,7 +205,7 @@ pub fn all_backends(paste_shortcut: &str) -> Vec<Box<dyn InjectionBackend>> {
         backends.push(Box::new(uia::UiaBackend));
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
     {
         backends.push(Box::new(gnome::GnomeBackend));
         backends.push(Box::new(wtype::WtypeBackend));
@@ -232,7 +232,7 @@ pub fn default_backend_names() -> Vec<String> {
     {
         vec!["sendinput".into(), "clipboard".into(), "uia".into()]
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
     {
         vec![
             "gnome".into(),
@@ -267,7 +267,7 @@ fn is_keystroke_backend(name: &str) -> bool {
     {
         name == "sendinput"
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
     {
         matches!(name, "gnome" | "wtype" | "ydotool")
     }
@@ -282,7 +282,7 @@ fn foreground_is_self() -> bool {
     {
         sendinput::foreground_is_self()
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
     {
         focus::focused_is_self()
     }

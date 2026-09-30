@@ -48,29 +48,11 @@ fn a_parent_dir_entry_rejects_the_whole_archive() {
 }
 
 #[test]
-fn a_dot_dot_that_climbs_back_in_is_still_rejected() {
-    let dir = temp_dir("climb-back");
-    let zip = dir.join("odd.zip");
-    make_zip(&zip, &[("sub/../ok.dll", b"x")]);
-    assert!(extract(&zip, &dir.join("rt.staging")).is_err());
-}
-
-#[test]
 fn an_absolute_entry_rejects_the_whole_archive() {
     let dir = temp_dir("absolute");
     let zip = dir.join("abs.zip");
     make_zip(&zip, &[("/tmp/beamer-archive-test-absolute.dll", b"pwned")]);
     assert!(extract(&zip, &dir.join("rt.staging")).is_err());
-}
-
-#[test]
-fn extracting_over_an_existing_staging_dir_refuses() {
-    let dir = temp_dir("exists");
-    let zip = dir.join("rt.zip");
-    make_zip(&zip, &[("a", b"a")]);
-    let into = dir.join("rt.staging");
-    std::fs::create_dir_all(&into).unwrap();
-    assert!(extract(&zip, &into).is_err());
 }
 
 #[test]

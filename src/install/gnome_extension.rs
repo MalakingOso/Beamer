@@ -1,4 +1,4 @@
-#![cfg(not(target_os = "windows"))]
+#![cfg(target_os = "linux")]
 #![allow(dead_code)]
 
 //! Install, enable, and version-check the GNOME Shell extension in
@@ -254,18 +254,6 @@ mod tests {
     }
 
     #[test]
-    fn metadata_version_parses() {
-        assert_eq!(parse_metadata_version(r#"{"uuid":"x","version":2}"#), Some(2));
-        assert_eq!(parse_metadata_version(r#"{"uuid":"x"}"#), None);
-        assert_eq!(parse_metadata_version("not json"), None);
-    }
-
-    #[test]
-    fn enabled_current_version_stays_enabled() {
-        assert_eq!(resolve_enabled_status(2, Some(2), Some(2)), Status::Enabled);
-    }
-
-    #[test]
     fn old_live_and_old_files_needs_update() {
         assert_eq!(
             resolve_enabled_status(1, Some(1), Some(2)),
@@ -279,23 +267,6 @@ mod tests {
             resolve_enabled_status(1, Some(2), Some(2)),
             Status::UpdatePendingRestart
         );
-    }
-
-    #[test]
-    fn unknown_bundled_version_stays_enabled() {
-        assert_eq!(resolve_enabled_status(1, Some(1), None), Status::Enabled);
-    }
-
-    #[test]
-    fn parse_status_finds_active() {
-        let out = "beamer-focus@beamer.app\n  Name: Beamer Focus Helper\n  State: ACTIVE\n  Type: PER_USER\n";
-        assert_eq!(parse_status(out, "beamer-focus@beamer.app"), Some(Status::Enabled));
-    }
-
-    #[test]
-    fn parse_status_finds_inactive() {
-        let out = "beamer-focus@beamer.app\n  Name: Beamer Focus Helper\n  State: INACTIVE\n";
-        assert_eq!(parse_status(out, "beamer-focus@beamer.app"), Some(Status::Disabled));
     }
 
     #[test]

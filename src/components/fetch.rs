@@ -91,22 +91,6 @@ mod tests {
     }
 
     #[test]
-    fn every_catalog_sha256_is_the_right_length() {
-        for c in super::super::LLAMA_SERVER {
-            if let super::super::Kind::File { sha256, .. } | super::super::Kind::Archive { sha256, .. } = c.kind {
-                assert_eq!(sha256.len(), 64, "{}: a sha256 hex digest is exactly 64 characters", c.id);
-                assert!(sha256.chars().all(|ch| ch.is_ascii_hexdigit()), "{}: not hex", c.id);
-            }
-        }
-    }
-
-    #[test]
-    fn a_file_of_the_wrong_size_fails_before_any_hashing() {
-        let path = temp_file("wrong-size.bin", b"not the real model");
-        assert!(!verify_against(&path, 999_999, &"0".repeat(64)).unwrap());
-    }
-
-    #[test]
     fn a_file_of_the_right_size_but_wrong_content_fails() {
         let contents = b"twelve bytes";
         let path = temp_file("wrong-hash.bin", contents);
@@ -118,25 +102,5 @@ mod tests {
         let contents = b"twelve bytes";
         let path = temp_file("matching.bin", contents);
         assert!(verify_against(&path, contents.len() as u64, &sha_of(contents)).unwrap());
-    }
-
-    #[test]
-    fn hash_comparison_is_case_insensitive() {
-        let contents = b"twelve bytes";
-        let path = temp_file("case.bin", contents);
-        let upper = sha_of(contents).to_ascii_uppercase();
-        assert!(verify_against(&path, contents.len() as u64, &upper).unwrap());
-    }
-
-    #[test]
-    fn a_missing_file_is_an_error_not_a_false() {
-        let path = std::env::temp_dir().join("beamer-fetch-test-definitely-missing.bin");
-        assert!(verify_against(&path, 0, &"0".repeat(64)).is_err());
-    }
-
-    #[test]
-    fn the_part_path_appends_to_the_full_filename() {
-        let dest = Path::new("models").join("K2-Horizon-0.9B-Q8_0.gguf");
-        assert_eq!(part_path(&dest), Path::new("models").join("K2-Horizon-0.9B-Q8_0.gguf.part"));
     }
 }

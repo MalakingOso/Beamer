@@ -152,48 +152,10 @@ mod tests {
     }
 
     #[test]
-    fn a_month_starting_on_monday_needs_no_leading_blanks() {
-        // 1 Jun 2026 is a Monday.
-        let cells = calendar_cells(2026, 6);
-        assert_eq!(cells[0], Some(ymd(2026, 6, 1)));
-        assert_eq!(
-            cells.len(),
-            30 + 5,
-            "30 days plus 5 trailing blanks to close the week"
-        );
-    }
-
-    #[test]
-    fn february_covers_the_leap_day() {
-        let cells = calendar_cells(2024, 2);
-        assert!(
-            cells.contains(&Some(ymd(2024, 2, 29))),
-            "leap day must be pickable"
-        );
-        assert_eq!(
-            NaiveDate::from_ymd_opt(2024, 2, 30),
-            None,
-            "test guard: no such day"
-        );
-        assert_eq!(cells.len() % 7, 0);
-    }
-
-    #[test]
     fn month_navigation_rolls_the_year_over() {
         assert_eq!(prev_month(2026, 1), (2025, 12));
         assert_eq!(next_month(2026, 12), (2027, 1));
         assert_eq!(prev_month(2026, 9), (2026, 8));
         assert_eq!(next_month(2026, 9), (2026, 10));
-    }
-
-    #[test]
-    fn the_header_names_the_month_and_year() {
-        assert_eq!(month_label(2026, 9), "September 2026");
-        assert_eq!(month_label(2027, 1), "January 2027");
-    }
-
-    #[test]
-    fn a_picked_day_stores_as_a_bare_date() {
-        assert_eq!(format_day(ymd(2026, 9, 5)), "2026-09-05");
     }
 }

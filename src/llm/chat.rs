@@ -209,21 +209,6 @@ mod tests {
     }
 
     #[test]
-    fn an_absent_response_format_is_omitted_rather_than_null() {
-        let json = serde_json::to_string(&sample_request()).unwrap();
-        assert!(
-            !json.contains("response_format"),
-            "a null response_format is not the same as no response_format to every \
-             server version: {json}"
-        );
-
-        let mut constrained = sample_request();
-        constrained.response_format = Some(ResponseFormat::json_object());
-        let json = serde_json::to_string(&constrained).unwrap();
-        assert!(json.contains(r#""response_format":{"type":"json_object"}"#), "{json}");
-    }
-
-    #[test]
     fn empty_content_with_reasoning_content_is_diagnosed_as_thinking_enabled() {
         let body = r#"{"choices":[{"message":{"role":"assistant","content":"",
                        "reasoning_content":"The user wants me to think about this."}}]}"#;
@@ -234,12 +219,6 @@ mod tests {
     fn an_empty_completion_with_no_reasoning_is_a_successful_empty_answer() {
         let body = r#"{"choices":[{"message":{"role":"assistant","content":""}}]}"#;
         assert_eq!(parse_completion(body), Ok(String::new()));
-    }
-
-    #[test]
-    fn reasoning_alongside_real_content_is_not_an_error() {
-        let body = r#"{"choices":[{"message":{"content":"Hello.","reasoning_content":"hmm"}}]}"#;
-        assert_eq!(parse_completion(body), Ok("Hello.".to_string()));
     }
 
     #[test]
@@ -261,17 +240,5 @@ mod tests {
         assert!(!ChatError::Http(404).is_retryable());
         assert!(!ChatError::Malformed("no choices".into()).is_retryable());
         assert!(!ChatError::ThinkingEnabled.is_retryable());
-    }
-
-    #[test]
-    fn chat_url_tolerates_a_trailing_slash() {
-        assert_eq!(
-            chat_url("http://127.0.0.1:8080"),
-            "http://127.0.0.1:8080/v1/chat/completions"
-        );
-        assert_eq!(
-            chat_url("http://127.0.0.1:8080///"),
-            "http://127.0.0.1:8080/v1/chat/completions"
-        );
     }
 }

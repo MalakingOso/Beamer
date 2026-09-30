@@ -1,4 +1,4 @@
-#![cfg(not(target_os = "windows"))]
+#![cfg(target_os = "linux")]
 
 //! `ydotool` backend, third in the Linux chain: synthesizes keys through kernel
 //! uinput, so it works on any compositor and X11, but needs the `ydotoold` daemon
@@ -41,15 +41,21 @@ impl InjectionBackend for YdotoolBackend {
 
         // 25 ms delay: faster drops characters at word boundaries on slow event
         // loops (default is 20). Hold is the default, stated explicitly.
-        let output = std::process::Command::new("ydotool")
-            .arg("type")
+        // Bounded like wtype (typing takes ~45 ms/char): a wedged `ydotoold` must fail
+        // the injection, not park the dispatch thread forever.
+        let timeout = std::time::Duration::from_secs(15)
+            + std::time::Duration::from_millis(60 * ascii_text.len() as u64);
+        let mut cmd = std::process::Command::new("ydotool");
+        cmd.arg("type")
             .arg("--key-delay")
             .arg("25")
             .arg("--key-hold")
             .arg("20")
             .arg("--")
-            .arg(&ascii_text)
-            .output()?;
+            .arg(&ascii_text);
+        let output = super::clipboard::run_with_timeout(&mut cmd, timeout)?.ok_or_else(|| {
+            anyhow::anyhow!("ydotool timed out after {}s", timeout.as_secs())
+        })?;
 
         if output.status.success() {
             Ok(InjectionResult {

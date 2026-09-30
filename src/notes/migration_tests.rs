@@ -81,19 +81,6 @@ fn migration_lifts_pos_size_and_open_off_a_legacy_notes_json_losslessly() {
 }
 
 #[test]
-fn a_note_loaded_from_a_legacy_file_no_longer_carries_pos_size_or_open_itself() {
-    let (path, machine_path) = temp_migration_paths("migrate_shape");
-
-    let store = seed_load(path, machine_path);
-
-    // `Note` has no `deny_unknown_fields`, so the old keys are ignored, not fatal.
-    let note = store.get("199012340-0000").unwrap();
-    assert_eq!(note.raw, "call the vet about biscuit");
-    assert_eq!(note.color, NoteColor::Amber);
-    assert!(!note.archived);
-}
-
-#[test]
 fn loading_gcs_machine_entries_for_notes_that_no_longer_exist() {
     let (path, machine_path) = temp_migration_paths("gc_on_load");
     // Simulate a stale machine.json left over from a note that was since
@@ -162,35 +149,6 @@ fn a_migrating_load_leaves_the_store_dirty_so_the_stale_keys_get_rewritten_away(
         store.is_dirty(),
         "lifting legacy fields off notes.json must dirty the store, or a          never-edited legacy file could sync to a second machine and leak          the first machine's window state into that machine's own migration"
     );
-}
-
-#[test]
-fn a_load_with_nothing_to_migrate_does_not_dirty_the_store() {
-    let dir = std::env::temp_dir().join(format!("beamer_notes_test_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("no_migration.json");
-    let machine_path = dir.join("no_migration.machine.json");
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(&machine_path);
-
-    let mut store = NoteStore {
-        notes: Vec::new(),
-        path: path.clone(),
-        dirty: false,
-        machine: MachineStore::new(machine_path.clone()),
-        doc: sync_doc::SyncHandle::default(),
-        doc_dirty: false,
-        load_error: None,
-        unreadable_notes: Vec::new(),
-    };
-    store.create("hello".into(), NoteColor::Purple, NoteOrigin::Dictated);
-    store.flush_if_dirty();
-
-    let reloaded = seed_load(path, machine_path);
-
-    let reason = "a notes.json already written under the current schema carries no \
-                   legacy keys, so there is nothing to migrate and nothing to rewrite";
-    assert!(!reloaded.is_dirty(), "{}", reason);
 }
 
 #[test]

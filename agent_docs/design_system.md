@@ -103,12 +103,11 @@ Sharp system: 4px base (--radius), 6px cards (--radius-md), 8px max (--radius-lg
 - 2px border-bottom
 - Close hover: danger red
 
-## Overlay Window
+## Recording Pill
 
-- Dark glass (unchanged from previous design)
-- Monospace text, 8px radius
-
-## Screen Edge Glow
-
-- Purple glow: #4B0082 (unchanged)
-- Configurable via settings
+- Dark-glass capsule, 264×80 (`src/ui/pill.rs` on Windows; a Shell-native
+  St widget on GNOME via `UpdateLevel(d)`, `src/ui/shell_indicator.rs`)
+- Monospace timer text, live waveform while recording
+- There is no overlay window or screen-edge glow anymore — the pill replaced
+  the overlay, and the glow never shipped. Don't re-add either without a
+  design reason.

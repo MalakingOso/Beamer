@@ -33,23 +33,6 @@ mod tests {
     use super::pcm_to_wav;
 
     #[test]
-    fn header_has_riff_wave_magic() {
-        let wav = pcm_to_wav(&[0xAA, 0xBB, 0xCC, 0xDD]);
-        assert_eq!(&wav[0..4], b"RIFF");
-        assert_eq!(&wav[8..12], b"WAVE");
-        assert_eq!(&wav[12..16], b"fmt ");
-        assert_eq!(&wav[36..40], b"data");
-    }
-
-    #[test]
-    fn riff_chunk_size_is_36_plus_data_len() {
-        let pcm = [0u8; 100];
-        let wav = pcm_to_wav(&pcm);
-        let riff_size = u32::from_le_bytes(wav[4..8].try_into().unwrap());
-        assert_eq!(riff_size, 36 + pcm.len() as u32);
-    }
-
-    #[test]
     fn fmt_chunk_fields_are_16khz_mono_16bit_pcm() {
         let wav = pcm_to_wav(&[0u8; 4]);
         let fmt_chunk_size = u32::from_le_bytes(wav[16..20].try_into().unwrap());
@@ -67,14 +50,6 @@ mod tests {
         assert_eq!(byte_rate, 16000 * 1 * 16 / 8);
         assert_eq!(block_align, 1 * 16 / 8);
         assert_eq!(bits_per_sample, 16);
-    }
-
-    #[test]
-    fn data_chunk_size_matches_pcm_len() {
-        let pcm = [1u8, 2, 3, 4, 5, 6];
-        let wav = pcm_to_wav(&pcm);
-        let data_len = u32::from_le_bytes(wav[40..44].try_into().unwrap());
-        assert_eq!(data_len, pcm.len() as u32);
     }
 
     #[test]

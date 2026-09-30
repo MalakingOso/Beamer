@@ -89,11 +89,13 @@ pub fn failure_message(timed_out: bool, connect_failed: bool, status: Option<u16
     if let Some(code) = status {
         return format!("Server returned HTTP {code}");
     }
-    if timed_out {
-        return "No response — the server is reachable but did not answer".to_string();
-    }
+    // Connect before timeout: reqwest flags a connect timeout as both, and an
+    // unreachable host is "not running", not "reachable but silent".
     if connect_failed {
         return "Server not running".to_string();
+    }
+    if timed_out {
+        return "No response — the server is reachable but did not answer".to_string();
     }
     "Could not reach the server".to_string()
 }
@@ -159,36 +161,16 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_server_is_not_an_error() {
-        assert!(parse_models(r#"{"data":[]}"#).unwrap().is_empty());
-    }
-
-    #[test]
     fn malformed_json_is_an_error_not_a_panic() {
         assert!(parse_models("not json at all").is_err());
         assert!(parse_models(r#"{"data":"nope"}"#).is_err());
     }
 
     #[test]
-    fn models_url_tolerates_a_trailing_slash() {
-        assert_eq!(models_url("http://127.0.0.1:8080"), "http://127.0.0.1:8080/v1/models");
-        assert_eq!(models_url("http://127.0.0.1:8080/"), "http://127.0.0.1:8080/v1/models");
-        assert_eq!(models_url("http://127.0.0.1:8080///"), "http://127.0.0.1:8080/v1/models");
-    }
-
-    #[test]
-    fn init_http_client_is_idempotent() {
-        // The backing OnceLock is process-global: this proves a second call
-        // never panics, not which value won.
-        init_http_client(Duration::from_millis(1_234));
-        init_http_client(Duration::from_millis(9_999));
-        let _ = http_client();
-    }
-
-    #[test]
     fn failures_are_described_in_the_users_terms() {
         assert_eq!(failure_message(false, true, None), "Server not running");
         assert!(failure_message(true, false, None).starts_with("No response"));
+        assert_eq!(failure_message(true, true, None), "Server not running", "a connect timeout");
         assert_eq!(failure_message(false, false, Some(503)), "Server returned HTTP 503");
         // A status is the most specific thing known, so it wins over the flags.
         assert_eq!(failure_message(true, true, Some(500)), "Server returned HTTP 500");

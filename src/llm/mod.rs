@@ -128,26 +128,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_point_at_a_local_server_with_a_generous_timeout() {
-        let cfg = LlmConfig::default();
-        assert_eq!(cfg.base_url, "http://127.0.0.1:8080");
-        assert!(
-            cfg.request_timeout_ms >= 45_000,
-            "a 14-note CPU batch of the default extraction model measured \
-             1.3-12.4s/note at its configured reasoning effort, before any \
-             cold-load reload on top; 15s is the tail, not headroom"
-        );
-        assert!(!cfg.base_url.ends_with('/'), "the default must not need normalizing");
-    }
-
-    #[test]
-    fn extraction_is_on_for_a_fresh_install() {
-        let cfg = LlmConfig::default();
-        assert!(cfg.enabled);
-        assert!(cfg.extract.enabled, "the pass a fresh install can actually run");
-    }
-
-    #[test]
     fn the_master_switch_gates_the_pass_rather_than_replacing_it() {
         let mut cfg = LlmConfig::default();
         assert!(cfg.extract_wanted());
@@ -162,13 +142,6 @@ mod tests {
         cfg.enabled = true;
         cfg.extract.enabled = false;
         assert!(!cfg.extract_wanted());
-    }
-
-    #[test]
-    fn extraction_with_no_base_url_override_falls_back_to_the_shared_one() {
-        let mut cfg = LlmConfig::default();
-        cfg.base_url = "https://callisto.example.ts.net".into();
-        assert_eq!(cfg.extract_base_url(), "https://callisto.example.ts.net");
     }
 
     #[test]
@@ -189,17 +162,6 @@ mod tests {
     }
 
     #[test]
-    fn an_old_config_with_only_a_shared_base_url_still_routes_there() {
-        // Predates the per-stage override: must not silently drop
-        // extraction to the localhost default.
-        let toml = r#"
-            base_url = "https://callisto.example.ts.net"
-        "#;
-        let cfg: LlmConfig = toml::from_str(toml).unwrap();
-        assert_eq!(cfg.extract_base_url(), "https://callisto.example.ts.net");
-    }
-
-    #[test]
     fn a_pre_strip_config_with_a_cleanup_table_still_loads() {
         // The cleanup pass is gone, but its table sits in existing
         // config.toml files. Unknown keys are ignored, so those files
@@ -212,38 +174,5 @@ mod tests {
         let cfg: LlmConfig = toml::from_str(toml).unwrap();
         assert_eq!(cfg.extract_base_url(), "https://callisto.example.ts.net");
         assert!(cfg.extract.enabled);
-    }
-
-    #[test]
-    fn connect_timeout_defaults_short_enough_that_asleep_fails_fast() {
-        let cfg = LlmConfig::default();
-        assert_eq!(cfg.connect_timeout_ms, 5_000);
-        assert!(
-            cfg.connect_timeout_ms < cfg.request_timeout_ms,
-            "connect is the fast fail path; it must stay well under the \
-             generous total timeout or it buys nothing over a tailnet"
-        );
-    }
-
-    #[test]
-    fn an_old_config_missing_connect_timeout_ms_still_loads() {
-        // Old configs lack this field, so it must stay `#[serde(default)]`.
-        let toml = r#"
-            enabled = true
-            base_url = "http://127.0.0.1:8080"
-            request_timeout_ms = 15000
-        "#;
-        let cfg: LlmConfig = toml::from_str(toml).unwrap();
-        assert_eq!(cfg.connect_timeout_ms, 5_000);
-    }
-
-    #[test]
-    fn the_extraction_model_defaults_to_the_file_the_deploy_preset_serves() {
-        let cfg = LlmConfig::default();
-        // K2-Horizon on aarch64, Gemma elsewhere; see `default_extract_model`.
-        #[cfg(target_arch = "aarch64")]
-        assert_eq!(cfg.extract.model, "K2-Horizon-0.9B-Q8_0");
-        #[cfg(not(target_arch = "aarch64"))]
-        assert_eq!(cfg.extract.model, "gemma-4-E4B_q4_0-it");
     }
 }

@@ -75,12 +75,18 @@ impl Vocabulary {
         Ok(())
     }
 
+    /// Atomic (temp file + rename) like every other store, so a crash
+    /// mid-write can't truncate the list.
     fn save(&self) -> Result<()> {
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let contents = self.terms.join("\n");
-        std::fs::write(&self.path, contents)?;
+        let tmp = self.path.with_extension("txt.tmp");
+        std::fs::write(&tmp, self.terms.join("\n"))?;
+        if let Err(e) = crate::notes::sync_doc::rename_with_retry(&tmp, &self.path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.into());
+        }
         Ok(())
     }
 }

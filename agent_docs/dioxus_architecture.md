@@ -38,7 +38,7 @@ Rules:
 3. Blocking work — anything touching UIA/Win32 COM, or the Linux zbus D-Bus
    calls in `src/injection/focus.rs` / `gnome.rs` — goes through
    `tokio::task::spawn_blocking`. `injection::inject_text` (called from
-   `orchestrator.rs`) wraps the entire fallback chain in one
+   `orchestrator/mod.rs` via `sink::deliver`) wraps the entire fallback chain in one
    `spawn_blocking(move || inject_text_blocking(...))` call
    (`src/injection/mod.rs`).
 
@@ -49,18 +49,21 @@ Rules:
   native decorations — the splash window owns the launch moment), and calls
   `LaunchBuilder::new().with_cfg(...).launch(app::App)`.
 - `app.rs` — the `App` component itself: owns all top-level `Signal`s
-  (`current_page`, `rec_state`, `history`, `config`, `status_log`,
-  `update_status`, `notes`, `tasks`, `active_mode`), wires the low-level
-  keyboard hook to the orchestrator coroutine, and renders the
-  sidebar/titlebar/page shell. `Page` is a plain enum
-  (`Home`/`History`/`Notes`/`Tasks`/`Vocab`/`Settings`) switched on in the
-  render body.
-- `app_setup.rs` — every startup/window-management concern extracted out of
-  `App()` into standalone functions (`setup_tray_menu`,
-  `setup_window_centering`, `setup_splash`, `setup_recording_pill`,
-  `setup_update_check`, `setup_menu_handlers`, `setup_tray_click_handler`),
-  each called once from `App()`'s render body. See "Hook Order" below for
-  why this split is safe.
+  (`app_ready`, `current_page`, `rec_state`, `last_injection`, `history`,
+  `config`, `status_log`, `update_status`, `notes`, `tasks`, `active_mode`),
+  starts the workers below, and renders the sidebar/titlebar/page shell.
+  `Page` is a plain enum (`Home`/`History`/`Notes`/`Tasks`/`Vocab`/`Settings`)
+  switched on in the render body.
+- `app_setup.rs` — startup wiring pulled out of `App()`: tray icon
+  (`setup_tray_menu`), main-window centring, the notes flush tick,
+  load-error reporting, the update check, and (Windows) the AUMID shortcut.
+- `app_menu.rs` — tray menu-item actions, the Hide/Show-notes label, and
+  left-click-to-toggle (`setup_menu_handlers`, `setup_notes_tray_label`,
+  `setup_tray_click_handler`).
+- `app_pill.rs` — the Windows recording-pill window lifecycle.
+- `app_splash.rs` — the splash window lifecycle (`setup_splash`).
+  Each is a hook called once from `App()`'s render body. See "Hook Order"
+  below for why this split is safe.
 - `linux_integration.rs` (`#![cfg(target_os = "linux")]`) — swaps the tray
   icon between idle/recording glyphs and drives the GNOME Shell pill (see
   `shell_indicator.rs`) instead of a floating window: GNOME doesn't let
@@ -70,19 +73,20 @@ Rules:
 - `pill.rs` — the Windows/macOS recording pill's Dioxus component + CSS/JS
   (`#[cfg(not(target_os = "linux"))]`), a dark-glass capsule with a
   waveform/timer, driven by a `beamerSetState('recording'|'processing'|'idle')`
-  JS call from `app_setup.rs`'s `setup_recording_pill` effect — not by
-  Dioxus state directly, since it lives in a separate `VirtualDom`/window.
+  JS call from `app_pill.rs` — not by Dioxus state directly, since it lives
+  in a separate `VirtualDom`/window.
 
 ## Hook Order Constraint
 
-`app_setup.rs`'s functions are Dioxus hooks (`use_hook`/`use_signal`/
-`use_effect`) extracted **verbatim** out of `App()` into standalone
-functions, each still called exactly once, in the same order, on every
-render of `App()`. Dioxus (like React) requires hooks to run in a fixed
-order across renders — reordering, conditionally skipping, or looping these
-calls in `App()`'s body will corrupt hook state. If you need to add a new
-piece of startup wiring, add a new `setup_*` function and call it from
-`App()` in a fixed position; don't wrap existing calls in conditionals.
+The `app_setup.rs` / `app_menu.rs` / `app_pill.rs` / `app_splash.rs`
+functions are Dioxus hooks (`use_hook`/`use_signal`/`use_effect`) extracted
+**verbatim** out of `App()` into standalone functions, each still called
+exactly once, in the same order, on every render of `App()`. Dioxus (like
+React) requires hooks to run in a fixed order across renders — reordering,
+conditionally skipping, or looping these calls in `App()`'s body will corrupt
+hook state. If you need to add a new piece of startup wiring, add a new
+`setup_*` function and call it from `App()` in a fixed position; don't wrap
+existing calls in conditionals.
 
 ## Data Flow: Props, Not Context
 
@@ -99,7 +103,7 @@ follow the same pattern one level deeper.
 Cross-task communication (hotkey → orchestrator, live mic level →
 shell-indicator pump) uses plain tokio channels (`mpsc`, `watch`), not
 Dioxus signals — see `audio_pipeline.md` for the level-`watch::channel` and
-`orchestrator.rs` for the hotkey `mpsc`.
+`orchestrator/mod.rs` for the hotkey `mpsc`.
 
 ## Memoized Derived Data
 
@@ -112,19 +116,22 @@ recalculated inline:
 
 ## Tray Icon Integration
 
-`tray-icon` (via `dioxus::desktop::trayicon`) is set up once in
-`app_setup::setup_tray_menu` (`use_hook`), before any rendering-dependent
-state exists. Tray menu clicks are wired through
-`use_muda_event_handler` — **not** `use_tray_menu_event_handler` — because
-dioxus-desktop 0.7.3 has a bug where `set_menubar_receiver()` claims the
-muda `OnceCell` before `set_tray_icon_receiver()`, so tray menu clicks
-arrive as `MudaMenuEvent` rather than `TrayMenuEvent` (see the comment in
-`app_setup.rs` above `setup_menu_handlers`). Left-click-to-toggle-window
-uses `use_tray_icon_event_handler` separately (`setup_tray_click_handler`).
+The tray icon is set up once in `app_setup::setup_tray_menu` (`use_hook`),
+before any rendering-dependent state exists. The `Menu`/`Icon` values come
+from the `muda`/`tray-icon` crates directly (`src/tray/mod.rs`); only the
+registration goes through dioxus (`init_tray_icon`). Tray menu clicks are
+wired through `use_muda_event_handler` — **not**
+`use_tray_menu_event_handler` — because dioxus-desktop 0.7.3 has a bug where
+`set_menubar_receiver()` claims the muda `OnceCell` before
+`set_tray_icon_receiver()`, so tray menu clicks arrive as `MudaMenuEvent`
+rather than `TrayMenuEvent` (see the comment in `app_menu.rs` above
+`setup_menu_handlers`). Left-click-to-toggle-window uses
+`use_tray_icon_event_handler` separately (`setup_tray_click_handler`). Both
+handlers live in `app_menu.rs`, not `app_setup.rs`.
 
 ## Splash Window
 
-`app_setup::setup_splash` opens a small centered `VirtualDom`/window on
+`app_splash::setup_splash` opens a small centered `VirtualDom`/window on
 first render, runs `warmup::warm_all` (keyring, audio device, mpris,
 network — paying one-time costs up front so the first recording doesn't
 stall), waits for a 1500ms CSS fill animation to finish, closes the splash
@@ -140,9 +147,10 @@ who had never selected realtime — batch-only since the realtime removal.)
 ## Windows: things Linux never has to think about
 
 Everything below is Windows-only and mostly invisible from either platform's
-code in isolation. `cargo xwin check` proves these paths compile; none of
-their runtime behaviour has been exercised on a real Windows machine, and
-that is called out explicitly wherever it matters.
+code in isolation. `cargo xwin check` proves these paths compile; behaviour
+marked "confirmed on real Windows hardware" below (and in
+`agent_docs/running_on_bearcave.md`'s checklist) has additionally run on
+bearcave, and whatever hasn't is called out explicitly wherever it matters.
 
 ### Every webview open is a nested Win32 message pump
 
@@ -217,29 +225,34 @@ Beamer's name and icon in the action centre, not PowerShell's.
 
 ### The `build.rs` host-vs-target trap
 
-`build.rs` used to guard its icon/manifest/`winresource` block with
-`#[cfg(target_os = "windows")]`. Inside a build script that attribute
-evaluates for the **host** compiling the script, not the target the final
-binary is built for, so cross-compiling from this Linux box silently
-dropped the embedded icon, the `asInvoker` `requestedExecutionLevel`, and
-the PerMonitorV2 manifest, and `winresource` never ran and never
-complained. Nothing about that failure shows up in `cargo xwin check`
-output; the block just quietly does not exist. The fix reads
-`CARGO_CFG_TARGET_OS` from the environment at build-script runtime instead,
-which reflects the actual target, and moves `winresource` off a
-target-gated `build-dependencies` entry so a Linux host can still link it in
-for a Windows target. The general trap, a build script's `#[cfg(...)]`
-answering for the host and not the target, is worth remembering anywhere
-else `build.rs` grows a platform branch.
+`build.rs` used to guard its manifest block with `#[cfg(target_os =
+"windows")]`. Inside a build script that attribute evaluates for the
+**host** compiling the script, not the target the final binary is built for,
+so cross-compiling from this Linux box silently dropped the `asInvoker`
+`requestedExecutionLevel` and the PerMonitorV2 manifest. Nothing about that
+failure shows up in `cargo xwin check` output; the block just quietly does
+not exist. The fix reads `CARGO_CFG_TARGET_OS` from the environment at
+build-script runtime instead, which reflects the actual target. The general
+trap, a build script's `#[cfg(...)]` answering for the host and not the
+target, is worth remembering anywhere else `build.rs` grows a platform branch.
+
+The manifest is embedded via MSVC linker args (`/MANIFEST:EMBED` +
+`/MANIFESTINPUT`), deliberately not via a resource file: `dx` always links
+its own resource carrying VERSIONINFO, and a second resource (which
+`winresource` always emits) fails the link with `CVT1100: duplicate
+resource` / `LNK1123`. The icon and VERSIONINFO come from `dx` via
+`Dioxus.toml`'s `[bundle]` settings, and there is no `[build-dependencies]`
+entry at all.
 
 ### `open_external` no longer goes through a shell
 
 Task 3b closed a command-injection surface in `ui::open_external` on
-Windows (a `cmd /C start` argument split reachable from note content, a
-link chip or an `.ics` export). `src/ui/mod.rs:72-90` documents the fix
+Windows (a `cmd /C start` argument split reachable from note content — then
+a link chip or an `.ics` export; link chips have since been removed, leaving
+the `.ics` export as the only caller). `src/ui/mod.rs` documents the fix
 in full; nothing here restates it. Confirmed on real Windows hardware:
-`ShellExecuteW` opens a link chip whose URL contains `&` correctly, with
-no console window flash.
+`ShellExecuteW` opens a URL containing `&` correctly, with no console
+window flash.
 
 ### Auto-repeat: why `ll_hook.rs` and `linux_hotkey.rs` guard differently
 
@@ -306,16 +319,11 @@ be broken.
   Beamer's tray setup handles this is unconfirmed; the test is
   `taskkill /f /im explorer.exe` (it restarts itself) followed by checking
   whether the tray icon survives.
-- **The main window's fonts may not resolve at all.** `assets/styles.css`
-  loads its `@font-face` sources with a relative `url("fonts/…")`, and
-  Dioxus's `asset!()` machinery does not track plain CSS `url()` references,
-  only assets it is explicitly told about. This currently works on Linux
-  only because the resolver falls back to treating the unrecognised URI as
-  an absolute filesystem path, which happens to land somewhere valid there.
-  Nothing says that fallback behaves the same way on Windows. Secondary
-  windows (stickies, pill, splash) are immune regardless. They get their
-  fonts from `ui::fonts::embedded_font_css()`'s `data:` URIs, which cannot
-  fail to resolve on any platform.
+- **The Windows pill's fonts ride `assets::dm_mono_face_css()`.** Same
+  `data:`-URI mechanism as the main window's faces (see "Cleared"), injected
+  into the pill's `custom_head` from `app_pill.rs`. The splash window still
+  carries no embedded faces and falls back to system fonts for its 1.5s on
+  screen — accepted, not overlooked.
 
 ## Cleared, so nobody re-investigates
 
@@ -327,11 +335,18 @@ be broken.
 - **`ui::fonts::embedded_font_css()` is fine as-is.** It emits `data:` URIs
   with the font bytes inlined, which is exactly the kind of reference that
   cannot fail to resolve regardless of platform or windowing quirks.
+- **The main window's fonts resolve on every platform.** `ui::launch_app`
+  builds the main window with `with_custom_head` carrying
+  `ui::fonts::embedded_font_css()` ahead of the inline stylesheet — the same
+  mechanism the sticky windows use — so there is no CSS-`url()` resolution
+  left to behave differently on Windows. (This used to be the other way
+  round: a `<link>`ed stylesheet whose relative `url("fonts/…")` only
+  resolved on Linux by a fallback accident.)
 - **The Windows recording pill receives live level data.** `PILL_JS` waveform
   bars animate from both CSS `@keyframes` and per-frame `beamerSetLevel(level)`
-  calls driven from `app_setup.rs` (~15 Hz while recording), matching the GNOME
+  calls driven from `app_pill.rs` (~15 Hz while recording), matching the GNOME
   extension's pill which is fed real levels through `UpdateLevel(d)`. Both
-  receive the same level source from `audio_pipeline.rs`'s watch channel.
+  receive the same level source from `audio`'s watch channel (`subscribe_levels`).
 - **No `localStorage` or `IndexedDB` use anywhere in the codebase.** The
   whole class of Chromium/WebKit origin-partitioning problems that trips up
   apps relying on per-webview storage does not apply here; there is nothing

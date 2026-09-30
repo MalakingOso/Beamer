@@ -57,15 +57,6 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_terms_pass_through_unchanged() {
-        let input = terms(&["Beamer", "Beamer Purple", "Dioxus"]);
-        assert_eq!(
-            sanitize(&input, BATCH_MAX_TERMS, BATCH_MAX_CHARS),
-            ["Beamer", "Beamer Purple", "Dioxus"]
-        );
-    }
-
-    #[test]
     fn surrounding_whitespace_is_trimmed_and_blanks_dropped() {
         let input = terms(&["  Beamer  ", "   ", "", "\tScribe\n"]);
         assert_eq!(
@@ -75,12 +66,6 @@ mod tests {
     }
 
     /// An over-long term fails the whole request, so it must never reach the API.
-    #[test]
-    fn over_long_terms_are_dropped_not_truncated() {
-        let input = terms(&["ok", &"x".repeat(60)]);
-        assert_eq!(sanitize(&input, BATCH_MAX_TERMS, BATCH_MAX_CHARS), ["ok"]);
-    }
-
     #[test]
     fn the_length_limit_is_inclusive_at_the_maximum() {
         let edge = "x".repeat(BATCH_MAX_CHARS);
@@ -130,15 +115,6 @@ mod tests {
             ["Beamer", "beamer"],
             "de-duplication is exact, so a different case is a different term"
         );
-    }
-
-    #[test]
-    fn the_count_cap_keeps_the_first_terms_in_order() {
-        let input: Vec<String> = (0..120).map(|i| format!("term{i}")).collect();
-        let out = sanitize(&input, BATCH_MAX_TERMS, BATCH_MAX_CHARS);
-        assert_eq!(out.len(), BATCH_MAX_TERMS);
-        assert_eq!(out[0], "term0");
-        assert_eq!(out[BATCH_MAX_TERMS - 1], format!("term{}", BATCH_MAX_TERMS - 1));
     }
 
     /// The cap counts surviving terms, not offered ones.

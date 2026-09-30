@@ -1,4 +1,4 @@
-#![cfg(not(target_os = "windows"))]
+#![cfg(target_os = "linux")]
 
 //! Typing via `wtype` (`zwp_virtual_keyboard_v1`), second in the Linux chain.
 //! Works on wlroots-family compositors plus COSMIC with zero setup. GNOME/KDE

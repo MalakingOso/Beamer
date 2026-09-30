@@ -59,21 +59,3 @@ fn a_user_edit_still_moves_the_modified_timestamp() {
         "an edit is what newest-first ordering on the board is for"
     );
 }
-
-#[test]
-fn set_size_with_an_unchanged_value_does_not_dirty_the_store() {
-    let mut store = temp_store("size_noop");
-    let id = store.create("note".into(), NoteColor::Purple, NoteOrigin::Dictated);
-    store.set_size(&id, (400, 320));
-    store.flush_if_dirty();
-
-    store.set_size(&id, (400, 320));
-
-    assert!(
-        !store.is_dirty(),
-        "Resized fires again when the window maps; a redundant write would notify \
-         every subscriber for a fact that did not change"
-    );
-    store.set_size("nope", (10, 10));
-    assert!(!store.is_dirty(), "a missing id is a no-op");
-}

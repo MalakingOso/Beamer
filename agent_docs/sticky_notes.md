@@ -282,8 +282,8 @@ open && !archived && not registered  ->  open a window
 (archived || !open) && registered    ->  close it
 ```
 
-One mechanism covers both a note dictated just now and a note loaded from
-`notes.json` at startup.
+One mechanism covers both a note dictated just now and a note hydrated from
+the automerge document at startup.
 
 > **Invariant:** the effect **reads** `notes`, **peeks** the registry, and
 > **writes only the registry**. Every write to `notes` happens outside it.
@@ -303,18 +303,18 @@ that unambiguously means "bring it back".
 
 `use_wry_event_handler` handlers are **per-window**. `create_wry_event_handler`
 keys the handler to the window that registers it
-(`desktop_context.rs:233` — `self.shared.event_handlers.add(self.window.id(), ...)`),
+(`desktop_context.rs` — `self.shared.event_handlers.add(self.window.id(), ...)`),
 and `apply_event` skips any `Event::WindowEvent` whose `window_id` differs
 (`event_handlers.rs`, the `continue`).
 
 A close handler registered in `App()` would therefore only ever see the **main
 window's** events. It would compile, run, and never fire — a silent no-op that
 reads as entirely correct. Registered inside `StickyNote`, `window()` resolves
-to that sticky's own `DesktopContext` (each webview gets one via
-`webview.rs:519`), so it sees its own close and nothing else. No `WindowId` map
-is needed.
+to that sticky's own `DesktopContext` (each webview gets its own), so it
+sees its own close and nothing else. No `WindowId` map is needed.
 
-Two supporting facts, both verified in dioxus-desktop 0.7.9's source:
+Two supporting facts, both verified in dioxus-desktop 0.7's source (re-checked
+against 0.7.10):
 
 - `App::tick()` runs `apply_event` **before** the match that dispatches
   `WindowEvent::CloseRequested`, so the handler fires while the webview still
@@ -346,19 +346,22 @@ Each sticky window is its own `VirtualDom` with its own scope tree.
 
 ## Persistence
 
-`notes.json` beside `config.toml`. Written atomically (temp file + rename); a
-corrupt file is preserved as `.json.corrupt` rather than overwritten.
+The corpus is the automerge document at `sync/notes.automerge`
+(`notes::sync_doc`, shared with `TaskStore`); `notes.json` beside
+`config.toml` is a derived mirror, written on flush and read only by the
+one-time legacy seed (`notes::legacy`). A document on disk is never re-seeded
+from the mirror — see `NoteStore::load_from`. The merge, the genesis change
+and the vocabulary scalar live in `agent_docs/sync.md`; this section is the
+write-path summary.
 
-Migration is free and stays free: `Note` has no `deny_unknown_fields` and every
-field added since v1 is `#[serde(default)]`. A `notes.json` written while
-attachments existed loads with its text intact and the stale `attachments` key
-ignored (and dropped on the next flush).
-
-Three write paths, because one is not enough:
+All writes go through `flush::flush_stores`: reconcile notes and tasks into
+the document, merge the file if another process moved it, sync the
+vocabulary, save the document, then the mirrors. Three triggers, because one
+is not enough:
 
 1. **Immediate flush on capture** (`orchestrator::sink::do_note_capture`) — a
    just-captured transcript must never be lost to a crash.
-2. **500 ms debounce tick** (`app_setup::setup_notes_flush`) — body edits are
+2. **500 ms tick** (`app_setup::setup_notes_flush`) — body edits are
    per-keystroke. It gates on `is_dirty()` via `peek()` before taking `write()`;
    an unconditional write per tick would notify every open sticky window twice a
    second.
@@ -367,6 +370,16 @@ Three write paths, because one is not enough:
 
 Discrete gestures (new note, archive, delete) also flush **inline**, on the
 same argument as capture: a crash before the tick must not resurrect them.
+
+Every file write here is atomic (temp file + rename, so a crash mid-write
+leaves the previous file intact). Corrupt input is preserved, not
+overwritten: the legacy seed moves an unparseable `notes.json` to
+`.json.corrupt` rather than starting empty on top of it.
+
+Migration is free and stays free: `Note` has no `deny_unknown_fields` and every
+field added since v1 is `#[serde(default)]`. A `notes.json` written while
+attachments or cleanup existed loads with its text intact and the stale
+`attachments` / `clean_state` keys ignored (and dropped on the next flush).
 
 ### Machine-local state: pos, size, open (Task 7)
 
@@ -398,14 +411,15 @@ onto the wrong note. `notes::next_note_id` mints note ids as
 ids the same way. Existing ids keep working, they are opaque strings and
 nothing parses them, on either side.
 
-Migration is one-way and, once it has run, self-erasing. `NoteStore::load`
-re-parses `notes.json` a second time into a throwaway shape that still
-declares `pos`/`size`/`open`, lifts any it finds into `machine.json` (an id
+Migration is one-way and, once it has run, self-erasing. The legacy seed
+(`notes::legacy`, which runs only when no document exists yet) parses
+`notes.json` a second time into a throwaway shape that still declares
+`pos`/`size`/`open`, lifts any it finds into `machine.json` (an id
 `machine.json` already has an entry for is left alone, so a second migration
 pass can't clobber real window state with a stale file's numbers), and GCs
-`machine.json` down to the ids `notes.json` actually has. `Note`'s own
+`machine.json` down to the ids the corpus actually has. `Note`'s own
 deserialize just ignores the stale keys (no `deny_unknown_fields`, and that
-has to stay true), so after the first save `notes.json` stops carrying them at
+has to stay true), so after the first save the mirror stops carrying them at
 all and the second parse finds nothing to lift.
 
 Nothing in `ui::sticky_windows` reads `note.pos` even on Windows: it never did.
@@ -436,12 +450,14 @@ rows whose note is gone on the next pass (never over a failed load, where
 ## Local AI
 
 `src/llm/` is a client of a **standalone** `llama-server`. Beamer never spawns
-it. See `agent_docs/config_schema.md` and `deploy/`.
+it — except `src/components/`, which installs and starts the Windows ARM64
+server on launch (see `agent_docs/local_inference.md`). See
+`agent_docs/config_schema.md` and `deploy/` for the connection side.
 
 ⚠️ **Never poll `GET /v1/models` on a timer.** A status read resets the server's
-per-model idle clock, so a background health check pins the ~3 GB extraction
-model in VRAM permanently — no error, no symptom. On button press and once when
-the settings page opens, nowhere else.
+per-model idle clock, so a background health check pins the extraction model
+(~1 GB on bearcave, ~5 GB on callisto) in memory permanently — no error, no
+symptom. On button press and once when the settings page opens, nowhere else.
 
 ## Manual QA checklist
 
@@ -462,9 +478,9 @@ silently diverted.
    card reopens it; archive hides it; "Show archived" restores.
 6. Restart with several notes open → they reappear, freshly scattered.
    Positions deliberately do **not** match the previous session.
-7. Local AI card with the server up → lists both models and their states.
-   Then `pkill -x llama-server` (**never** `pkill -f`, which matches the shell
-   running it) → card reports not running, notes still captured.
+7. Local AI card with the server up → lists the extraction model and its
+   state. Then `pkill -x llama-server` (**never** `pkill -f`, which matches
+   the shell running it) → card reports not running, notes still captured.
 
 ## Gotchas
 
@@ -491,11 +507,12 @@ silently diverted.
 - **The note chord must not be a prefix of the dictation chord.**
   `matching_binding` compares the modifier set held *at the instant the trigger
   goes down*, so with dictation on `Ctrl+Super` (trigger `VK_LWIN`), a note
-  chord of `Ctrl+Super+Space` fires dictation at Super-down — before Space is
-  ever pressed. Compounding that, `HotkeyConfig` has no Meta modifier field at
-  all, so `Ctrl+Super+Space` parses to plain `Ctrl+Space` anyway (see todo.md).
-  `Ctrl+Alt+Space` is the default precisely because it shares no trigger with
-  `Ctrl+Super`. Pinned by `recording_card::tests`.
+  chord of `Ctrl+Super+Space` would fire dictation at Super-down — before Space
+  is ever pressed. Compounding that, `HotkeyConfig` has no Meta modifier field
+  at all, so a `Super+<key>` chord fails to parse and the binding is left
+  unbound (it used to silently drop the Super and fire on the bare key, which
+  was worse). `Ctrl+Alt+Space` is the default precisely because it shares no
+  trigger with `Ctrl+Super`. Pinned by `recording_card::tests`.
 - **One string format, two parsers.** `settings/hotkey_picker.rs` renders and
   reassembles chords; `HotkeyConfig::parse` registers them. Nothing in the type
   system keeps them in step, so
@@ -525,14 +542,19 @@ silently diverted.
 - **Hard-offset shadows need padding to render into.** `.sticky` fills the
   window, so `box-shadow` was clipped by the window edge and simply never
   appeared. `#main` carries `padding:0 5px 5px 0` as shadow room.
-- **Secondary windows do not get the app's fonts for free.** The main window
-  `<link>`s `assets/styles.css` and its `@font-face` rules resolve; stickies,
-  pill and splash inject CSS with `with_custom_head`, which carries none. Every
-  `font-family:"DM Mono"` in those windows fell back to a system font for
-  months and looked like a deliberate style. `ui::fonts::embedded_font_css()`
-  fixes it with `data:` URIs — chosen over an `asset!()` URL because a URI
-  cannot fail to resolve and *can* be unit-tested, where a silent font fallback
-  in a webview cannot. **The pill and splash windows still have this bug.**
+- **No window gets the app's fonts for free.** Every window builds its head
+  with `with_custom_head`, which carries no `@font-face` rules on its own —
+  the main window prepends `ui::fonts::embedded_font_css()` ahead of the
+  inline stylesheet (`ui::launch_app`), stickies do the same from
+  `sticky_windows.rs`, and the Windows pill uses `assets::dm_mono_face_css()`
+  from `app_pill.rs`. Every `font-family:"DM Mono"` without those prepended
+  faces silently falls back to a system font — which is exactly what happened
+  for months, and looked like a deliberate style. `data:` URIs were chosen
+  over an `asset!()` URL because a URI cannot fail to resolve and *can* be
+  unit-tested, where a silent font fallback in a webview cannot. The one
+  remaining gap is the splash window, which still carries no embedded faces
+  and falls back to system fonts for its 1.5s on screen — accepted, not
+  overlooked.
 - Notes are **not** always-on-top, deliberately. They sit in the normal
   stacking order.
 - `with_exits_when_last_window_closes(false)` on sticky windows is

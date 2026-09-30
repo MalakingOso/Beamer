@@ -90,13 +90,13 @@ async fn run_client(
                         status.set(SyncStatus::Disconnected { detail: "the connection closed".to_string() });
                     }
                     Err(e) => {
-                        tracing::debug!("sync connection to {url} dropped: {e}");
+                        tracing::warn!("sync connection to {url} dropped: {e}");
                         status.set(SyncStatus::Disconnected { detail: e.to_string() });
                     }
                 }
             }
             Err(e) => {
-                tracing::debug!("could not connect to {url}: {e}");
+                tracing::info!("could not connect to {url}: {e}");
                 status.set(SyncStatus::Disconnected { detail: e.to_string() });
             }
         }

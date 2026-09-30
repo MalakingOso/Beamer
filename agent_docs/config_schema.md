@@ -40,7 +40,10 @@ no_verbatim = false          # ElevenLabs only: ask the model to drop "um",
 # (legacy ["ydotool", "clipboard"] chains auto-migrate to the Linux default;
 #  removed backends dotool/enigo/atspi are stripped on load)
 backends = ["gnome", "wtype", "ydotool", "clipboard"]
-debug_logging = false        # Log injection method + target app
+debug_logging = false        # beamer=debug instead of beamer=info, in stdout
+                             # and beamer.log (beside this file; the previous
+                             # run's is beamer.log.1). Applies live; RUST_LOG
+                             # overrides it.
 paste_shortcut = "auto"      # Linux clipboard backend: auto | ctrl_v | ctrl_shift_v
                              # ("auto" asks the GNOME helper which app is focused;
                              #  BEAMER_PASTE_SHORTCUT env var overrides)
@@ -144,13 +147,18 @@ well-classified failure ("Server not running") instead of a multi-second stall
 on every dictated note, while `request_timeout_ms` stays generous for the
 actual model work once a connection exists.
 
-Model files are **not** downloaded by Beamer. They are fetched manually into
-`~/models/beamer/` and served from there.
+Model files on x64 and Linux are fetched manually into `~/models/beamer/`
+and served from there — Beamer downloads nothing itself there. The exception
+is Windows ARM64, where `src/components/` downloads the runtime and the model
+on launch (the model prompts in Settings → Updates unless it's a fresh
+install, which auto-accepts). See `agent_docs/local_inference.md` and
+`agent_docs/running_on_bearcave.md`.
 
 ⚠️ Never poll `GET /v1/models` on a timer. A status read resets the server's
-per-model idle clock, so a background health check pins the ~3 GB extraction
-model in VRAM permanently, with no error and no symptom. Beamer probes on
-button press and once when the settings page opens, nowhere else.
+per-model idle clock, so a background health check pins the extraction model
+(~1 GB on bearcave, ~5 GB on callisto) in memory permanently, with no error
+and no symptom. Beamer probes on button press and once when the settings page
+opens, nowhere else.
 
 ## API Keys
 

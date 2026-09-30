@@ -102,17 +102,8 @@ static KEY_OPTIONS: &[(&str, &str)] = &[
     ("Down", "Down"),
     ("Left", "Left"),
     ("Right", "Right"),
-    ("-", "Minus (-)"),
-    ("=", "Equal (=)"),
-    ("[", "Left Bracket ([)"),
-    ("]", "Right Bracket (])"),
-    ("\\", "Backslash (\\)"),
-    (";", "Semicolon (;)"),
-    ("'", "Quote (')"),
-    (",", "Comma (,)"),
-    (".", "Period (.)"),
-    ("/", "Slash (/)"),
-    ("`", "Backtick (`)"),
+    // No punctuation: `key_name_to_vk` can't register it, so a picked "-"
+    // would silently leave the hotkey unbound.
 ];
 
 #[derive(Props, Clone, PartialEq)]
@@ -232,17 +223,13 @@ mod tests {
     use super::*;
     use crate::hotkey::{HotkeyConfig, VK_LWIN};
 
+    /// A key the engine can't register would leave the hotkey silently unbound.
     #[test]
-    fn win_only_chord_keeps_super_as_the_trigger() {
-        let (ctrl, alt, shift, win, key) = parse_hotkey_parts("Ctrl+Super");
-        assert!(ctrl && win && !alt && !shift);
-        assert_eq!(key, "", "Super is the trigger; no separate key");
-    }
-
-    #[test]
-    fn a_keyed_chord_round_trips_through_the_picker() {
-        let (ctrl, alt, shift, win, key) = parse_hotkey_parts("Ctrl+Alt+Space");
-        assert_eq!(format_hotkey(ctrl, alt, shift, win, &key), "Ctrl+Alt+Space");
+    fn every_key_the_picker_offers_registers() {
+        for (key, _) in KEY_OPTIONS {
+            let chord = format_hotkey(true, false, false, false, key);
+            assert!(HotkeyConfig::parse(&chord, false).is_some(), "{chord} does not register");
+        }
     }
 
     /// The picker and `HotkeyConfig::parse` read the same format independently;

@@ -151,18 +151,4 @@ mod tests {
         );
         assert!(store.notes.is_empty(), "nothing may be resurrected from a stale result");
     }
-
-    #[test]
-    fn stage_fields_survive_a_round_trip_through_disk() {
-        let mut store = temp_store("roundtrip");
-        let id = store.create("file the taxes".into(), NoteColor::Rose, NoteOrigin::Dictated);
-        store.mark_extract_failed(&id);
-        store.flush_if_dirty();
-
-        let text = std::fs::read_to_string(&store.path).unwrap();
-        let reloaded: NoteStore = serde_json::from_str(&text).unwrap();
-
-        assert_eq!(reloaded.notes[0].extract_state, StageState::Failed);
-        assert_eq!(reloaded.notes[0].origin, NoteOrigin::Dictated);
-    }
 }

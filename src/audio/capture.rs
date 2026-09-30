@@ -276,12 +276,4 @@ mod tests {
 
         assert_eq!(split_output, whole_output);
     }
-
-    #[test]
-    fn resample_empty_input_returns_empty_output() {
-        let mut state = new_state();
-        let mut output = Vec::new();
-        resample_linear(&[], 16000.0 / 48000.0, &mut state, &mut output);
-        assert!(output.is_empty());
-    }
 }

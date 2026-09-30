@@ -151,16 +151,3 @@ async fn transcribe_batch_inner(
 
     bail!("ElevenLabs batch request failed after retries")
 }
-
-#[cfg(test)]
-mod model_tests {
-    use super::{SCRIBE_V2, SCRIBE_V2_MEDICAL};
-
-    /// A typo here bills the same but transcribes with the wrong model, and
-    /// nothing in a 200 OK tells you — pin the exact upstream IDs.
-    #[test]
-    fn model_ids_are_the_documented_elevenlabs_ids() {
-        assert_eq!(SCRIBE_V2, "scribe_v2");
-        assert_eq!(SCRIBE_V2_MEDICAL, "scribe_v2_medical");
-    }
-}

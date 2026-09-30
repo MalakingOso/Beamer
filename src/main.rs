@@ -27,9 +27,10 @@ mod components;
 mod config;
 mod hotkey;
 mod injection;
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 mod install;
 mod llm;
+mod logging;
 mod media;
 mod notes;
 mod orchestrator;
@@ -51,7 +52,7 @@ pub(crate) const WINDOWS_APP_USER_MODEL_ID: &str = "com.beamer.app";
 /// Linux desktop identity: the Wayland `app_id`, the `.desktop` basename, its
 /// `StartupWMClass`, and the icon name. All must match, or GNOME silently shows
 /// a generic icon. Windows counterpart: [`WINDOWS_APP_USER_MODEL_ID`].
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 pub(crate) const APP_ID: &str = "beamer";
 
 /// The exe path at launch, cached before an update can replace the binary.
@@ -61,29 +62,28 @@ pub(crate) const APP_ID: &str = "beamer";
 static LAUNCH_EXE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("beamer=info")),
-        )
-        .init();
-
-    tracing::info!("Beamer starting...");
-
     // Before anything (in particular, any update) can touch the binary on disk.
     let _ = LAUNCH_EXE.set(std::env::current_exe().expect("Failed to get current exe path"));
+
+    // Before logging: starting the log rotates `beamer.log`, which would pull
+    // the running instance's log out from under it.
+    if !ensure_single_instance() {
+        eprintln!("Another instance of Beamer is already running");
+        return;
+    }
+    logging::init();
+    tracing::info!("Beamer {} starting...", env!("CARGO_PKG_VERSION"));
 
     // Before any window/toast exists so all are attributed to Beamer.
     #[cfg(target_os = "windows")]
     set_windows_app_user_model_id();
 
-    if !ensure_single_instance() {
-        tracing::warn!("Another instance of Beamer is already running");
-        return;
-    }
-
-    let config = config::Config::load().unwrap_or_default();
+    let config = config::Config::load().unwrap_or_else(|e| {
+        tracing::error!("Could not load {:?}, using defaults: {e:#}", config::Config::config_path());
+        config::Config::default()
+    });
     tracing::info!("Config loaded from {:?}", config::Config::config_path());
+    logging::set_debug(config.injection.debug_logging);
 
     // Must precede any `llm::client::http_client()` use, settings probe included.
     llm::client::init_http_client(config.llm.connect_timeout());
@@ -131,7 +131,7 @@ fn ensure_single_instance() -> bool {
     {
         ensure_single_instance_windows()
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
     {
         ensure_single_instance_lockfile()
     }
@@ -150,7 +150,7 @@ pub fn release_single_instance() {
     {
         release_single_instance_windows();
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
     {
         release_single_instance_lockfile();
     }
@@ -207,11 +207,11 @@ fn release_single_instance_windows() {
 }
 
 /// Lockfile this process owns, if the guard is held.
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 static INSTANCE_LOCKFILE: std::sync::Mutex<Option<std::path::PathBuf>> =
     std::sync::Mutex::new(None);
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 fn ensure_single_instance_lockfile() -> bool {
     let lock_path = std::env::temp_dir().join("beamer.lock");
 
@@ -224,7 +224,7 @@ fn ensure_single_instance_lockfile() -> bool {
         }
     }
 
-    // Best-effort: never fail startup over the lockfile.
+    // Best-effort — a stale or unwritable lockfile should not block startup.
     if std::fs::write(&lock_path, format!("{}", std::process::id())).is_ok() {
         *INSTANCE_LOCKFILE
             .lock()
@@ -233,7 +233,7 @@ fn ensure_single_instance_lockfile() -> bool {
     true
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 fn release_single_instance_lockfile() {
     let taken = INSTANCE_LOCKFILE
         .lock()
@@ -261,7 +261,7 @@ pub fn set_auto_start(enable: bool) -> Result<()> {
     {
         set_auto_start_windows(enable)
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
     {
         set_auto_start_xdg(enable)
     }
@@ -311,13 +311,13 @@ fn set_auto_start_windows(enable: bool) -> Result<()> {
 /// True when running from a cargo/`dx` `target/` dir rather than an install.
 /// Such paths make bad `.desktop` `Exec=` targets: `dx` renames dev binaries
 /// every build and `cargo clean` deletes them.
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 fn is_dev_build_exe(exe: &std::path::Path) -> bool {
     exe.components().any(|c| c.as_os_str() == "target")
 }
 
 /// The installed `beamer` on `PATH`, if there is one.
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 fn packaged_beamer_on_path() -> Option<std::path::PathBuf> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -332,7 +332,7 @@ fn packaged_beamer_on_path() -> Option<std::path::PathBuf> {
 
 /// What an autostart entry should launch. A dev build points at the installed
 /// binary if there is one, else at itself (working today beats nothing).
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 fn autostart_exec_path() -> Result<std::path::PathBuf> {
     let exe = std::env::current_exe()?;
     if !is_dev_build_exe(&exe) {
@@ -355,7 +355,7 @@ fn autostart_exec_path() -> Result<std::path::PathBuf> {
 }
 
 /// XDG autostart entry (`~/.config/autostart/beamer.desktop`).
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 fn set_auto_start_xdg(enable: bool) -> Result<()> {
     let autostart_dir = dirs::config_dir()
         .ok_or_else(|| anyhow::anyhow!("Could not determine config directory"))?

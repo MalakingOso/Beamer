@@ -9,7 +9,7 @@ use arboard::Clipboard;
 
 pub struct ClipboardBackend {
     /// The loaded `injection.paste_shortcut`. Unused on Windows (always Ctrl+V).
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
     pub paste_shortcut: String,
 }
 
@@ -29,12 +29,12 @@ impl InjectionBackend for ClipboardBackend {
     fn inject(&self, text: &str) -> Result<InjectionResult> {
         #[cfg(target_os = "windows")]
         let auto_pasted = inject_via_clipboard(text)?;
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "linux")]
         let auto_pasted = inject_via_clipboard(text, &self.paste_shortcut)?;
 
         #[cfg(target_os = "windows")]
         let target_info = "via Ctrl+V paste".to_string();
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "linux")]
         let target_info = match auto_pasted {
             Some(mechanism) => format!("pasted via {} chord", mechanism),
             None => "set on clipboard — paste manually".to_string(),
@@ -121,7 +121,7 @@ fn inject_via_clipboard(text: &str) -> Result<bool> {
 /// Paste via the first working chord (GNOME helper → ydotool → wtype).
 /// `None` means manual paste: text stays on the clipboard and a
 /// notification says so (previous clipboard deliberately not restored).
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 fn inject_via_clipboard(text: &str, paste_shortcut: &str) -> Result<Option<&'static str>> {
     let mut clipboard = Clipboard::new()?;
     let saved = save_clipboard(&mut clipboard);
@@ -148,23 +148,20 @@ fn inject_via_clipboard(text: &str, paste_shortcut: &str) -> Result<Option<&'sta
 }
 
 /// Tell the user the transcript is waiting on the clipboard for manual paste.
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 fn notify_manual_paste() {
-    #[cfg(target_os = "linux")]
+    if let Err(e) = notify_rust::Notification::new()
+        .appname("Beamer")
+        .summary("Beamer")
+        .body("Copied to clipboard — press Ctrl+V to paste (Ctrl+Shift+V in terminals)")
+        .show()
     {
-        if let Err(e) = notify_rust::Notification::new()
-            .appname("Beamer")
-            .summary("Beamer")
-            .body("Copied to clipboard — press Ctrl+V to paste (Ctrl+Shift+V in terminals)")
-            .show()
-        {
-            tracing::warn!("Manual-paste notification failed: {}", e);
-        }
+        tracing::warn!("Manual-paste notification failed: {}", e);
     }
 }
 
 /// Set clipboard on Linux, with wl-copy fallback and verification.
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 fn set_clipboard_linux(text: &str, clipboard: &mut Clipboard) -> Result<()> {
     let is_wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
 
@@ -196,7 +193,7 @@ fn set_clipboard_linux(text: &str, clipboard: &mut Clipboard) -> Result<()> {
 
 /// Run a command with a hard timeout: wl-paste can hang forever on some GNOME
 /// compositor states, and wtype/ydotool share the wedged-helper hazard.
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 pub(crate) fn run_with_timeout(
     cmd: &mut std::process::Command,
     timeout: std::time::Duration,
@@ -232,7 +229,7 @@ pub(crate) fn run_with_timeout(
 }
 
 /// Verify the clipboard actually contains the expected text using wl-paste.
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 fn verify_clipboard_contains(expected: &str) -> bool {
     let result = run_with_timeout(
         std::process::Command::new("wl-paste").arg("--no-newline"),
@@ -269,7 +266,7 @@ fn verify_clipboard_contains(expected: &str) -> bool {
 
 /// Reap a forking `wl-copy` child (never waiting leaks a zombie). Polls for
 /// 500 ms instead of `wait()` so a foregrounded wl-copy can't block injection.
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 pub(crate) fn reap_daemonized(mut child: std::process::Child, what: &str) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
     loop {
@@ -289,7 +286,7 @@ pub(crate) fn reap_daemonized(mut child: std::process::Child, what: &str) {
 }
 
 /// Set clipboard via wl-copy subprocess.
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 fn set_clipboard_wl_copy(text: &str) -> Result<()> {
     let mut child = std::process::Command::new("wl-copy")
         .arg("--type")
@@ -358,7 +355,7 @@ fn make_key_input(
 
 /// Paste chord via the first working mechanism: GNOME helper → ydotool → wtype.
 /// Chord variant comes from `resolve_use_shift_v`. Returns the winner, or `None`.
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 fn try_paste_chord(paste_shortcut: &str) -> Option<&'static str> {
     let use_shift = resolve_use_shift_v(paste_shortcut);
     if crate::injection::gnome::send_paste_chord(use_shift) {
@@ -376,7 +373,7 @@ fn try_paste_chord(paste_shortcut: &str) -> Option<&'static str> {
 }
 
 /// Paste chord via ydotool. Keycodes: 29 = Ctrl, 42 = Shift, 47 = V (`:1` down, `:0` up).
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 fn try_ydotool_paste(use_shift: bool) -> bool {
     let (combo, args): (&str, Vec<&str>) = if use_shift {
         (
@@ -420,7 +417,7 @@ fn try_ydotool_paste(use_shift: bool) -> bool {
     }
 }
 
-#[cfg(all(test, not(target_os = "windows")))]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 
@@ -458,7 +455,7 @@ mod tests {
 }
 
 /// Pure Ctrl+Shift+V decision from setting + focused app id. True = Shift+V.
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 fn choose_use_shift_v(setting: &str, focused: Option<&str>) -> bool {
     match setting.to_ascii_lowercase().as_str() {
         "ctrl_v" | "ctrl+v" => false,
@@ -473,7 +470,7 @@ fn choose_use_shift_v(setting: &str, focused: Option<&str>) -> bool {
 
 /// Chord choice: `BEAMER_PASTE_SHORTCUT` env > `configured` (the config as of
 /// recording start). "auto" asks the focus helper, defaulting to Ctrl+Shift+V.
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 fn resolve_use_shift_v(configured: &str) -> bool {
     let setting = std::env::var("BEAMER_PASTE_SHORTCUT")
         .ok()

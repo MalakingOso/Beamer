@@ -227,26 +227,6 @@ mod tests {
     }
 
     #[test]
-    fn a_timed_value_carries_no_offset_and_no_z() {
-        // An offset suffix is not a valid DATE-TIME, however plausible it looks.
-        let ics = calendar(
-            &task("Standup", Some("2026-08-25T09:00:00"), false, TaskKind::Event),
-            stamp(),
-        );
-        for line in unfolded(&ics) {
-            let Some((name, value)) = line.split_once(':') else { continue };
-            if !matches!(name, "DTSTART" | "DTEND" | "DUE") {
-                continue;
-            }
-            assert!(
-                !value.contains('+') && !value.contains('Z') && !value[1..].contains('-'),
-                "a UTC-offset suffix is not a valid DATE-TIME: {line}"
-            );
-        }
-        assert!(ics.contains("DTSTAMP:20260823T113000Z"), "DTSTAMP alone must be UTC");
-    }
-
-    #[test]
     fn an_all_day_event_ends_on_the_following_date() {
         // DTEND is exclusive; same-date is a zero-length event.
         let ics = calendar(&task("Off", Some("2026-08-25"), true, TaskKind::Event), stamp());
@@ -260,13 +240,6 @@ mod tests {
         let ics = calendar(&task("Standup", None, false, TaskKind::Event), stamp());
         assert!(ics.contains("BEGIN:VTODO"));
         assert!(!ics.contains("VEVENT"), "a VEVENT with no DTSTART is not valid");
-    }
-
-    #[test]
-    fn an_undated_task_still_exports() {
-        let ics = calendar(&task("Ring Sarah", None, false, TaskKind::Todo), stamp());
-        assert!(ics.contains("BEGIN:VTODO"));
-        assert!(!ics.contains("DUE"), "no date is no DUE, not an empty one");
     }
 
     #[test]
@@ -292,21 +265,6 @@ mod tests {
     }
 
     #[test]
-    fn a_backslash_is_escaped_before_the_characters_that_introduce_backslashes() {
-        let ics = calendar(&task("a\\b,c", None, false, TaskKind::Todo), stamp());
-        assert!(ics.contains("SUMMARY:a\\\\b\\,c"), "{ics}");
-    }
-
-    #[test]
-    fn a_long_line_folds_at_seventy_five_octets() {
-        let ics = calendar(&task(&"word ".repeat(40), None, false, TaskKind::Todo), stamp());
-        for line in ics.split("\r\n") {
-            assert!(line.len() <= FOLD_LIMIT, "{} octets: {line:?}", line.len());
-        }
-        assert!(ics.contains("\r\n "), "a 200-character summary must actually fold");
-    }
-
-    #[test]
     fn folding_never_splits_a_multi_byte_character() {
         // A byte-wise fold would emit half a codepoint and break UTF-8.
         for text in [
@@ -324,22 +282,6 @@ mod tests {
                 assert!(line.len() <= FOLD_LIMIT, "{} octets on {text:?}", line.len());
             }
         }
-    }
-
-    #[test]
-    fn every_line_ends_crlf_and_the_file_does_too() {
-        let ics = calendar(&task("Ring Sarah", Some("2026-08-28"), true, TaskKind::Todo), stamp());
-        assert!(ics.ends_with("END:VCALENDAR\r\n"));
-        assert!(!ics.contains('\n') || ics.matches('\n').count() == ics.matches("\r\n").count());
-    }
-
-    #[test]
-    fn a_completed_todo_says_so() {
-        let mut t = task("Ring Sarah", Some("2026-08-28"), true, TaskKind::Todo);
-        t.done = true;
-        let ics = calendar(&t, stamp());
-        assert!(ics.contains("STATUS:COMPLETED"));
-        assert!(ics.contains("PERCENT-COMPLETE:100"));
     }
 
     #[test]

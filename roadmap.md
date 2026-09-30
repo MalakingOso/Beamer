@@ -2,8 +2,23 @@
 
 ## Known issues
 
-- `failure_message` in `src/llm/client.rs` reports an unreachable host as reachable-but-silent: it checks `timed_out` before `connect_failed`, but reqwest sets `is_timeout()` for a connect timeout too. Swap the branches and update the `failures_are_described_in_the_users_terms` test with it.
+- An existing `config.toml` that can't be *read* (permissions, a lock) loads
+  as defaults in memory, and the next Settings edit saves those defaults over
+  the real file. Corrupt TOML is already set aside safely; this is only the
+  I/O-error path (`Config::load().unwrap_or…` in `main.rs` and `ui/app.rs`).
+
+## Verify on Linux
+
+The 2026-09-30 stability pass was built and tested on Windows only. These
+Linux-only edits have never been compiled:
+
+- `hotkey/linux_hotkey.rs`: `release_held_keys` when a keyboard's listener
+  exits (unplug mid-hold); poison-tolerant binding locks
+- `injection/ydotool.rs`: `ydotool type` bounded by `run_with_timeout`
+- `notes/sync_doc/mod.rs`: `is_transient_rename_error` is `false` off Windows
 
 ## Low priority
 
-- `debug_logging` config toggle has no runtime effect — wiring it would control injection trace logging
+- Notes/tasks `save()` and the 500 ms flush run on the UI thread and rewrite
+  whole files. Fine at today's size; revisit if the corpus gets large
+  (`notes/mod.rs`, `notes/flush.rs`, `ui/app_setup.rs`).

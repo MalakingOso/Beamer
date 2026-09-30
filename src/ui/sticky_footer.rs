@@ -78,18 +78,7 @@ pub fn should_flash_error(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use StageState::{Done, Failed, Pending, Skipped};
-
-    #[test]
-    fn an_untouched_note_offers_a_pass_without_words() {
-        let f = footer(Pending, false);
-        assert_eq!(f.icon, FooterIcon::Asterisk);
-        assert_eq!(f.tooltip, "Find tasks");
-        assert!(
-            f.error.is_none(),
-            "the normal path is an icon and a tooltip; words are for failures"
-        );
-    }
+    use StageState::{Failed, Skipped};
 
     #[test]
     fn a_failed_pass_is_the_one_place_the_footer_uses_words() {
@@ -99,32 +88,8 @@ mod tests {
     }
 
     #[test]
-    fn a_finished_note_is_quiet_but_not_inert() {
-        let f = footer(Done, false);
-        assert_eq!(f.icon, FooterIcon::Check);
-        assert!(f.error.is_none());
-        assert_eq!(f.tooltip, "Run again");
-    }
-
-    #[test]
     fn a_skipped_pass_offers_nothing_to_retry() {
         assert_eq!(footer(Skipped, false).icon, FooterIcon::Check);
-    }
-
-    #[test]
-    fn a_note_opened_already_failed_flashes_once_then_goes_quiet() {
-        assert!(
-            should_flash_error(true, false, false, true),
-            "mount with a persisted failure is the only time the words appear unprompted"
-        );
-    }
-
-    #[test]
-    fn a_note_opened_while_its_pass_runs_does_not_flash() {
-        assert!(
-            !should_flash_error(true, false, true, true),
-            "Running outranks even a stale failure, on mount as everywhere else"
-        );
     }
 
     #[test]

@@ -10,7 +10,7 @@ pub(super) async fn clipboard_only_fallback(text: &str) -> anyhow::Result<()> {
         clipboard.set_text(&text)?;
 
         // arboard alone is unreliable on Wayland — back it up with wl-copy.
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "linux")]
         if std::env::var("WAYLAND_DISPLAY").is_ok() {
             if let Ok(mut child) = std::process::Command::new("wl-copy")
                 .arg("--type")
@@ -34,7 +34,7 @@ pub(super) async fn clipboard_only_fallback(text: &str) -> anyhow::Result<()> {
 
 /// Show a desktop notification. Always logs it too, so a failed toast still
 /// leaves a trace.
-pub(super) fn show_notification(title: &str, message: &str) {
+pub(crate) fn show_notification(title: &str, message: &str) {
     tracing::info!("Notification: {} - {}", title, message);
     #[cfg(target_os = "windows")]
     {
@@ -49,7 +49,7 @@ pub(super) fn show_notification(title: &str, message: &str) {
             tracing::warn!("Failed to show notification: {}", e);
         }
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
     {
         if let Err(e) = notify_rust::Notification::new()
             .appname("Beamer")

@@ -216,7 +216,7 @@ pub(super) fn handle_key_event(key: KeyCode, value: i32, state: &mut HookState) 
         shift: state.shift_held,
     };
 
-    let bindings = state.bindings.lock().unwrap().clone();
+    let bindings = state.bindings.lock().unwrap_or_else(|p| p.into_inner()).clone();
 
     // Match Win by keycode: evdev reports left/right meta separately.
     let vk = if matches!(key, KeyCode::KEY_LEFTMETA | KeyCode::KEY_RIGHTMETA) {
@@ -277,11 +277,28 @@ pub(super) fn release_desktop_bindings(state: &mut HookState) {
     }
 }
 
+/// A keyboard went away mid-press (unplug, suspend): clear modifiers and held
+/// triggers, ending a hold it started. Without this a stale `ctrl_held` or
+/// `trigger_held` silently eats the next press. Latched toggles stay latched.
+fn release_held_keys(state: &mut HookState) {
+    state.ctrl_held = false;
+    state.alt_held = false;
+    state.shift_held = false;
+    for bs in state.binding_state.iter_mut() {
+        bs.trigger_held = false;
+        if bs.armed {
+            bs.armed = false;
+            tracing::info!("Hotkey triggered: RecordStop (keyboard disconnected)");
+            let _ = state.tx.send(HotkeyEvent::RecordStop);
+        }
+    }
+}
+
 /// The press/release state machine both input paths share. `trigger_held`
 /// makes a repeated press (or a second path's copy) a no-op.
 pub(super) fn on_trigger(idx: usize, is_press: bool, state: &mut HookState) {
     let (mode, is_toggle) = {
-        let bindings = state.bindings.lock().unwrap();
+        let bindings = state.bindings.lock().unwrap_or_else(|p| p.into_inner());
         let Some(binding) = bindings.get(idx) else { return };
         (binding.mode, binding.config.is_toggle)
     };
@@ -328,7 +345,7 @@ impl HotkeyHandle {
     pub fn update_configs(&self, inject: HotkeyConfig, note: Option<HotkeyConfig>) {
         let bindings = build_bindings(inject, note);
         let accels = gnome_grab::accelerators(&bindings);
-        *self.bindings.lock().unwrap() = bindings;
+        *self.bindings.lock().unwrap_or_else(|p| p.into_inner()) = bindings;
         self.reset_flag.store(true, Ordering::Relaxed);
         self.grab.push(accels);
     }
@@ -438,6 +455,8 @@ fn spawn_device_listener(
                     }
                 }
             }
+            // Its key-ups will never arrive: release what it may have held.
+            release_held_keys(&mut state.lock().unwrap_or_else(|p| p.into_inner()));
             known
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())

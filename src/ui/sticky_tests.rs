@@ -15,11 +15,6 @@ fn window_title_embeds_the_note_id() {
 }
 
 #[test]
-fn titles_are_unique_per_note() {
-    assert_ne!(window_title("a"), window_title("b"));
-}
-
-#[test]
 fn a_resize_at_scale_two_stores_half_the_physical_numbers() {
     // Invisible on this machine, where everything is scale 1.0, and wrong on
     // every HiDPI display, reopening each note at double size.

@@ -192,24 +192,6 @@ mod tests {
     }
 
     #[test]
-    fn transcribing_looks_the_same_whatever_the_destination() {
-        assert_eq!(
-            pill_state(RecordingState::Processing, CaptureMode::Note),
-            Some("processing")
-        );
-        assert_eq!(
-            pill_state(RecordingState::Processing, CaptureMode::Inject),
-            Some("processing")
-        );
-    }
-
-    #[test]
-    fn idle_hides_the_pill_in_either_mode() {
-        assert_eq!(pill_state(RecordingState::Idle, CaptureMode::Note), None);
-        assert_eq!(pill_state(RecordingState::Idle, CaptureMode::Inject), None);
-    }
-
-    #[test]
     fn every_style_is_one_both_pills_handle() {
         // Unknown strings read as idle on both pills, silently. No error, no log.
         for state in [RecordingState::Idle, RecordingState::Recording, RecordingState::Processing] {

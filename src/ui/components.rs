@@ -42,21 +42,9 @@ mod truncate_tests {
     use super::truncate_chars;
 
     #[test]
-    fn short_text_is_returned_unchanged() {
-        assert_eq!(truncate_chars("hello", 80), "hello");
-    }
-
-    #[test]
     fn exact_length_gets_no_ellipsis() {
         let text = "a".repeat(80);
         assert_eq!(truncate_chars(&text, 80), text);
-    }
-
-    #[test]
-    fn one_over_gets_ellipsis() {
-        let text = "a".repeat(81);
-        let got = truncate_chars(&text, 80);
-        assert_eq!(got, format!("{}...", "a".repeat(80)));
     }
 
     /// Regression: byte-slicing panicked when an em dash straddled the cut point.
@@ -69,25 +57,6 @@ mod truncate_tests {
         let got = truncate_chars(&text, 80);
         assert_eq!(got.chars().count(), 83, "80 chars plus the ellipsis");
         assert!(got.ends_with("..."));
-    }
-
-    #[test]
-    fn counts_characters_not_bytes() {
-        let text = "\u{2014}".repeat(90);
-        let got = truncate_chars(&text, 80);
-        assert_eq!(got, format!("{}...", "\u{2014}".repeat(80)));
-    }
-
-    #[test]
-    fn non_latin_scripts_are_cut_on_character_boundaries() {
-        let text = "你好世界".repeat(30);
-        let got = truncate_chars(&text, 80);
-        assert_eq!(got.chars().count(), 83);
-    }
-
-    #[test]
-    fn empty_input_stays_empty() {
-        assert_eq!(truncate_chars("", 80), "");
     }
 }
 

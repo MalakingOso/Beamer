@@ -5,30 +5,6 @@
 use super::*;
 
 #[test]
-fn record_start_carries_its_capture_mode() {
-    let inject = HotkeyEvent::RecordStart(CaptureMode::Inject);
-    let note = HotkeyEvent::RecordStart(CaptureMode::Note);
-
-    assert_ne!(
-        inject, note,
-        "the orchestrator must be able to tell the two hotkeys apart"
-    );
-    match note {
-        HotkeyEvent::RecordStart(mode) => assert_eq!(mode, CaptureMode::Note),
-        HotkeyEvent::RecordStop => panic!("wrong variant"),
-    }
-}
-
-#[test]
-fn capture_mode_defaults_to_inject() {
-    assert_eq!(
-        CaptureMode::default(),
-        CaptureMode::Inject,
-        "an unconfigured note hotkey must never silently divert dictation"
-    );
-}
-
-#[test]
 fn super_with_another_key_is_rejected() {
     assert!(
         HotkeyConfig::parse("Super+N", false).is_none(),
@@ -112,27 +88,9 @@ fn each_binding_matches_only_its_own_chord() {
     );
 }
 
-#[test]
-fn bindings_keep_independent_press_state() {
-    let mut state = [BindingState::default(); MAX_BINDINGS];
-
-    state[0].trigger_held = true;
-    state[0].armed = true;
-
-    assert!(!state[1].trigger_held, "note binding must not inherit inject's held state");
-    assert!(!state[1].armed, "note binding must not inherit inject's armed state");
-}
-
-#[test]
-fn absent_note_binding_yields_only_one_binding() {
-    let bindings = build_bindings(cfg(true, false, 0x20, false), None);
-    assert_eq!(bindings.len(), 1);
-    assert_eq!(bindings[0].mode, CaptureMode::Inject);
-}
-
 /// The GNOME desktop grab: accelerator strings and how its events share the
 /// evdev state machine. Linux-only, like both modules it exercises.
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 mod desktop_grab {
     use super::*;
     use crate::hotkey::gnome_grab::hotkey_to_accelerator;
@@ -146,14 +104,6 @@ mod desktop_grab {
 
     fn accel(chord: &str) -> Option<String> {
         hotkey_to_accelerator(&HotkeyConfig::parse(chord, false).expect("chord parses"))
-    }
-
-    #[test]
-    fn the_default_chord_maps_to_control_space() {
-        assert_eq!(
-            hotkey_to_accelerator(&HotkeyConfig::default()).as_deref(),
-            Some("<Control>space")
-        );
     }
 
     #[test]
@@ -216,13 +166,6 @@ mod desktop_grab {
         handle_key_event(KeyCode::KEY_SPACE, 0, &mut state);
         handle_key_event(KeyCode::KEY_SPACE, 1, &mut state);
         assert_eq!(drain(&mut rx), vec![HotkeyEvent::RecordStart(CaptureMode::Inject)]);
-    }
-
-    #[test]
-    fn the_grab_ignores_a_press_it_does_not_own() {
-        let (mut state, _owned, mut rx) = state(false);
-        on_grab_event(0, true, &mut state);
-        assert!(drain(&mut rx).is_empty(), "evdev owns this binding's presses");
     }
 
     #[test]

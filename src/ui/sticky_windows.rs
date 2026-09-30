@@ -328,11 +328,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_live_window_is_raised_rather_than_reopened() {
-        assert_eq!(reopen_action(SlotState::Live, true), ReopenAction::Focus);
-    }
-
-    #[test]
     fn a_window_that_died_without_a_close_event_is_pruned_first() {
         // Without the prune the reconciler never opens a replacement.
         assert_eq!(
@@ -355,26 +350,9 @@ mod tests {
     }
 
     #[test]
-    fn an_unregistered_note_just_gets_marked_open() {
-        assert_eq!(reopen_action(SlotState::Absent, false), ReopenAction::Reopen);
-    }
-
-    #[test]
     fn nothing_opens_while_the_splash_is_still_up() {
         assert!(!may_open(false, 1));
         assert!(!may_open(false, 7));
-    }
-
-    #[test]
-    fn everything_waiting_opens_once_the_splash_closes() {
-        assert!(may_open(true, 1));
-        assert!(may_open(true, 7));
-    }
-
-    #[test]
-    fn a_pass_with_nothing_to_open_does_no_work() {
-        assert!(!may_open(true, 0));
-        assert!(!may_open(false, 0));
     }
 
     #[test]

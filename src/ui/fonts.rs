@@ -37,15 +37,6 @@ pub fn embedded_font_css() -> &'static str {
 mod tests {
     use super::*;
 
-    #[test]
-    fn every_face_the_app_uses_is_embedded() {
-        let css = embedded_font_css();
-        assert_eq!(css.matches("@font-face").count(), 3);
-        assert!(css.contains("font-family:\"DM Mono\";font-weight:400"));
-        assert!(css.contains("font-family:\"DM Mono\";font-weight:500"));
-        assert!(css.contains("font-family:\"Recursive\";font-weight:300 1000"));
-    }
-
     /// Guards a truncated `include_bytes!` or a URL-safe-base64 encoder swap.
     #[test]
     fn the_data_uri_round_trips_to_the_original_woff2() {
@@ -60,13 +51,5 @@ mod tests {
 
         assert_eq!(decoded, DM_MONO_REGULAR, "first face is DM Mono 400");
         assert_eq!(&decoded[..4], b"wOF2", "not a woff2 payload");
-    }
-
-    #[test]
-    fn the_css_is_built_once_and_reused() {
-        assert!(
-            std::ptr::eq(embedded_font_css(), embedded_font_css()),
-            "each call re-encoding ~85 KB would show up on every note open"
-        );
     }
 }

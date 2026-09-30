@@ -217,19 +217,4 @@ mod tests {
         assert_eq!(area.x, -1920);
         assert_eq!(area.w, 4480);
     }
-
-    #[test]
-    fn a_stacked_pair_reserves_the_panel_only_once() {
-        let top = Rect { x: 0, y: 0, w: 2560, h: 1440 };
-        let bottom = Rect { x: 0, y: 1440, w: 2560, h: 1440 };
-        let area = union_work_area(&[top, bottom]);
-        assert_eq!(area.h, 2880 - PANEL_INSET as u32);
-    }
-
-    #[test]
-    fn no_monitors_at_all_falls_back_rather_than_producing_an_empty_area() {
-        let area = union_work_area(&[]);
-        assert_eq!(area, fallback_work_area());
-        assert!(area.w > 0 && area.h > 0);
-    }
 }

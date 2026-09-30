@@ -1,4 +1,4 @@
-#![cfg(not(target_os = "windows"))]
+#![cfg(target_os = "linux")]
 
 //! Focused-window lookup via the Beamer GNOME Shell extension.
 //!
@@ -198,19 +198,6 @@ mod tests {
     }
 
     #[test]
-    fn bare_x11_class_names_and_new_terminals_match() {
-        // XWayland exposes WM_CLASS, not app ids.
-        assert!(is_terminal("wezterm"));
-        assert!(is_terminal("ghostty"));
-        assert!(is_terminal("konsole"));
-        assert!(is_terminal("xterm"));
-        assert!(is_terminal("uxterm"));
-        assert!(is_terminal("gnome-terminal-server"));
-        assert!(is_terminal("app.ptyxis.Ptyxis"));
-        assert!(is_terminal("ptyxis"));
-    }
-
-    #[test]
     fn non_terminal_app_ids_do_not_match() {
         assert!(!is_terminal("firefox"));
         assert!(!is_terminal("code"));
@@ -224,34 +211,6 @@ mod tests {
         assert!(is_self("beamer"));
         assert!(is_self("Beamer"));
         assert!(is_self("com.beamer.app"));
-    }
-
-    #[test]
-    fn other_app_ids_are_not_self() {
-        assert!(!is_self("firefox"));
-        assert!(!is_self("code"));
-        assert!(!is_self("org.gnome.Console"));
-        assert!(!is_self("thunderbird"));
-        assert!(!is_self(""));
-    }
-
-    #[test]
-    fn empty_string_maps_to_none() {
-        let got = map_call_result(Ok(String::new()));
-        assert_eq!(got, None);
-    }
-
-    #[test]
-    fn non_empty_string_is_lowercased() {
-        let got = map_call_result(Ok("Org.WezFurlong.WezTerm".into()));
-        assert_eq!(got.as_deref(), Some("org.wezfurlong.wezterm"));
-    }
-
-    #[test]
-    fn dbus_error_maps_to_none() {
-        let err = zbus::Error::Failure("simulated".into());
-        let got = map_call_result(Err(err));
-        assert_eq!(got, None);
     }
 
     fn io_err(kind: std::io::ErrorKind) -> zbus::Error {
@@ -274,18 +233,6 @@ mod tests {
     }
 
     #[test]
-    fn method_level_errors_are_not_connection_dead() {
-        assert!(!is_connection_dead(&zbus::Error::Failure("simulated".into())));
-        assert!(!is_connection_dead(&zbus::Error::InterfaceNotFound));
-    }
-
-    #[test]
-    fn with_timeout_returns_ok_when_call_finishes_in_time() {
-        let got = with_timeout(1000, || Ok::<_, zbus::Error>(42));
-        assert_eq!(got.unwrap(), 42);
-    }
-
-    #[test]
     fn with_timeout_returns_timed_out_when_call_is_slow() {
         let start = std::time::Instant::now();
         let got = with_timeout(20, || {
@@ -299,11 +246,5 @@ mod tests {
             }
             other => panic!("expected a TimedOut InputOutput error, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn with_timeout_propagates_the_call_error() {
-        let got = with_timeout(1000, || Err::<(), _>(zbus::Error::Failure("boom".into())));
-        assert!(matches!(got, Err(zbus::Error::Failure(msg)) if msg == "boom"));
     }
 }

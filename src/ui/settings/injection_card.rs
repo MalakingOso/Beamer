@@ -32,7 +32,7 @@ pub fn InjectionCard() -> Element {
                     .unwrap_or(false)
                     && std::env::var("XDG_SESSION_TYPE").ok().as_deref() == Some("wayland");
 
-                #[cfg(not(target_os = "windows"))]
+                #[cfg(target_os = "linux")]
                 {
                     use crate::install::gnome_extension::{self, Status as HelperStatus};
 

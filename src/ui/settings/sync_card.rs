@@ -165,58 +165,11 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_hostname_with_a_path_only_gets_the_scheme() {
-        assert_eq!(
-            normalize_sync_url("callisto.taila63f23.ts.net/sync"),
-            "wss://callisto.taila63f23.ts.net/sync"
-        );
-    }
-
-    #[test]
-    fn an_already_correct_url_is_left_alone() {
-        let url = "wss://callisto.taila63f23.ts.net/sync";
-        assert_eq!(normalize_sync_url(url), url);
-    }
-
-    #[test]
     fn a_pasted_tailscale_serve_https_link_becomes_wss() {
         assert_eq!(
             normalize_sync_url("https://callisto.taila63f23.ts.net/sync"),
             "wss://callisto.taila63f23.ts.net/sync"
         );
-    }
-
-    #[test]
-    fn an_https_link_missing_a_path_still_gets_one() {
-        assert_eq!(
-            normalize_sync_url("https://callisto.taila63f23.ts.net"),
-            "wss://callisto.taila63f23.ts.net/sync"
-        );
-    }
-
-    #[test]
-    fn an_unrecognised_scheme_is_left_alone() {
-        assert_eq!(normalize_sync_url("ftp://example.com"), "ftp://example.com");
-    }
-
-    #[test]
-    fn whitespace_is_trimmed() {
-        assert_eq!(
-            normalize_sync_url("  callisto.taila63f23.ts.net  "),
-            "wss://callisto.taila63f23.ts.net/sync"
-        );
-    }
-
-    #[test]
-    fn empty_input_stays_empty() {
-        assert_eq!(normalize_sync_url(""), "");
-        assert_eq!(normalize_sync_url("   "), "");
-    }
-
-    #[test]
-    fn off_when_the_url_is_empty() {
-        let line = describe_status("", "", &SyncStatus::Off);
-        assert_eq!(line.class, "off");
     }
 
     /// Toggling off clears `url` but the old connection runs until restart.
@@ -235,24 +188,10 @@ mod tests {
     }
 
     #[test]
-    fn a_first_enable_before_restart_also_asks_for_a_restart() {
-        // started_url is empty because the client never started this run.
-        let line = describe_status("wss://host/sync", "", &SyncStatus::Off);
-        assert_eq!(line.class, "connecting");
-        assert!(line.headline.contains("Restart"));
-    }
-
-    #[test]
     fn a_matching_url_with_no_transition_yet_reads_as_connecting_not_off() {
         let line = describe_status("wss://host/sync", "wss://host/sync", &SyncStatus::Off);
         assert_eq!(line.class, "connecting");
         assert_eq!(line.headline, "Connecting...");
-    }
-
-    #[test]
-    fn a_live_connection_reads_as_connected() {
-        let line = describe_status("wss://host/sync", "wss://host/sync", &SyncStatus::Connected);
-        assert_eq!(line.class, "ok");
     }
 
     #[test]

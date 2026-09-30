@@ -14,7 +14,7 @@ voxtral_batch.rs       transcribe_batch(api_key, audio_pcm, vocab) -> Result<Str
 
 `mod.rs` re-exports the ElevenLabs pair as `transcribe_batch` /
 `transcribe_medical_batch` and the Voxtral one as `transcribe_voxtral_batch`.
-Backend selection is a plain string match in `orchestrator.rs` on
+Backend selection is a plain string match in `orchestrator/mod.rs` on
 `cfg.transcription.backend` (`"elevenlabs_batch"` default, per `default_backend()`
 in `src/config/mod.rs` — plus `"elevenlabs_medical_batch"` and `"voxtral_batch"`;
 unknown backends are rejected with an error, never silently remapped).
@@ -31,6 +31,14 @@ preparation in `mod.rs` / `wav.rs` / `keyterms.rs`.
 - `http_client()` — a single lazily-built `reqwest::Client` behind a
   `OnceLock`, shared by all three backends so connection pools/TLS contexts
   aren't rebuilt per request.
+- Timeouts, three layers: `CONNECT_TIMEOUT` (10s, TCP+TLS open),
+  `BATCH_REQUEST_TIMEOUT` (120s, one request end to end),
+  `BATCH_OVERALL_TIMEOUT` (480s, the whole transcription including retries
+  and the Voxtral vocab-correction call). The overall ceiling exists because
+  the orchestrator holds the hotkey receiver while a transcript is in flight,
+  so an unbounded stall strands every later hotkey event.
+- `batch_should_retry(status)` — 429 and 5xx retry; anything else (auth,
+  model, malformed request) fails identically on retry and doesn't.
 
 ## ElevenLabs Scribe v2 (Batch) — `elevenlabs_batch.rs`
 
@@ -64,7 +72,8 @@ confirm ElevenLabs is honouring a parameter, send a *deliberately invalid*
 value — a plausible one tells you nothing, because being ignored and being
 accepted look identical.
 
-Retry on HTTP 429 with exponential backoff (1s, 2s, 4s; up to 3 retries).
+Timeouts, connect errors, 429 and 5xx are retried up to 3 times (1s, 2s, 4s
+backoff) within `BATCH_OVERALL_TIMEOUT` — see "Shared Infrastructure" above.
 The WAV body is wrapped in `bytes::Bytes` once up front and cheaply cloned
 (refcount bump, not a copy) for each retry attempt instead of re-reading it.
 
@@ -104,7 +113,7 @@ only used by the vocab-correction call below)
 **Content-Type:** `multipart/form-data`
 
 Fields: `model` = `voxtral-mini-latest`, `file` = WAV bytes. Language is
-auto-detected — no `language_code` field. Same 429 retry/backoff and
+auto-detected — no `language_code` field. Same retry policy, timeouts and
 `Bytes`-reuse behavior as the ElevenLabs batch path.
 
 **Vocabulary correction (Voxtral-only):** if `vocab` is non-empty, the raw

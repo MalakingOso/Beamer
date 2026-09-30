@@ -64,13 +64,12 @@ and `~/.local/share/beamer/extension/` copies earlier installs left behind.
 
 ## Install
 
-Grab the installer from the latest green run:
+Grab a build from the [latest release](https://github.com/MalakingOso/Beamer/releases/latest)
+(CI only runs on manual dispatch, so the Actions page is the fallback for
+unreleased builds, not the source):
 
-```
-https://github.com/MalakingOso/Beamer/actions
-```
-
-Download **`beamer-windows-installer`**, unzip, run `Beamer_1.0.0_x64-setup.exe`.
+- **x64 PCs:** the `Beamer_<version>_x64-setup.exe` installer.
+- **bearcave (ARM64):** the `aarch64` zip — unzip it and run `beamer.exe`.
 
 Either build gets correct notifications now. Beamer writes its own Start Menu
 shortcut carrying the AppUserModelID that Windows needs before it will attribute
@@ -134,7 +133,7 @@ why, and for the tokenizer patch that build needed.
    (`installer/k2horizon/start-llama-k2horizon.cmd`, `...-hidden.vbs`) are
    embedded in the exe and written into the same dir. This is a fixed
    per-user path, not the app's install dir: Beamer runs `asInvoker` (see
-   "Linux install location" below for the same reasoning), so the runtime and
+   "Linux install location" above for the same reasoning), so the runtime and
    the model (`%USERPROFILE%\models\beamer\K2-Horizon-0.9B-Q8_0.gguf`) both
    live somewhere it can always write.
 2. The Scheduled Task is registered (`schtasks /create /xml ... /f`, so it's
@@ -253,12 +252,12 @@ and `SendInput` into one is blocked. Beamer requests `asInvoker`, so dictating
 into an admin PowerShell does nothing at all: no error, no notification. There
 is no fix short of a signed `uiAccess="true"` binary in Program Files.
 
-**Rolling back to an older build looks like data loss and is not.** Run this
-build once and `notes.json` is rewritten in the new shape. An older build cannot
-parse that, quarantines it to `notes.json.corrupt`, and comes up with an empty
-board. Your notes are fine: the old build knows nothing about `sync\`, so
-`notes.automerge` is untouched and coming back to this build restores
-everything. Only notes made during the rollback session are lost.
+**Rolling back to an older build looks like data loss and is not.** The corpus
+lives in `sync\notes.automerge`, which an older build knows nothing about, so
+coming back to this build restores everything: a document on disk is never
+re-seeded from the `notes.json` mirror. The price is everything the rollback
+session did — notes made then, and edits to older notes, exist only in the
+mirror the old build wrote, which this build will never read again.
 
 ## First-run checklist
 
@@ -275,8 +274,10 @@ not exist if the Windows hotkey work had been done as a four-line patch.
    opens are serialized specifically to avoid this, and this is the test.
 4. **Notes are not placed under the taskbar**, and no 40 px strip is wasted at
    the top of the screen.
-5. **Click a link chip whose URL contains `&`.** The browser should get the
-   whole URL and no console window should flash.
+5. **Export a dated task to the calendar.** The `.ics` should open externally
+   with no console window flashing (`ui::open_external` goes through
+   `ShellExecuteW`, not a shell — this is the regression test for the
+   command-injection fix).
 6. **Right-click `beamer.exe`, Properties.** The icon should be there. CI
    already asserts the manifest, so this is belt and braces.
 7. **Notifications say Beamer, not PowerShell**, and carry Beamer's name in

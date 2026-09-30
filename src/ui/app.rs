@@ -145,8 +145,15 @@ pub fn App() -> Element {
         handle
     });
 
+    // Only the hotkey fields: `update_configs` ends an in-flight recording, so
+    // an unrelated Settings edit must not reach it.
+    let hotkey_fields = use_memo(move || {
+        let r = &config.read().recording;
+        (r.hotkey.clone(), r.mode.clone(), r.note_hotkey.clone(), r.note_mode.clone())
+    });
     use_effect(move || {
-        let cfg = config.read();
+        let _ = hotkey_fields.read();
+        let cfg = config.peek();
         let new_config = HotkeyConfig::parse(&cfg.recording.hotkey, cfg.recording.mode == "toggle")
             .unwrap_or_else(|| {
                 // Same fallback as above: a bad dictation string must not stall

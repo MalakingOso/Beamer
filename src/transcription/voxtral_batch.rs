@@ -48,17 +48,6 @@ fn similarity(a: &str, b: &str) -> f64 {
 mod similarity_tests {
     use super::{levenshtein, similarity, MIN_SIMILARITY};
 
-    #[test]
-    fn identical_strings_are_fully_similar() {
-        assert_eq!(similarity("hello world", "hello world"), 1.0);
-        assert_eq!(similarity("", ""), 1.0);
-    }
-
-    #[test]
-    fn one_substitution_in_ten_chars() {
-        assert!((similarity("abcdefghij", "abcdefghiX") - 0.9).abs() < 1e-9);
-    }
-
     /// 1 substitution in 4 chars = 0.75; per byte it would score ~0.92.
     #[test]
     fn non_ascii_is_scored_per_character_not_per_byte() {

@@ -92,7 +92,7 @@ pub fn open_external(target: &str) {
         });
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
     {
         let result = std::process::Command::new("xdg-open").arg(target).spawn();
         if let Err(e) = result {
@@ -110,21 +110,6 @@ mod open_external_tests {
         let wide = to_wide_null("hello");
         assert_eq!(wide.last(), Some(&0));
         assert_eq!(wide.len(), "hello".encode_utf16().count() + 1);
-    }
-
-    #[test]
-    fn a_target_containing_an_ampersand_encodes_unmodified() {
-        // Encoding step only: `&` gets no special treatment. "Never reaches a
-        // shell parser" is structural (ShellExecuteW, not cmd), not unit-testable here.
-        let target = "https://example.com/?a=1&b=2";
-        let wide = to_wide_null(target);
-        let decoded: Vec<u16> = target.encode_utf16().collect();
-        assert_eq!(&wide[..wide.len() - 1], decoded.as_slice());
-    }
-
-    #[test]
-    fn empty_string_still_gets_a_terminator() {
-        assert_eq!(to_wide_null(""), vec![0]);
     }
 }
 

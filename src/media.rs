@@ -3,19 +3,13 @@
 //! WASAPI peak meter and toggles the (broadcast) play/pause media key; Linux
 //! pauses one MPRIS player over D-Bus and resumes that same player.
 
-/// Check if audio is currently being output on the default render device.
-#[cfg(target_os = "windows")]
-fn is_audio_playing() -> bool {
-    is_audio_playing_wasapi()
-}
-
 /// Guard proving Beamer paused playback; `Drop` resumes it on every exit path.
 /// On Linux it remembers the player's D-Bus bus name: resuming "any paused
 /// player" resumes the wrong one.
 #[must_use = "dropping this immediately resumes playback; hold it for the duration of the recording"]
 pub struct MediaPause {
     /// Absent on Windows, where play/pause is broadcast, not addressed.
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
     bus_name: String,
 }
 
@@ -25,7 +19,7 @@ impl MediaPause {
         {
             send_media_play_pause();
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "linux")]
         {
             match find_mpris_player_by_bus_name(&self.bus_name) {
                 Some(player) => match player.play() {
@@ -54,16 +48,18 @@ impl Drop for MediaPause {
 }
 
 /// Pause media if playing; returns a [`MediaPause`] guard when it did.
-pub fn pause_media_if_playing() -> Option<MediaPause> {
+pub async fn pause_media_if_playing() -> Option<MediaPause> {
     #[cfg(target_os = "windows")]
     {
-        if is_audio_playing() {
+        // WASAPI is COM: off the runtime thread, per the spawn_blocking rule.
+        let playing = tokio::task::spawn_blocking(is_audio_playing).await.unwrap_or(false);
+        if playing {
             send_media_play_pause();
             return Some(MediaPause {});
         }
         None
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
     {
         let player = find_playing_mpris_player()?;
         let bus_name = player.bus_name().to_string();
@@ -81,7 +77,7 @@ pub fn pause_media_if_playing() -> Option<MediaPause> {
 }
 
 /// First MPRIS2 player currently Playing.
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 fn find_playing_mpris_player() -> Option<mpris::Player> {
     let finder = mpris::PlayerFinder::new().ok()?;
     finder.find_all().ok()?.into_iter().find(|p| {
@@ -91,7 +87,7 @@ fn find_playing_mpris_player() -> Option<mpris::Player> {
 
 /// MPRIS2 player by D-Bus bus name (`find_by_name` matches human-facing
 /// `Identity`, which can't tell two instances of one app apart).
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 fn find_mpris_player_by_bus_name(bus_name: &str) -> Option<mpris::Player> {
     let finder = mpris::PlayerFinder::new().ok()?;
     finder
@@ -101,37 +97,39 @@ fn find_mpris_player_by_bus_name(bus_name: &str) -> Option<mpris::Player> {
         .find(|p| p.bus_name() == bus_name)
 }
 
+/// Whether the default render device is outputting audio (WASAPI peak meter).
+/// Blocking COM: call via `spawn_blocking`.
 #[cfg(target_os = "windows")]
-fn is_audio_playing_wasapi() -> bool {
-    use windows::Win32::Media::Audio::{
-        eMultimedia, eRender, IMMDeviceEnumerator, MMDeviceEnumerator,
-    };
+fn is_audio_playing() -> bool {
+    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
+
+    // Balance only a reference this call took (`S_OK`/`S_FALSE`), as in
+    // `injection::uia`; the meter's COM objects are gone before uninit.
+    let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+    let peak = output_peak();
+    if hr.is_ok() {
+        unsafe { CoUninitialize() };
+    }
+    match peak {
+        Ok(peak) => peak > 0.0001,
+        Err(e) => {
+            tracing::debug!("Could not read the output peak meter; not pausing media: {e}");
+            false
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn output_peak() -> windows::core::Result<f32> {
     use windows::Win32::Media::Audio::Endpoints::IAudioMeterInformation;
-    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED};
+    use windows::Win32::Media::Audio::{eMultimedia, eRender, IMMDeviceEnumerator, MMDeviceEnumerator};
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
 
     unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-
-        let enumerator: IMMDeviceEnumerator =
-            match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
-                Ok(e) => e,
-                Err(_) => return false,
-            };
-
-        let device = match enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia) {
-            Ok(d) => d,
-            Err(_) => return false,
-        };
-
-        let meter: IAudioMeterInformation = match device.Activate(CLSCTX_ALL, None) {
-            Ok(m) => m,
-            Err(_) => return false,
-        };
-
-        match meter.GetPeakValue() {
-            Ok(peak) => peak > 0.0001,
-            Err(_) => false,
-        }
+        let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+        let device = enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia)?;
+        let meter: IAudioMeterInformation = device.Activate(CLSCTX_ALL, None)?;
+        meter.GetPeakValue()
     }
 }
 

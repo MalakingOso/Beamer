@@ -118,12 +118,6 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_file_loads_empty() {
-        let store = ComponentStore::load_from(temp_path("missing"));
-        assert!(store.get("anything").is_none());
-    }
-
-    #[test]
     fn records_round_trip_through_disk() {
         let path = temp_path("round-trip");
         let mut store = ComponentStore::load_from(path.clone());

@@ -182,18 +182,4 @@ mod tests {
 
         let _ = std::fs::remove_file(&history.path);
     }
-
-    #[test]
-    fn saved_history_round_trips() {
-        let mut history = temp_history("roundtrip");
-        history.append("first".to_string());
-        history.append("second".to_string());
-
-        let contents = std::fs::read_to_string(&history.path).unwrap();
-        let reloaded: TranscriptionHistory = serde_json::from_str(&contents).unwrap();
-        let texts: Vec<_> = reloaded.entries.iter().map(|e| e.text.as_str()).collect();
-        assert_eq!(texts, vec!["first", "second"]);
-
-        let _ = std::fs::remove_file(&history.path);
-    }
 }

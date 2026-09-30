@@ -94,11 +94,10 @@ tokio::task::spawn_blocking(|| {
 
 ## Debug Logging
 
-Log every injection attempt:
-- Target app name (from window title / process name)
-- Method attempted and result (success/fail)
-- Fallback chain traversal
-- Final method that succeeded
+The dispatch logs every backend it tries, why it fell through, and the one
+that succeeded (`inject_text_blocking`), at info. Settings → Debug → "Debug
+logging" adds the debug-level detail. Both reach `beamer.log` in the config
+directory — the only place logs go in a Windows release build.
 
 ## Control Type Detection
 
@@ -192,7 +191,7 @@ list. Terminals → Ctrl+Shift+V; anything else → Ctrl+V. Any failure
 Ctrl+Shift+V.
 
 **Terminal list** lives at `src/injection/focus.rs::TERMINAL_APP_IDS`.
-To add a terminal, PR-append the app id (lowercase, exact match — no
+To add a terminal, PR-append the app id (exact match, case-insensitive — no
 substring heuristic).
 
 ### GNOME Shell extension v7 (`extension/beamer-focus@beamer.app/`)

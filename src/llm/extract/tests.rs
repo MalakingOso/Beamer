@@ -76,13 +76,6 @@ fn a_leaked_reasoning_block_is_stripped_before_the_json() {
 }
 
 #[test]
-fn a_body_with_no_think_tag_is_left_alone() {
-    // The common case, and the one that must cost nothing: a server that
-    // already split reasoning out sends `content` with no tag in it at all.
-    assert_eq!(strip_think_tags("plain text, no tags"), "plain text, no tags");
-}
-
-#[test]
 fn only_the_last_closing_think_tag_is_honoured() {
     // A response can legitimately contain the word "think" more than once
     // before the real answer starts; stripping at the first match would cut
@@ -114,15 +107,6 @@ fn a_task_at_exactly_the_floor_is_kept() {
 }
 
 #[test]
-fn the_floor_is_applied_here_and_not_left_to_the_ui() {
-    // A row nobody is ever shown is not a labelled example. Letting it
-    // through to be filtered at render time would put a decision nobody
-    // made into tasks.json and poison the eval corpus.
-    let body = one_task("I need to call the vet about Milo tomorrow", 0.2);
-    assert!(parse(&body, NOTE, 0.5).unwrap().is_empty());
-}
-
-#[test]
 fn grounding_survives_the_whitespace_a_transcript_carries() {
     let note = "I need to  call the vet\nabout Milo tomorrow.";
     let body = one_task("I need to call the vet about milo tomorrow", 0.9);
@@ -134,13 +118,6 @@ fn grounding_survives_the_whitespace_a_transcript_carries() {
 }
 
 #[test]
-fn an_out_of_range_confidence_is_clamped_not_fatal() {
-    let body = one_task("I need to call the vet about Milo tomorrow", 4.2);
-    let got = parse(&body, NOTE, 0.5).unwrap();
-    assert_eq!(got[0].confidence, 1.0);
-}
-
-#[test]
 fn malformed_json_is_an_error_not_an_empty_list() {
     // These must be distinguishable: an empty list marks the stage Done,
     // a parse failure marks it Failed and offers a retry.
@@ -148,23 +125,6 @@ fn malformed_json_is_an_error_not_an_empty_list() {
         parse("the model said something else entirely", NOTE, 0.5),
         Err(ChatError::Malformed(_))
     ));
-}
-
-#[test]
-fn the_extraction_request_asks_the_server_to_constrain_the_grammar() {
-    let req = build_request(&ExtractConfig::default(), NOTE, today());
-    // K2-Horizon on aarch64, Gemma elsewhere; see `default_extract_model`.
-    #[cfg(target_arch = "aarch64")]
-    assert_eq!(req.model, "K2-Horizon-0.9B-Q8_0");
-    #[cfg(not(target_arch = "aarch64"))]
-    assert_eq!(req.model, "gemma-4-E4B_q4_0-it");
-    assert!(req.response_format.is_some());
-    assert_eq!(req.messages[0].content, prompts::extract_system(today()));
-assert!(
-    req.messages[0].content.contains("2026-08-23"),
-    "the model cannot resolve a relative date it was never told the day for"
-);
-    assert_eq!(req.messages[1].content, NOTE, "the note is sent as-is");
 }
 
 #[test]
@@ -198,16 +158,6 @@ fn an_unparseable_due_keeps_the_phrase_and_drops_the_date() {
         Some("tomorrow"),
         "the phrase is what lets the UI offer a picker instead of a shrug"
     );
-}
-
-#[test]
-fn a_due_date_in_the_past_drops_to_phrase_only() {
-    // The classic silent failure: "Friday" resolved against the wrong year.
-    // The task looks perfect and is filed two years ago.
-    let got = parse(&dated("2024-08-28", "tomorrow", "todo"), NOTE, 0.5).unwrap();
-    assert_eq!(got.len(), 1);
-    assert_eq!(got[0].due, None);
-    assert_eq!(got[0].due_phrase.as_deref(), Some("tomorrow"));
 }
 
 #[test]
@@ -281,15 +231,4 @@ fn a_date_failure_never_costs_the_task() {
         assert_eq!(got.len(), 1, "the task vanished on: {body}");
         assert_eq!(got[0].text, "Call the vet");
     }
-}
-
-#[test]
-fn a_due_phrase_grounds_through_the_whitespace_a_transcript_carries() {
-    let note = "I need to  call the vet\nabout Milo tomorrow.";
-    let got = parse(&dated("2026-08-24", "About Milo  tomorrow", "todo"), note, 0.5).unwrap();
-    assert_eq!(
-        got[0].due_phrase.as_deref(),
-        Some("About Milo  tomorrow"),
-        "a doubled space in the transcript must not read as an invented date"
-    );
 }

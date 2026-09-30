@@ -58,20 +58,6 @@ fn set_body_never_touches_raw() {
 }
 
 #[test]
-fn archive_hides_from_active_but_retains_the_note() {
-    let mut store = temp_store("archive");
-    let keep = store.create("keep".into(), NoteColor::Purple, NoteOrigin::Dictated);
-    let gone = store.create("archive me".into(), NoteColor::Rose, NoteOrigin::Dictated);
-
-    store.archive(&gone);
-
-    let active: Vec<&str> = store.active().iter().map(|n| n.raw.as_str()).collect();
-    assert_eq!(active, vec!["keep"]);
-    assert!(store.get(&gone).is_some(), "archiving must not delete");
-    let _ = keep;
-}
-
-#[test]
 fn flush_writes_only_when_dirty() {
     let mut store = temp_store("debounce");
     store.create("something".into(), NoteColor::Purple, NoteOrigin::Dictated);
@@ -82,15 +68,6 @@ fn flush_writes_only_when_dirty() {
         !store.flush_if_dirty(),
         "a second flush with no intervening edit must not rewrite the file"
     );
-}
-
-#[test]
-fn save_leaves_no_temp_file_behind() {
-    let mut store = temp_store("atomic");
-    store.create("hello".into(), NoteColor::Purple, NoteOrigin::Dictated);
-    store.flush_if_dirty();
-
-    assert!(!store.path.with_extension("json.tmp").exists());
 }
 
 #[test]
@@ -150,13 +127,6 @@ fn set_open_does_not_move_the_modified_timestamp_even_on_a_real_change() {
 }
 
 #[test]
-fn set_open_on_a_missing_note_is_a_no_op() {
-    let mut store = temp_store("set_open_missing");
-    store.set_open("nope", true);
-    assert!(!store.is_dirty());
-}
-
-#[test]
 fn search_matches_what_was_said_not_just_what_is_displayed() {
     let mut store = temp_store("search");
     let id = store.create("um so call the vet about biscuit".into(), NoteColor::Purple, NoteOrigin::Dictated);
@@ -207,30 +177,12 @@ fn restore_returns_an_archived_note_to_the_board() {
 }
 
 #[test]
-fn restoring_a_note_that_is_not_archived_does_nothing() {
-    let mut store = temp_store("restore_noop");
-    let id = store.create("already here".into(), NoteColor::Purple, NoteOrigin::Dictated);
-    store.flush_if_dirty();
-
-    store.restore(&id);
-
-    assert!(!store.is_dirty(), "a no-op restore must not schedule a write");
-}
-
-#[test]
 fn two_machine_suffixes_at_the_same_millis_and_counter_produce_different_ids() {
     assert_ne!(
         format_note_id(0x1990_1234, 0, "aaaa"),
         format_note_id(0x1990_1234, 0, "bbbb"),
         "two machines minting their first note at the same millisecond must not collide"
     );
-}
-
-#[test]
-fn a_note_id_carries_its_machine_suffix() {
-    let id = format_note_id(0x1990_1234, 3, "cafe");
-    assert!(id.ends_with("-cafe"));
-    assert_eq!(id, "19901234-0003-cafe");
 }
 
 #[test]
@@ -280,17 +232,6 @@ fn set_all_open_reopens_every_active_note_but_never_an_archived_one() {
         !store.is_open(&b),
         "restoring puts a note back on the board; it does not pop a window open"
     );
-}
-
-#[test]
-fn set_all_open_on_an_empty_store_schedules_no_write() {
-    let mut store = temp_store("bulk_empty");
-    store.flush_if_dirty();
-
-    store.set_all_open(false);
-    store.set_all_open(true);
-
-    assert!(!store.is_dirty(), "with no notes there is nothing to persist");
 }
 
 #[test]

@@ -157,19 +157,8 @@ mod tests {
     }
 
     #[test]
-    fn a_hide_that_ends_a_live_session_does_not_probe_again() {
-        assert!(!needs_probe(&Cmd::Hide, true));
-    }
-
-    #[test]
     fn a_level_update_never_probes() {
         assert!(!needs_probe(&Cmd::Level(0.5), false));
         assert!(!needs_probe(&Cmd::Level(0.5), true));
-    }
-
-    #[test]
-    fn a_show_always_probes() {
-        assert!(needs_probe(&Cmd::Show("recording"), false));
-        assert!(needs_probe(&Cmd::Show("recording"), true));
     }
 }

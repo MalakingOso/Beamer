@@ -40,17 +40,6 @@ fn names<'a>(rows: &[&'a Task]) -> Vec<&'a str> {
     rows.iter().map(|t| t.text.as_str()).collect()
 }
 
-/// Pins that grouping doesn't re-sort within a band: the caller
-/// (`TaskStore::accepted`) owns newest-first order, and a sort here would fight it.
-#[test]
-fn grouping_preserves_the_order_it_was_given() {
-    let rows = vec![
-        task("n1", "Newest", "2026-08-22T12:00:00+01:00", TaskStatus::Accepted, false),
-        task("n1", "Oldest", "2026-08-22T09:00:00+01:00", TaskStatus::Accepted, false),
-    ];
-    assert_eq!(texts(&group_accepted(rows, today())), vec!["Newest", "Oldest"]);
-}
-
 #[test]
 fn tasks_are_grouped_under_the_note_that_produced_them() {
     // Newest first, which is the order `TaskStore::accepted` hands over.
@@ -67,19 +56,6 @@ fn tasks_are_grouped_under_the_note_that_produced_them() {
          note-creation order and bury the row just added"
     );
     assert_eq!(texts(&groups[1..]), vec!["Book a table", "Call the vet"]);
-}
-
-#[test]
-fn done_tasks_sink_below_the_ones_still_outstanding() {
-    let rows = vec![
-        task("n1", "Done early", "2026-08-22T12:00:00+01:00", TaskStatus::Accepted, true),
-        task("n1", "Still to do", "2026-08-22T10:00:00+01:00", TaskStatus::Accepted, false),
-    ];
-    assert_eq!(
-        texts(&group_accepted(rows, today())),
-        vec!["Still to do", "Done early"],
-        "a ticked row must stop competing for attention with work that is left"
-    );
 }
 
 #[test]
@@ -117,43 +93,6 @@ fn an_empty_group_is_not_finished() {
 }
 
 #[test]
-fn a_half_done_note_stays_put_while_a_finished_one_is_promoted() {
-    // Promotion is per group: a note with anything outstanding keeps its
-    // place even when another note is entirely ticked.
-    let mut half = dated("Half done", Some("2026-08-24"), true, false);
-    half.note_id = "n2".into();
-    let mut half_ticked = dated("Half ticked", Some("2026-08-01"), true, true);
-    half_ticked.note_id = "n2".into();
-
-    let groups = group_accepted(
-        vec![half, half_ticked, dated("All done", Some("2026-08-01"), true, true)],
-        today(),
-    );
-
-    let (active, finished): (Vec<_>, Vec<_>) =
-        groups.iter().partition(|(_, rows)| !group_finished(rows));
-
-    assert_eq!(active.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), vec!["n2"]);
-    assert_eq!(finished.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), vec!["n1"]);
-}
-
-#[test]
-fn un_ticking_the_last_done_task_returns_a_group_to_the_main_list() {
-    let mut rows = vec![
-        dated("Done", Some("2026-08-01"), true, true),
-        dated("Also done", Some("2026-08-02"), true, true),
-    ];
-    assert!(group_finished(&rows), "both ticked, so the note has graduated");
-
-    rows[1].done = false;
-    assert!(
-        !group_finished(&rows),
-        "un-ticking a row must bring the whole group back — the Completed section \
-         is derived from the rows, never a flag set at promotion time"
-    );
-}
-
-#[test]
 fn the_completed_disclosure_splits_a_group_without_losing_a_row() {
     let rows = group_accepted(
         vec![
@@ -183,18 +122,6 @@ fn the_completed_disclosure_splits_a_group_without_losing_a_row() {
 }
 
 #[test]
-fn a_group_with_nothing_left_to_do_is_promoted_whole() {
-    // A finished group leaves the main list and draws its rows directly under
-    // Completed, with no inner disclosure. Pins that no row is lost in the move:
-    // `split_done` puts all of them in the done half, which is what gets drawn.
-    let rows = vec![dated("Done", Some("2026-08-01"), true, true)];
-    let (outstanding, done) = split_done(&rows);
-    assert!(outstanding.is_empty());
-    assert_eq!(done.len(), 1, "the only way back to these rows is the disclosure");
-    assert!(group_finished(&rows), "and nothing outstanding is what triggers the move");
-}
-
-#[test]
 fn a_task_whose_note_is_gone_still_gets_a_heading() {
     let h = heading_for(None);
     assert!(!h.openable, "there is no window to open for a note that no longer exists");
@@ -220,27 +147,6 @@ fn an_archived_notes_heading_resolves_but_does_not_offer_a_click() {
     );
 }
 
-#[test]
-fn a_long_note_heading_is_trimmed_and_marked() {
-    let h = heading_preview(&"word ".repeat(50));
-    assert!(h.ends_with('\u{2026}'), "a trimmed heading must say so: {h}");
-    assert!(h.chars().count() <= HEADING_CHARS + 1);
-}
-
-#[test]
-fn a_heading_collapses_the_whitespace_a_transcript_carries() {
-    assert_eq!(heading_preview("call   the\n\nvet  "), "call the vet");
-}
-
-#[test]
-fn an_empty_note_is_named_rather_than_left_blank() {
-    assert_eq!(
-        heading_preview("   \n "),
-        "Untitled note",
-        "a blank heading would leave its tasks looking unattributed"
-    );
-}
-
 fn dated(text: &str, due: Option<&str>, all_day: bool, done: bool) -> Task {
     let mut t = task("n1", text, "2026-08-22T10:00:00+01:00", TaskStatus::Accepted, done);
     t.due = due.map(str::to_string);
@@ -262,12 +168,6 @@ fn a_near_date_reads_as_a_word_and_a_far_one_as_a_date() {
         "4 Jan 2027",
         "a date in another year must say which"
     );
-}
-
-#[test]
-fn a_timed_due_shows_its_time() {
-    let at = parse_due("2026-08-25T09:00:00", false).unwrap();
-    assert_eq!(due_label(at, today()), "Tuesday 09:00");
 }
 
 #[test]

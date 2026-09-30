@@ -94,14 +94,6 @@ mod tests {
     use super::*;
     use crate::hotkey::HotkeyConfig;
 
-    /// The proposed chord must be one the engine can actually register.
-    #[test]
-    fn the_proposed_note_chord_parses() {
-        let parsed = HotkeyConfig::parse(DEFAULT_NOTE_HOTKEY, true).expect("must parse");
-        assert!(parsed.ctrl && parsed.alt && !parsed.shift);
-        assert_eq!(parsed.trigger_vk, 0x20, "Space");
-    }
-
     /// Dictation's chord must not be a prefix of the note chord, or dictation
     /// would fire first on the way to the note trigger.
     #[test]

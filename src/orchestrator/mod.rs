@@ -1,23 +1,26 @@
 //! The conductor of a dictation: hotkey → **orchestrator** → audio →
 //! transcription → injection (or a sticky note).
 //!
-//! `run` is a Dioxus coroutine fed `HotkeyEvent`s by `hotkey/`. One dictation:
-//! 1. `RecordStart(mode)` arrives; `handle_recording` picks the backend and
-//!    loads its API key from the keyring (missing key → notification, no recording).
-//! 2. `handle_batch_recording` opens the mic (`audio/`), sets `Recording`,
-//!    pauses media, plays the start sound, and appends PCM chunks to one buffer.
-//! 3. `RecordStop` (or a dead mic) ends capture: stop sound, `Processing`,
-//!    media resumes, then (unless the mic died) ~400 ms of tail audio (`session`).
-//! 4. The buffer is POSTed to the chosen `transcription/` backend.
-//! 5. `sink::deliver` injects the text (`injection/`) or makes a note, and
-//!    `run` returns the state to `Idle`.
+//! `run` is a Dioxus coroutine fed `HotkeyEvent`s by `hotkey/`. It drives two
+//! loops side by side in one task:
+//! 1. Capture (`capture_loop`): `RecordStart(mode)` → check the backend and
+//!    its API key (missing key → notification, no recording) → open the mic
+//!    (`audio/`), set `Recording`, pause media, play the start sound, and
+//!    append PCM chunks to one buffer until `RecordStop` (or a dead mic) →
+//!    stop sound, media resumes, ~400 ms of tail audio (`session`) → the mic
+//!    closes and the recording is queued as a `transcribe::Job`.
+//! 2. Transcription (`transcribe::worker`): POSTs each job to its
+//!    `transcription/` backend, in order, and `sink::deliver`s the text.
 //!
-//! Dictations run one at a time: the hotkey channel isn't read while a
-//! transcript is in flight, which is why every network call has a timeout.
+//! The hotkey channel is read the whole time, so a slow upload never blocks
+//! the next recording. State: `Recording` while capturing, else `Processing`
+//! while any job is queued, else `Idle`.
 
-use anyhow::Result;
+use std::cell::Cell;
+
 use dioxus::prelude::*;
 use futures_util::StreamExt;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::audio::AudioPipeline;
 use crate::config::Config;
@@ -25,15 +28,16 @@ use crate::hotkey::{CaptureMode, HotkeyEvent};
 use crate::notes::pipeline::PipelineRequest;
 use crate::notes::task_store::TaskStore;
 use crate::notes::NoteStore;
-use crate::transcription;
 use crate::ui::history::TranscriptionHistory;
 use crate::ui::status_log::{log_status, LogLevel, StatusLog};
 
-mod notify;
+pub(crate) mod notify;
 mod session;
 mod sink;
+mod transcribe;
 use notify::show_notification;
 use session::{buffer_tail_audio, StopReason};
+use transcribe::Job;
 
 /// Recording lifecycle state; drives the pill overlay, the home-page status dot
 /// and (on Linux) the tray icon.
@@ -45,169 +49,167 @@ pub enum RecordingState {
     Processing,
 }
 
-/// The orchestrator coroutine: runs one recording session per `RecordStart`
-/// until the hotkey channel closes. Session errors are logged and notified,
-/// never fatal.
+/// Leave `Recording` alone (a capture is live); otherwise `Processing` while
+/// any job is queued, else `Idle`.
+fn settle(rec_state: &mut Signal<RecordingState>, pending_jobs: usize) {
+    if *rec_state.peek() != RecordingState::Recording {
+        rec_state.set(if pending_jobs > 0 { RecordingState::Processing } else { RecordingState::Idle });
+    }
+}
+
+/// The orchestrator coroutine: capture and transcription until the hotkey
+/// channel closes. Session errors are logged and notified, never fatal.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
-    mut hotkey_rx: UnboundedReceiver<HotkeyEvent>,
+    hotkey_rx: UnboundedReceiver<HotkeyEvent>,
     config: Signal<Config>,
-    mut rec_state: Signal<RecordingState>,
-    mut last_injection: Signal<String>,
-    mut history: Signal<TranscriptionHistory>,
+    rec_state: Signal<RecordingState>,
+    last_injection: Signal<String>,
+    history: Signal<TranscriptionHistory>,
     mut status_log: Signal<StatusLog>,
-    mut notes: Signal<NoteStore>,
-    mut tasks: Signal<TaskStore>,
-    mut active_mode: Signal<CaptureMode>,
+    notes: Signal<NoteStore>,
+    tasks: Signal<TaskStore>,
+    active_mode: Signal<CaptureMode>,
     note_passes: Coroutine<PipelineRequest>,
 ) {
     tracing::info!("Orchestrator started, waiting for hotkey events");
     log_status(&mut status_log, LogLevel::Info, "Orchestrator ready");
 
+    // Both loops live in this one task, so a plain `Cell` is enough.
+    let pending_jobs = Cell::new(0usize);
+    let (job_tx, job_rx) = tokio::sync::mpsc::unbounded_channel();
+    futures_util::future::join(
+        capture_loop(hotkey_rx, config, rec_state, status_log, active_mode, job_tx, &pending_jobs),
+        transcribe::worker(
+            job_rx, config, rec_state, last_injection, history, status_log, notes, tasks,
+            note_passes, &pending_jobs,
+        ),
+    )
+    .await;
+}
+
+/// One capture per `RecordStart`, each queued for the transcription worker.
+/// Returning drops `jobs`, which lets the worker finish and exit too.
+async fn capture_loop(
+    mut hotkey_rx: UnboundedReceiver<HotkeyEvent>,
+    config: Signal<Config>,
+    mut rec_state: Signal<RecordingState>,
+    mut status_log: Signal<StatusLog>,
+    mut active_mode: Signal<CaptureMode>,
+    jobs: UnboundedSender<Job>,
+    pending_jobs: &Cell<usize>,
+) {
     while let Some(event) = hotkey_rx.next().await {
-        match event {
-            HotkeyEvent::RecordStart(capture_mode) => {
-                // Set before `handle_recording` sets `Recording`, or the pill
-                // flashes the wrong style for one frame.
-                active_mode.set(capture_mode);
-                if let Err(e) = handle_recording(
-                    &config,
-                    &mut rec_state,
-                    &mut last_injection,
-                    &mut history,
-                    &mut hotkey_rx,
-                    &mut status_log,
-                    &mut notes,
-                    &mut tasks,
-                    capture_mode,
-                    note_passes,
-                )
-                .await
-                {
-                    tracing::error!("Recording session error: {}", e);
-                    log_status(&mut status_log, LogLevel::Error, format!("Recording error: {}", e));
-                    show_notification("Beamer", &format!("Recording error: {}", e));
-                }
-                rec_state.set(RecordingState::Idle);
-            }
-            HotkeyEvent::RecordStop => {}
+        // A stop with no capture running (e.g. a toggle's second press after
+        // a failed start) has nothing to end.
+        let HotkeyEvent::RecordStart(capture_mode) = event else { continue };
+        // Set before `record` sets `Recording`, or the pill flashes the wrong
+        // style for one frame.
+        active_mode.set(capture_mode);
+        if let Some(job) =
+            record(&config, &mut rec_state, &mut hotkey_rx, &mut status_log, capture_mode).await
+        {
+            pending_jobs.set(pending_jobs.get() + 1);
+            let _ = jobs.send(job);
         }
+        settle(&mut rec_state, pending_jobs.get());
+    }
+    tracing::warn!("Hotkey channel closed: no further recordings");
+}
+
+/// Credential name and display name for a transcription backend. Exhaustive on
+/// purpose: an unknown backend must error, never silently fall back to another
+/// model.
+fn backend_key(backend: &str) -> Option<(&'static str, &'static str)> {
+    match backend {
+        "voxtral_batch" => Some(("mistral_api_key", "Voxtral")),
+        "elevenlabs_batch" | "elevenlabs_medical_batch" => Some(("elevenlabs_api_key", "ElevenLabs")),
+        _ => None,
     }
 }
 
-/// Validate the configured backend and its API key, then run the session.
-/// A config problem is reported to the user and returns `Ok` (nothing recorded).
-async fn handle_recording(
+/// Validate the backend and key, then capture one recording. `None` when
+/// nothing was recorded; every such problem has already been reported.
+async fn record(
     config: &Signal<Config>,
     rec_state: &mut Signal<RecordingState>,
-    last_injection: &mut Signal<String>,
-    history: &mut Signal<TranscriptionHistory>,
     hotkey_rx: &mut UnboundedReceiver<HotkeyEvent>,
     status_log: &mut Signal<StatusLog>,
-    notes: &mut Signal<NoteStore>,
-    tasks: &mut Signal<TaskStore>,
     capture_mode: CaptureMode,
-    note_passes: Coroutine<PipelineRequest>,
-) -> Result<()> {
+) -> Option<Job> {
     let cfg = config.read().clone();
-    let backend = &cfg.transcription.backend;
-    let language = &cfg.transcription.language;
-    let backends = cfg.injection.backends.clone();
-
-    // Exhaustive on purpose: an unknown backend must error, never silently
-    // fall back to another model.
-    let (key_name, display_name) = match backend.as_str() {
-        "voxtral_batch" => ("mistral_api_key", "Voxtral"),
-        "elevenlabs_batch" | "elevenlabs_medical_batch" => ("elevenlabs_api_key", "ElevenLabs"),
-        other => {
-            tracing::error!("Unknown transcription backend '{}'", other);
-            log_status(
-                status_log,
-                LogLevel::Error,
-                format!("Unknown transcription backend '{other}' — check Settings"),
-            );
-            show_notification(
-                "Beamer",
-                &format!("Unknown transcription backend '{other}'. Open Settings to pick one."),
-            );
-            return Ok(());
-        }
+    let backend = cfg.transcription.backend.as_str();
+    let Some((key_name, display_name)) = backend_key(backend) else {
+        tracing::error!("Unknown transcription backend '{}'", backend);
+        log_status(
+            status_log,
+            LogLevel::Error,
+            format!("Unknown transcription backend '{backend}' — check Settings"),
+        );
+        show_notification(
+            "Beamer",
+            &format!("Unknown transcription backend '{backend}'. Open Settings to pick one."),
+        );
+        return None;
     };
     let api_key = crate::config::load_api_key(key_name);
     if api_key.is_empty() {
         tracing::error!("No {} API key found in keyring (looked up '{}'). Open Settings to add one.", display_name, key_name);
         log_status(status_log, LogLevel::Error, format!("No {} API key configured — open Settings", display_name));
         show_notification("Beamer", &format!("No {} API key configured. Open Settings to add one.", display_name));
-        return Ok(());
+        return None;
     }
 
-    handle_batch_recording(
-        backend, &api_key, language, &backends, &cfg, config,
-        rec_state, last_injection, history, hotkey_rx, status_log,
-        notes, tasks, capture_mode, note_passes,
-    )
-    .await
-}
-
-/// One session: capture mic → buffer all PCM → POST to the batch API → deliver.
-async fn handle_batch_recording(
-    backend: &str,
-    api_key: &str,
-    language: &str,
-    backends: &[String],
-    cfg: &Config,
-    config: &Signal<Config>,
-    rec_state: &mut Signal<RecordingState>,
-    last_injection: &mut Signal<String>,
-    history: &mut Signal<TranscriptionHistory>,
-    hotkey_rx: &mut UnboundedReceiver<HotkeyEvent>,
-    status_log: &mut Signal<StatusLog>,
-    notes: &mut Signal<NoteStore>,
-    tasks: &mut Signal<TaskStore>,
-    capture_mode: CaptureMode,
-    note_passes: Coroutine<PipelineRequest>,
-) -> Result<()> {
-    let pipeline = match AudioPipeline::new() {
-        Ok(p) => p,
+    let started = AudioPipeline::new().and_then(|pipeline| pipeline.start());
+    let (stream, mut audio_rx) = match started {
+        Ok(started) => started,
         Err(e) => {
-            log_status(status_log, LogLevel::Error, "Microphone not available");
+            tracing::error!("Microphone not available: {e:#}");
+            log_status(status_log, LogLevel::Error, format!("Microphone not available: {e}"));
             show_notification("Beamer", "Microphone not available");
-            return Err(e);
+            return None;
         }
     };
-    let (_stream, mut audio_rx) = pipeline.start()?;
 
     rec_state.set(RecordingState::Recording);
     log_status(status_log, LogLevel::Info, "Recording started");
     // Guard resumes playback on drop, on every exit path below.
     let media_pause = if cfg.recording.pause_media {
-        crate::media::pause_media_if_playing()
+        crate::media::pause_media_if_playing().await
     } else {
         None
     };
     crate::sounds::play_start_sound();
 
-    let mut pcm_buffer: Vec<u8> = Vec::new();
+    let mut pcm: Vec<u8> = Vec::new();
     let mut stop_reason = StopReason::UserStop;
+    let mut mic_error_reported = false;
+    // The other hotkey pressed mid-capture: its stop must not end this one,
+    // so capture ends once every start has been matched by a stop.
+    let mut nested_starts = 0u32;
     loop {
         tokio::select! {
-            hotkey_event = hotkey_rx.next() => {
-                match hotkey_event {
-                    Some(HotkeyEvent::RecordStop) | None => break,
-                    Some(HotkeyEvent::RecordStart(_)) => {}
-                }
-            }
-            chunk = audio_rx.recv() => {
-                match chunk {
-                    Some(bytes) if !bytes.is_empty() => {
-                        pcm_buffer.extend_from_slice(&bytes);
-                    }
-                    _ => {
-                        log_status(status_log, LogLevel::Warn, "Audio channel closed");
-                        stop_reason = StopReason::AudioLost;
-                        break;
+            hotkey_event = hotkey_rx.next() => match hotkey_event {
+                Some(HotkeyEvent::RecordStart(_)) => nested_starts += 1,
+                Some(HotkeyEvent::RecordStop) if nested_starts > 0 => nested_starts -= 1,
+                Some(HotkeyEvent::RecordStop) | None => break,
+            },
+            chunk = audio_rx.recv() => match chunk {
+                // The chunker's marker for a cpal stream error.
+                Some(bytes) if bytes.is_empty() => {
+                    if !mic_error_reported {
+                        mic_error_reported = true;
+                        log_status(status_log, LogLevel::Warn,
+                            "Microphone reported an error — this recording may be incomplete");
                     }
                 }
-            }
+                Some(bytes) => pcm.extend_from_slice(&bytes),
+                None => {
+                    log_status(status_log, LogLevel::Warn, "Audio channel closed");
+                    stop_reason = StopReason::AudioLost;
+                    break;
+                }
+            },
         }
     }
 
@@ -219,98 +221,15 @@ async fn handle_batch_recording(
     // Skip tail capture when the audio channel died: `recv()` on a closed
     // channel returns immediately and would spin hot until the deadline.
     if stop_reason == StopReason::UserStop {
-        buffer_tail_audio(&mut audio_rx, &mut pcm_buffer).await;
+        buffer_tail_audio(&mut audio_rx, &mut pcm).await;
     }
-
-    if pcm_buffer.is_empty() {
-        log_status(status_log, LogLevel::Info, "No audio captured");
-        return Ok(());
-    }
-
-    // Warn if the buffer is all silence (wrong device or muted mic).
-    let (max_amplitude, rms) = {
-        let mut peak: u16 = 0;
-        let mut sum_sq: f64 = 0.0;
-        let count = pcm_buffer.len() / 2;
-
-        for chunk in pcm_buffer.chunks_exact(2) {
-            let s_i16 = i16::from_le_bytes([chunk[0], chunk[1]]);
-            peak = peak.max(s_i16.unsigned_abs());
-            let s = s_i16 as f64;
-            sum_sq += s * s;
-        }
-
-        (peak, (sum_sq / count as f64).sqrt())
-    };
-    tracing::info!("Audio stats: {:.1}s, peak={}, RMS={:.0}", pcm_buffer.len() as f64 / 32000.0, max_amplitude, rms);
-    if max_amplitude < 100 {
-        log_status(status_log, LogLevel::Warn,
-            "Audio appears to be silence — check that your microphone is working and selected as the default input device");
-        tracing::warn!("Audio buffer is essentially silence (peak={}). Wrong input device or mic muted?", max_amplitude);
-    }
-
-    let audio_secs = pcm_buffer.len() as f64 / (16000.0 * 2.0);
-    let backend_label = if backend == "voxtral_batch" { "Voxtral" } else { "ElevenLabs" };
-    log_status(
-        status_log,
-        LogLevel::Info,
-        format!("Sending {:.1}s of audio to {}...", audio_secs, backend_label),
-    );
-
-    let start = tokio::time::Instant::now();
-    let vocab = crate::config::vocabulary::Vocabulary::load()?.list().to_vec();
-    // Exhaustive on purpose (see `handle_recording`): a new backend must land
-    // here, never silently fall back to another model.
-    let result = match backend {
-        "voxtral_batch" => {
-            transcription::transcribe_voxtral_batch(api_key, pcm_buffer, &vocab).await
-        }
-        "elevenlabs_medical_batch" => {
-            transcription::transcribe_medical_batch(
-                api_key,
-                pcm_buffer,
-                language,
-                &vocab,
-                cfg.transcription.no_verbatim,
-            )
-            .await
-        }
-        "elevenlabs_batch" => {
-            transcription::transcribe_batch(
-                api_key,
-                pcm_buffer,
-                language,
-                &vocab,
-                cfg.transcription.no_verbatim,
-            )
-            .await
-        }
-        // Unreachable: `handle_recording` rejects unknown backends before we
-        // get here. Spelled out rather than `_ =>` so a new backend fails
-        // loudly instead of silently becoming Scribe v2.
-        other => Err(anyhow::anyhow!("'{other}' is not a batch backend")),
-    };
-    match result {
-        Ok(text) => {
-            let elapsed = start.elapsed();
-            log_status(
-                status_log,
-                LogLevel::Info,
-                format!("[batch] {:.1}s round-trip: {}", elapsed.as_secs_f64(), text),
-            );
-            if !text.trim().is_empty() {
-                sink::deliver(&text, capture_mode, backends, &cfg.injection.paste_shortcut,
-                        last_injection, history, status_log, notes, tasks, config,
-                        note_passes).await;
-            }
-        }
-        Err(e) => {
-            tracing::error!("Batch transcription failed: {}", e);
-            log_status(status_log, LogLevel::Error, format!("Batch transcription failed: {}", e));
-            show_notification("Beamer", &format!("Transcription failed: {}", e));
-        }
-    }
-
+    // Close the mic now, not after the upload.
+    drop(stream);
     log_status(status_log, LogLevel::Info, "Recording stopped");
-    Ok(())
+
+    if pcm.is_empty() {
+        log_status(status_log, LogLevel::Info, "No audio captured");
+        return None;
+    }
+    Some(Job { pcm, api_key, cfg, capture_mode })
 }

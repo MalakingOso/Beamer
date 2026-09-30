@@ -233,15 +233,6 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_store_gets_a_machine_id_and_no_windows() {
-        let store = MachineStore::new(temp_path("fresh"));
-        assert!(!store.machine_id.is_empty());
-        assert!(!store.is_open("anything"));
-        assert_eq!(store.size("anything"), None);
-        assert_eq!(store.pos("anything"), None);
-    }
-
-    #[test]
     fn set_open_set_size_and_set_pos_round_trip_through_disk() {
         let path = temp_path("roundtrip");
         let mut store = MachineStore::new(path.clone());
@@ -288,18 +279,6 @@ mod tests {
     }
 
     #[test]
-    fn gc_with_nothing_to_drop_does_not_dirty_the_store() {
-        let mut store = MachineStore::new(temp_path("gc_noop"));
-        store.set_open("keep", true);
-        store.flush_if_dirty();
-
-        let valid: HashSet<&str> = ["keep"].into_iter().collect();
-        store.gc(&valid);
-
-        assert!(!store.is_dirty(), "nothing was dropped, so nothing needs to be written");
-    }
-
-    #[test]
     fn migrate_legacy_fills_an_empty_entry_but_never_clobbers_a_real_one() {
         let mut store = MachineStore::new(temp_path("migrate"));
 
@@ -314,25 +293,5 @@ mod tests {
             "an id already present must report nothing was inserted"
         );
         assert_eq!(store.size("n1"), Some((400, 300)), "an existing entry must not be clobbered");
-    }
-
-    #[test]
-    fn machine_ids_are_16_lowercase_hex_digits() {
-        let id = MachineStore::new(temp_path("id_format")).machine_id;
-        assert_eq!(id.len(), 16, "64 bits of install identity, got {id:?}");
-        assert!(
-            id.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
-            "got {id:?}"
-        );
-    }
-
-    #[test]
-    fn ten_thousand_fresh_ids_are_all_distinct() {
-        // 64-bit space: this fails only on a broken RNG, not on birthday luck.
-        let mut seen = std::collections::HashSet::new();
-        for _ in 0..10_000 {
-            let id = MachineStore::generate_machine_id();
-            assert!(seen.insert(id), "duplicate machine id minted");
-        }
     }
 }

@@ -66,8 +66,6 @@ automerge = "0.11"
 evdev = "0.13"
 notify-rust = "4"
 mpris = "2"
-
-[target.'cfg(not(target_os = "windows"))'.dependencies]
 zbus = "5"
 libc = "0.2"
 

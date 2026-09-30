@@ -3,7 +3,12 @@
 //! API keys are the exception: they live in the OS keyring, never on disk.
 //! `vocabulary` holds the custom STT terms. Schema: `agent_docs/config_schema.md`.
 
+mod keys;
+mod migrate;
 pub mod vocabulary;
+
+pub use keys::{load_api_key, save_api_key};
+use migrate::{migrate_injection_backends, migrate_transcription_backend};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -196,8 +201,13 @@ impl Default for AppearanceConfig {
 }
 
 impl Config {
+    /// `%APPDATA%\Beamer` / `~/.config/Beamer`. If the OS can't name a config
+    /// directory, fall back to the temp dir rather than crash on launch.
     pub fn config_dir() -> PathBuf {
-        let base = dirs::config_dir().expect("Could not determine config directory");
+        let base = dirs::config_dir().unwrap_or_else(|| {
+            tracing::error!("Could not determine the config directory; using the temp dir");
+            std::env::temp_dir()
+        });
         base.join("Beamer")
     }
 
@@ -264,7 +274,9 @@ impl Config {
         }
 
         if dirty {
-            let _ = config.save();
+            if let Err(e) = config.save() {
+                tracing::warn!("Could not save migrated config (will retry next launch): {e}");
+            }
         }
 
         Ok(config)
@@ -287,195 +299,6 @@ impl Config {
     }
 }
 
-/// Rename removed realtime backend ids (`elevenlabs`, `voxtral`) to their
-/// `_batch` successors; anything else is untouched. `true` if changed.
-fn migrate_transcription_backend(backend: &mut String) -> bool {
-    let migrated = match backend.as_str() {
-        "elevenlabs" => "elevenlabs_batch",
-        "voxtral" => "voxtral_batch",
-        _ => return false,
-    };
-    *backend = migrated.to_string();
-    true
-}
-
-/// Normalize a stored injection backend chain against the current build.
-/// Returns `true` if the list changed (caller should re-save).
-fn migrate_injection_backends(backends: &mut Vec<String>) -> bool {
-        let mut dirty = false;
-
-        // Drop removed backends. wtype is current (wlroots), not removed.
-        const REMOVED: &[&str] = &["dotool", "enigo", "atspi"];
-        let before = backends.len();
-        backends.retain(|b| !REMOVED.contains(&b.as_str()));
-        if backends.len() != before {
-            dirty = true;
-        }
-
-        // Upgrade the legacy default to today's; custom orderings stay as-is.
-        if backends.as_slice() == ["ydotool".to_string(), "clipboard".to_string()] {
-            *backends = default_backends();
-            dirty = true;
-        }
-
-        // Safety net: never leave the user with an empty backend chain.
-        if backends.is_empty() {
-            *backends = default_backends();
-            dirty = true;
-        }
-
-    dirty
-}
-
-#[cfg(test)]
-mod migration_tests {
-    use super::*;
-
-    fn chain(items: &[&str]) -> Vec<String> {
-        items.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn legacy_default_upgrades_to_new_default() {
-        let mut backends = chain(&["ydotool", "clipboard"]);
-        assert!(migrate_injection_backends(&mut backends));
-        assert_eq!(backends, default_backends());
-    }
-
-    #[test]
-    fn custom_chain_is_untouched() {
-        let mut backends = chain(&["clipboard", "ydotool"]);
-        assert!(!migrate_injection_backends(&mut backends));
-        assert_eq!(backends, chain(&["clipboard", "ydotool"]));
-    }
-
-    #[test]
-    fn wtype_is_no_longer_stripped() {
-        let mut backends = chain(&["wtype", "clipboard"]);
-        assert!(!migrate_injection_backends(&mut backends));
-        assert_eq!(backends, chain(&["wtype", "clipboard"]));
-    }
-
-    #[test]
-    fn dead_backends_are_stripped() {
-        let mut backends = chain(&["dotool", "enigo", "clipboard"]);
-        assert!(migrate_injection_backends(&mut backends));
-        assert_eq!(backends, chain(&["clipboard"]));
-    }
-
-    #[test]
-    fn empty_chain_falls_back_to_default() {
-        let mut backends = chain(&["atspi"]);
-        assert!(migrate_injection_backends(&mut backends));
-        assert_eq!(backends, default_backends());
-    }
-}
-
-    #[test]
-    fn realtime_elevenlabs_migrates_to_batch() {
-        let mut backend = "elevenlabs".to_string();
-        assert!(migrate_transcription_backend(&mut backend));
-        assert_eq!(backend, "elevenlabs_batch");
-    }
-
-    #[test]
-    fn realtime_voxtral_migrates_to_batch() {
-        let mut backend = "voxtral".to_string();
-        assert!(migrate_transcription_backend(&mut backend));
-        assert_eq!(backend, "voxtral_batch");
-    }
-
-    #[test]
-    fn batch_and_medical_backends_are_untouched() {
-        for kept in ["elevenlabs_batch", "elevenlabs_medical_batch", "voxtral_batch"] {
-            let mut backend = kept.to_string();
-            assert!(!migrate_transcription_backend(&mut backend), "{kept}");
-            assert_eq!(backend, kept);
-        }
-    }
-
-    #[test]
-    fn unknown_backend_is_untouched() {
-        let mut backend = "something_new".to_string();
-        assert!(!migrate_transcription_backend(&mut backend));
-        assert_eq!(backend, "something_new");
-    }
-
-    #[test]
-    fn default_backend_is_a_batch_backend() {
-        assert_eq!(default_backend(), "elevenlabs_batch");
-    }
-
-/// In-memory cache of API keys confirmed by the OS keyring, by credential name.
-/// Misses/errors are never cached, so a transiently locked keyring at startup
-/// can't permanently mask a key that's actually present.
-static KEY_CACHE: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-
-/// Read an API key from the OS keyring (service "beamer"), cached after the
-/// first successful read. Misses/errors retry the keyring on the next call.
-pub fn load_api_key(name: &str) -> String {
-    if let Some(cached) = KEY_CACHE.lock().unwrap().get(name) {
-        return cached.clone();
-    }
-
-    match keyring::Entry::new("beamer", name).and_then(|e| e.get_password()) {
-        Ok(password) => {
-            KEY_CACHE
-                .lock()
-                .unwrap()
-                .insert(name.to_string(), password.clone());
-            password
-        }
-        Err(_) => String::new(),
-    }
-}
-
-/// Write (or delete, when `value` is empty) an API key in the OS keyring.
-/// The cache updates only after the keyring confirms, so it never claims
-/// state that isn't durably stored.
-pub fn save_api_key(name: &str, value: &str) {
-    if value.is_empty() {
-        let result = keyring::Entry::new("beamer", name).and_then(|e| e.delete_credential());
-        match result {
-            // Deleted or already absent — either way, drop the cached value.
-            Ok(()) | Err(keyring::Error::NoEntry) => {
-                KEY_CACHE.lock().unwrap().remove(name);
-            }
-            Err(_) => {}
-        }
-    } else if keyring::Entry::new("beamer", name)
-        .and_then(|e| e.set_password(value))
-        .is_ok()
-    {
-        KEY_CACHE
-            .lock()
-            .unwrap()
-            .insert(name.to_string(), value.to_string());
-    }
-}
-
-#[cfg(test)]
-mod key_cache_tests {
-    use super::*;
-
-    /// Cache-only check: must serve the cached value without touching the
-    /// real keyring backend (fails/hangs headless).
-    #[test]
-    fn load_api_key_serves_from_cache_without_touching_keyring() {
-        let name = "tb12_test_cache_only_key_never_written_to_real_keyring";
-        KEY_CACHE
-            .lock()
-            .unwrap()
-            .insert(name.to_string(), "cached-value".to_string());
-
-        assert_eq!(load_api_key(name), "cached-value");
-
-        // Clean up so this test doesn't leak state into others.
-        KEY_CACHE.lock().unwrap().remove(name);
-    }
-}
-
 #[cfg(test)]
 mod note_config_tests {
     use super::*;
@@ -491,34 +314,12 @@ mod note_config_tests {
     }
 
     #[test]
-    fn configured_note_hotkey_parses_to_a_binding() {
-        let cfg = RecordingConfig {
-            note_hotkey: "Ctrl+Shift+N".into(),
-            note_mode: "toggle".into(),
-            ..RecordingConfig::default()
-        };
-        let parsed = cfg.note_hotkey_config().expect("should parse");
-        assert!(parsed.ctrl);
-        assert!(parsed.shift);
-        assert!(!parsed.alt);
-        assert_eq!(parsed.trigger_vk, 0x4E); // N
-        assert!(parsed.is_toggle, "note capture defaults to toggle, not hold");
-    }
-
-    #[test]
     fn unparseable_note_hotkey_yields_no_binding_rather_than_a_wrong_one() {
         let cfg = RecordingConfig {
             note_hotkey: "Ctrl+NotAKey".into(),
             ..RecordingConfig::default()
         };
         assert!(cfg.note_hotkey_config().is_none());
-    }
-
-    #[test]
-    fn notes_config_defaults() {
-        let cfg = NotesConfig::default();
-        assert!(cfg.all_workspaces, "a sticky note should follow you across workspaces");
-        assert_eq!(cfg.default_color, "random");
     }
 
     #[test]

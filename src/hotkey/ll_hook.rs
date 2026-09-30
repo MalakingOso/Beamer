@@ -238,7 +238,7 @@ pub fn start_ll_hook(
     let thread_shared = shared.clone();
     let (tid_tx, tid_rx) = std::sync::mpsc::channel();
 
-    std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("ll-keyboard-hook".into())
         .spawn(move || {
             HOOK_STATE.with(|cell| {
@@ -251,8 +251,15 @@ pub fn start_ll_hook(
             });
 
             unsafe {
-                let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0)
-                    .expect("Failed to install keyboard hook");
+                // On failure the thread just ends: dropping `tid_tx` tells the
+                // caller, which keeps running with hotkeys dead.
+                let hook = match SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0) {
+                    Ok(hook) => hook,
+                    Err(e) => {
+                        tracing::error!("Failed to install the keyboard hook: {e}");
+                        return;
+                    }
+                };
 
                 thread_shared.thread_id.store(GetCurrentThreadId(), Ordering::Relaxed);
                 tid_tx.send(GetCurrentThreadId()).ok();
@@ -266,11 +273,24 @@ pub fn start_ll_hook(
             HOOK_STATE.with(|cell| {
                 *cell.borrow_mut() = None;
             });
-        })
-        .expect("Failed to spawn hook thread");
+        });
 
-    let thread_id = tid_rx.recv().expect("Hook thread failed to start");
-    shared.thread_id.store(thread_id, Ordering::Relaxed);
+    // Either failure leaves an inert handle (`Drop` posts to thread 0, a
+    // no-op) rather than taking the whole app down with it.
+    let started = match spawned {
+        Ok(_) => tid_rx.recv().ok(),
+        Err(e) => {
+            tracing::error!("Failed to spawn the keyboard hook thread: {e}");
+            None
+        }
+    };
+    match started {
+        Some(thread_id) => shared.thread_id.store(thread_id, Ordering::Relaxed),
+        None => crate::orchestrator::notify::show_notification(
+            "Beamer",
+            "Hotkeys are unavailable: the keyboard hook could not start. Restart Beamer.",
+        ),
+    }
 
     HotkeyHandle { shared }
 }

@@ -144,11 +144,14 @@ pub(super) fn setup_recording_pill(
             } else {
                 pill_was_shown.set(false);
                 let _ = ctx.webview.evaluate_script("beamerSetState('idle');");
-                // 200ms matches beamerSetState's exit animation; hide as the fade ends.
+                // 200ms matches beamerSetState's exit animation; hide as the fade
+                // ends — unless a new recording showed the pill again meanwhile.
                 let ctx_clone = ctx.clone();
                 spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                    ctx_clone.set_visible(false);
+                    if !*pill_was_shown.peek() {
+                        ctx_clone.set_visible(false);
+                    }
                 });
             }
         }

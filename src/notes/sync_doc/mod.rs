@@ -418,10 +418,10 @@ fn is_transient_rename_error(e: &std::io::Error) -> bool {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        // `rename(2)` is atomic: transient failures are vanishingly rare, but
-        // the retry costs nothing when (as usual) the first attempt succeeds.
+        // `rename(2)` has no sharing violations: a failure is permanent, and
+        // retrying would only sleep on the UI thread.
         let _ = e;
-        true
+        false
     }
 }
 

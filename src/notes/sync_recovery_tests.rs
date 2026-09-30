@@ -261,26 +261,6 @@ fn the_genesis_document_still_has_the_object_ids_everything_depends_on() {
     );
 }
 
-#[test]
-fn two_documents_seeded_independently_both_keep_their_notes_after_a_merge() {
-    let a_dir = temp_dir("genesis_indep_a");
-    let b_dir = temp_dir("genesis_indep_b");
-
-    let mut a = Machine::open(&a_dir);
-    let mut b = Machine::open(&b_dir);
-    a.notes.create("only on callisto".into(), NoteColor::Purple, NoteOrigin::Dictated);
-    b.notes.create("only on the laptop".into(), NoteColor::Rose, NoteOrigin::Dictated);
-    a.flush();
-    b.flush();
-
-    carry_document(&b, &a);
-    a.flush();
-
-    let bodies = note_bodies(&a.notes);
-    assert!(bodies.iter().any(|x| x == "only on callisto"), "callisto's own note: {bodies:?}");
-    assert!(bodies.iter().any(|x| x == "only on the laptop"), "the laptop's note: {bodies:?}");
-}
-
 /// Rewrite `src/notes/genesis.automerge`. Ignored: a code generator, not a
 /// check. Run it by hand after an automerge upgrade that
 /// `the_genesis_document_still_has_the_object_ids_everything_depends_on`

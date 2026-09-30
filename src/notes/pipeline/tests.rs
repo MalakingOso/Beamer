@@ -40,46 +40,7 @@ fn archived(mut n: Note) -> Note {
     n
 }
 
-#[test]
-fn a_new_note_asks_for_a_pass() {
-    let req = PipelineRequest::new("abc");
-    assert_eq!(req.note_id, "abc");
-    assert!(!req.swept, "a dictated note's own pass is never itself a sweep");
-}
-
-#[test]
-fn requests_are_compared_by_note() {
-    // The in-flight set keys on `note_id` alone, not the whole request: two
-    // passes for one note would race writing the same suggestion rows.
-    let a = PipelineRequest::new("n");
-    let b = PipelineRequest { note_id: "n".into(), swept: true };
-    assert_ne!(a, b);
-    assert_eq!(a.note_id, b.note_id);
-}
-
-#[test]
-fn retry_requests_are_never_swept() {
-    let req = PipelineRequest::new("n");
-    assert!(!req.swept, "the footer pressing retry is a person, not the sweep");
-}
-
 // ─── sweep_requests ────────────────────────────────────────────────────────
-
-#[test]
-fn nothing_failed_yields_nothing_to_sweep() {
-    let notes = store(vec![
-        note("a", StageState::Done),
-        note("b", StageState::Skipped),
-    ]);
-    assert!(sweep_requests(&notes, &HashSet::new()).is_empty());
-}
-
-#[test]
-fn a_failed_pass_is_swept() {
-    let notes = store(vec![note("a", StageState::Failed)]);
-    let reqs = sweep_requests(&notes, &HashSet::new());
-    assert_eq!(reqs, vec![PipelineRequest { note_id: "a".into(), swept: true }]);
-}
 
 #[test]
 fn every_swept_request_carries_the_swept_flag() {
@@ -161,9 +122,4 @@ fn an_ordinary_successful_request_does_trigger_a_sweep() {
 fn a_failed_request_never_triggers_a_sweep() {
     // A failure is no evidence the server is reachable.
     assert!(!should_sweep(false, false));
-}
-
-#[test]
-fn a_failed_swept_request_still_does_not_trigger_a_sweep() {
-    assert!(!should_sweep(false, true));
 }

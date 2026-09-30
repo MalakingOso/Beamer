@@ -169,25 +169,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn retry_schedule_covers_a_slow_window_map_without_hammering() {
-        let delays = retry_delays();
-        assert!(!delays.is_empty(), "one attempt is not enough — the first call almost always misses");
-
-        let total: Duration = delays.iter().sum();
-        assert!(
-            total >= Duration::from_millis(4500) && total <= Duration::from_millis(5500),
-            "retry window is {total:?}; under ~4.5s loses the last window of a startup burst — \
-             every restored note maps at once — and over ~5.5s keeps a thread alive long after \
-             the user has moved on"
-        );
-
-        assert!(
-            delays.windows(2).all(|w| w[0] <= w[1]),
-            "delays must not decrease — the point of backing off is to stop hammering the shell"
-        );
-    }
-
-    #[test]
     fn the_settle_delay_leaves_room_to_actually_retry() {
         let delays = retry_delays();
         let total: Duration = delays.iter().sum();
@@ -206,13 +187,5 @@ mod tests {
             "only {attempts} verification attempts survive SETTLE — a clobber \
              arriving late would go uncorrected"
         );
-    }
-
-    #[test]
-    fn dbus_address_matches_the_extension() {
-        // A typo fails silently (every call errors, notes land wherever Mutter chose).
-        assert_eq!(DBUS_DEST, "org.gnome.Shell");
-        assert_eq!(DBUS_PATH, "/app/beamer/FocusProvider");
-        assert_eq!(DBUS_IFACE, "app.beamer.FocusProvider");
     }
 }

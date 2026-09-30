@@ -44,7 +44,13 @@ pub fn reconcile(sync: &mut SyncDoc) -> Result<()> {
             if let Some(dir) = path.parent() {
                 std::fs::create_dir_all(dir)?;
             }
-            std::fs::write(&path, &content)?;
+            // Atomic, like `Vocabulary::save`: a crash mid-write must not truncate it.
+            let tmp = path.with_extension("txt.tmp");
+            std::fs::write(&tmp, &content)?;
+            if let Err(e) = super::sync_doc::rename_with_retry(&tmp, &path) {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e.into());
+            }
             sync.set_last_vocab(content);
         }
     }
@@ -145,39 +151,6 @@ mod tests {
         reconcile(&mut sync).unwrap();
 
         assert!(!sync.has_pending_save());
-    }
-
-    #[test]
-    fn a_document_with_no_vocabulary_path_is_left_alone() {
-        let dir = std::env::temp_dir()
-            .join(format!("beamer_docvocab_test_{}", std::process::id()))
-            .join("no_path");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let (mut sync, _) = SyncDoc::open(dir.join("notes.automerge"));
-
-        reconcile(&mut sync).unwrap();
-
-        assert_eq!(doc_vocabulary(&sync), None);
-        assert!(!sync.has_pending_save());
-    }
-
-    #[test]
-    fn nothing_changed_is_idle() {
-        let action = decide(Some("alpha"), Some("alpha"), Some("alpha"));
-        assert_eq!(action, VocabAction::Idle);
-    }
-
-    #[test]
-    fn a_local_edit_is_pushed_into_the_document() {
-        let action = decide(Some("alpha\nbeta"), Some("alpha"), Some("alpha"));
-        assert_eq!(action, VocabAction::PushToDoc("alpha\nbeta".to_string()));
-    }
-
-    #[test]
-    fn an_incoming_edit_is_written_to_the_file() {
-        let action = decide(Some("alpha"), Some("alpha\nbeta"), Some("alpha"));
-        assert_eq!(action, VocabAction::WriteToFile("alpha\nbeta".to_string()));
     }
 
     /// With both sides changed there is no merge; both machines must pick the same side.

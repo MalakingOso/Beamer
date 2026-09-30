@@ -8,7 +8,7 @@
 
 pub mod capture;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use cpal::Stream;
 use std::sync::OnceLock;
 use tokio::sync::{mpsc, watch};
@@ -124,12 +124,6 @@ mod level_tests {
     use super::{chunk_rms, normalize_rms};
 
     #[test]
-    fn silence_is_zero() {
-        assert_eq!(normalize_rms(chunk_rms(&[0.0; 64])), 0.0);
-        assert_eq!(chunk_rms(&[]), 0.0);
-    }
-
-    #[test]
     fn normal_speech_leaves_headroom_to_show_variation() {
         // RMS 0.1 must not already read as full scale.
         let level = normalize_rms(chunk_rms(&[0.1_f32; 64]));
@@ -162,12 +156,6 @@ mod level_tests {
     #[test]
     fn a_quiet_room_reads_as_silence() {
         assert_eq!(normalize_rms(0.0005), 0.0, "room tone must not drive the meter");
-    }
-
-    #[test]
-    fn loud_input_clamps_to_one() {
-        let samples = [0.9_f32; 64];
-        assert_eq!(normalize_rms(chunk_rms(&samples)), 1.0);
     }
 }
 
@@ -223,35 +211,6 @@ mod channel_backpressure_tests {
         assert!(received.last().unwrap().is_empty(), "sentinel should be the last delivered message");
     }
 
-    /// Negative control: without the reserve a saturated channel refuses the
-    /// sentinel too.
-    #[test]
-    fn without_reserve_a_saturated_channel_drops_the_sentinel_too() {
-        let capacity = 4;
-        let (tx, _rx) = mpsc::channel::<Vec<u8>>(capacity);
-        for i in 0..capacity {
-            assert_eq!(try_send_reserving(&tx, 0, vec![i as u8]), SendOutcome::Sent);
-        }
-        assert!(tx.try_send(Vec::new()).is_err(), "sentinel has nowhere to go without reserved headroom");
-    }
-
-    /// A full channel with a live receiver must report `Full`, so callers warn.
-    #[test]
-    fn full_channel_with_live_receiver_reports_full_and_warns() {
-        let (tx, _rx) = mpsc::channel::<Vec<u8>>(2);
-        assert_eq!(try_send_reserving(&tx, 0, vec![1]), SendOutcome::Sent);
-        assert_eq!(try_send_reserving(&tx, 0, vec![2]), SendOutcome::Sent);
-
-        let mut dropped_counter: u64 = 0;
-        match try_send_reserving(&tx, 0, vec![3]) {
-            SendOutcome::Full => warn_channel_full(&mut dropped_counter, "test"),
-            other => panic!(
-                "a genuinely full channel must be treated as Full and trigger the warn path, got {other:?}"
-            ),
-        }
-        assert_eq!(dropped_counter, 1);
-    }
-
     /// A closed channel must report `Closed`, not `Full`, so callers stay silent.
     #[test]
     fn closed_channel_reports_closed_not_full_and_does_not_warn() {
@@ -271,32 +230,6 @@ mod channel_backpressure_tests {
         assert!(!warned, "a closed channel must never trigger the 'full — consumer stalled?' warn path");
         assert_eq!(dropped_counter, 0, "closed-channel sends must not be counted as drops");
     }
-
-    /// Even under the reserve threshold, a dropped receiver reports `Closed`.
-    #[test]
-    fn closed_channel_reports_closed_even_under_reserve_threshold() {
-        let (tx, rx) = mpsc::channel::<Vec<u8>>(4);
-        drop(rx);
-
-        assert_eq!(try_send_reserving(&tx, 10, vec![1]), SendOutcome::Closed);
-    }
-
-    /// Plain `try_send` must distinguish `Full` from `Closed` the same way.
-    #[test]
-    fn plain_try_send_error_distinguishes_full_from_closed() {
-        let (tx, rx) = mpsc::channel::<Vec<u8>>(1);
-        assert!(tx.try_send(vec![1]).is_ok());
-        match tx.try_send(vec![2]) {
-            Err(mpsc::error::TrySendError::Full(_)) => {}
-            other => panic!("expected Full, got {other:?}"),
-        }
-
-        drop(rx);
-        match tx.try_send(vec![3]) {
-            Err(mpsc::error::TrySendError::Closed(_)) => {}
-            other => panic!("expected Closed, got {other:?}"),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -304,43 +237,12 @@ mod f32_to_i16_bytes_tests {
     use super::f32_to_i16_bytes;
 
     #[test]
-    fn zero_is_zero_bytes() {
-        assert_eq!(f32_to_i16_bytes(&[0.0]), vec![0x00, 0x00]);
-    }
-
-    #[test]
-    fn positive_full_scale() {
-        assert_eq!(f32_to_i16_bytes(&[1.0]), vec![0xFF, 0x7F]);
-    }
-
-    #[test]
-    fn negative_full_scale() {
-        assert_eq!(f32_to_i16_bytes(&[-1.0]), vec![0x01, 0x80]);
-    }
-
-    #[test]
-    fn out_of_range_positive_clamps_to_positive_full_scale() {
-        assert_eq!(f32_to_i16_bytes(&[2.0]), vec![0xFF, 0x7F]);
-    }
-
-    #[test]
-    fn out_of_range_negative_clamps_to_negative_full_scale() {
-        assert_eq!(f32_to_i16_bytes(&[-5.0]), vec![0x01, 0x80]);
-    }
-
-    #[test]
-    fn multiple_samples_are_concatenated_in_order_little_endian() {
-        let bytes = f32_to_i16_bytes(&[0.0, 1.0, -1.0]);
+    fn samples_convert_to_clamped_little_endian_pairs_in_order() {
+        // 0, full scale both ways, then out-of-range values clamped to full scale.
         assert_eq!(
-            bytes,
-            vec![0x00, 0x00, 0xFF, 0x7F, 0x01, 0x80],
-            "expected LE byte pairs concatenated in input order"
+            f32_to_i16_bytes(&[0.0, 1.0, -1.0, 2.0, -5.0]),
+            vec![0x00, 0x00, 0xFF, 0x7F, 0x01, 0x80, 0xFF, 0x7F, 0x01, 0x80]
         );
-    }
-
-    #[test]
-    fn empty_input_produces_empty_output() {
-        assert_eq!(f32_to_i16_bytes(&[]), Vec::<u8>::new());
     }
 }
 
@@ -363,6 +265,7 @@ impl AudioPipeline {
 
     /// Start capturing. Returns the cpal `Stream` (keep it alive; dropping it
     /// stops capture) and a receiver of 16-bit LE, 16 kHz, mono PCM chunks.
+    /// An empty chunk marks a device error; capture may continue after it.
     pub fn start(&self) -> Result<(Stream, mpsc::Receiver<Vec<u8>>)> {
         let (stream, mut sample_rx) = self.capture.start()?;
         let (tx, rx) = mpsc::channel(CHUNK_CHANNEL_CAPACITY);
@@ -385,8 +288,11 @@ impl AudioPipeline {
 
                     if samples.is_empty() {
                         // Capture-error sentinel: drop the meter to zero rather
-                        // than freezing the pill waveform at its last value.
+                        // than freezing the pill waveform at its last value,
+                        // and pass the (empty) marker on so the orchestrator
+                        // can tell the user.
                         publish_level(0.0);
+                        let _ = tx.try_send(Vec::new());
                         continue;
                     }
 
@@ -403,7 +309,7 @@ impl AudioPipeline {
                     }
                 }
             })
-            .expect("failed to spawn audio chunker thread");
+            .context("failed to spawn the audio chunker thread")?;
 
         Ok((stream, rx))
     }

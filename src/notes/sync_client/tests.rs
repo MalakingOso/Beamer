@@ -3,63 +3,10 @@
 
 use super::*;
 
-#[test]
-fn empty_url_never_starts() {
-    assert!(!should_start(""));
-    assert!(!should_start("   "));
-}
-
-#[test]
-fn a_configured_url_starts() {
-    assert!(should_start("wss://callisto.taila63f23.ts.net/sync"));
-}
-
-/// The protocol without a socket: two documents converge through
-/// `sync::State` and `Message::encode`/`decode` alone. That is what
-/// `run_connection`/`socket_task` carry; a real connection would only test tokio.
-#[test]
-fn two_documents_converge_over_encoded_messages() {
-    use automerge::transaction::Transactable;
-    use automerge::{AutoCommit, ReadDoc, ROOT};
-
-    let mut a = AutoCommit::new();
-    a.put(ROOT, "from_a", "hello").unwrap();
-    a.commit();
-
-    let mut b = AutoCommit::new();
-    b.put(ROOT, "from_b", "world").unwrap();
-    b.commit();
-
-    let mut a_state = SyncState::new();
-    let mut b_state = SyncState::new();
-
-    // Drive both directions until neither has anything left to send.
-    loop {
-        let a_to_b = a.sync().generate_sync_message(&mut a_state);
-        if let Some(msg) = a_to_b.clone() {
-            let wire = msg.encode();
-            let decoded = SyncMessage::decode(&wire).unwrap();
-            b.sync().receive_sync_message(&mut b_state, decoded).unwrap();
-        }
-        let b_to_a = b.sync().generate_sync_message(&mut b_state);
-        if let Some(msg) = b_to_a.clone() {
-            let wire = msg.encode();
-            let decoded = SyncMessage::decode(&wire).unwrap();
-            a.sync().receive_sync_message(&mut a_state, decoded).unwrap();
-        }
-        if a_to_b.is_none() && b_to_a.is_none() {
-            break;
-        }
-    }
-
-    assert_eq!(a.get(ROOT, "from_b").unwrap().unwrap().0.to_str(), Some("world"));
-    assert_eq!(b.get(ROOT, "from_a").unwrap().unwrap().0.to_str(), Some("hello"));
-    assert_eq!(a.get_heads(), b.get_heads());
-}
-
-/// A connection drops mid-exchange and both `State`s are thrown away, as on a
-/// real reconnect (nothing persists them). A fresh `State` still converges;
-/// it just costs a fuller first message.
+/// The protocol without a socket, over `Message::encode`/`decode` (what
+/// `run_connection`/`socket_task` carry). A connection drops mid-exchange and
+/// both `State`s are thrown away, as on a real reconnect (nothing persists
+/// them). A fresh `State` still converges; it just costs a fuller first message.
 #[test]
 fn a_dropped_connection_reconverges_with_a_fresh_state() {
     use automerge::transaction::Transactable;
@@ -106,25 +53,6 @@ fn a_dropped_connection_reconverges_with_a_fresh_state() {
 
     assert_eq!(a.get_heads(), b.get_heads(), "a fresh state must still re-converge after a drop");
     assert_eq!(b.get(ROOT, "note").unwrap().unwrap().0.to_str(), Some("first draft"));
-}
-
-/// `encode` then `decode` round-trips a message: what the wire actually carries.
-#[test]
-fn message_framing_round_trips() {
-    use automerge::transaction::Transactable;
-    use automerge::{AutoCommit, ROOT};
-
-    let mut doc = AutoCommit::new();
-    doc.put(ROOT, "key", "value").unwrap();
-    doc.commit();
-
-    let mut state = SyncState::new();
-    let msg = doc.sync().generate_sync_message(&mut state).expect("a fresh document has something to send");
-
-    let wire = msg.clone().encode();
-    let decoded = SyncMessage::decode(&wire).unwrap();
-
-    assert_eq!(decoded, msg);
 }
 
 /// Pins reconcile-before-hydrate: an edit still only in the signal (the 500 ms

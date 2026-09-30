@@ -342,9 +342,10 @@ never had a human ask for, the origin gate belongs on `sweep_requests` too.
 ## The pipeline coroutine
 
 **It lives in `App()`, not in the window that asked for it.** Dioxus drops a
-spawned task when its owning scope drops (`dioxus-core-0.7.9/src/tasks.rs:159`),
-so a pass started from a sticky's scope would be **silently cancelled** by
-closing that note mid-flight. `App()`'s scope outlives every note window.
+spawned task when its owning scope drops (see `Scope::spawn`'s doc comment in
+dioxus-core's `tasks.rs`), so a pass started from a sticky's scope would be
+**silently cancelled** by closing that note mid-flight. `App()`'s scope
+outlives every note window.
 
 ⚠️ Dioxus `spawn`, never `tokio::spawn` — desktop's tokio runtime is
 multi-threaded and `Signal`'s generational-box arena is thread-local.

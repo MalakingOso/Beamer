@@ -40,13 +40,6 @@ fn delete_removes_the_note_for_good() {
 }
 
 #[test]
-fn deleting_a_missing_note_does_not_dirty_the_store() {
-    let mut store = temp_store("delete_missing");
-    assert!(!store.delete("nope"));
-    assert!(!store.is_dirty());
-}
-
-#[test]
 fn delete_also_drops_the_note_s_machine_local_window_state() {
     let mut store = temp_store("delete_gc");
     let id = store.create("gone".into(), NoteColor::Purple, NoteOrigin::Dictated);

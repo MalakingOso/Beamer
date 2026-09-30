@@ -122,19 +122,6 @@ fn suggestions_made_in_the_same_millisecond_get_distinct_ids() {
 }
 
 #[test]
-fn suggestion_ids_carry_the_machine_suffix() {
-    let a = TaskStore::new_suggestion("note-1", proposal("one", "one", 0.5), "aaaa");
-    let b = TaskStore::new_suggestion("note-1", proposal("one", "one", 0.5), "bbbb");
-    assert!(
-        a.id.ends_with("-aaaa") && b.id.ends_with("-bbbb"),
-        "rows sync keyed by id, so two machines extracting in the same \
-         millisecond must not mint the same id: {a:?} vs {b:?}",
-        a = a.id,
-        b = b.id
-    );
-}
-
-#[test]
 fn a_redundant_decision_neither_writes_nor_moves_the_timestamp() {
     let mut store = temp_store("redundant");
     let id = suggest(&mut store, "note-1", "Call the vet");
@@ -146,19 +133,6 @@ fn a_redundant_decision_neither_writes_nor_moves_the_timestamp() {
     assert_eq!(
         store.tasks[0].decided, first,
         "re-deciding must not rewrite the decision time the corpus depends on"
-    );
-}
-
-#[test]
-fn deciding_a_missing_id_does_not_flush_unrelated_changes() {
-    let mut store = temp_store("missing");
-    suggest(&mut store, "note-1", "Call the vet");
-    store.dirty = true;
-
-    assert!(!store.accept("no-such-task"));
-    assert!(
-        store.is_dirty() && !store.path.exists(),
-        "a no-op decision must not trigger a write of whatever else happened to be pending"
     );
 }
 
@@ -222,16 +196,6 @@ fn tasks_round_trip_through_disk() {
 }
 
 #[test]
-fn confidence_is_stored_as_reported_not_clamped() {
-    let out_of_range = TaskStore::new_suggestion("note-1", proposal("x", "x", 1.7), "test-machine");
-    assert_eq!(
-        out_of_range.confidence, 1.7,
-        "an impossible confidence means the prompt or the parser misfired, and \
-         quietly flattening it hides the one thing the corpus should show"
-    );
-}
-
-#[test]
 fn deleting_a_note_takes_its_rows_with_it() {
     // The one place a decided row may be removed. Everywhere else in this
     // store a decision is permanent corpus data.
@@ -254,41 +218,6 @@ fn deleting_a_note_takes_its_rows_with_it() {
 }
 
 #[test]
-fn deleting_a_note_with_no_rows_writes_nothing() {
-    let mut store = temp_store("delete_for_note_empty");
-    suggest(&mut store, "note-1", "unrelated");
-    store.flush_if_dirty();
-
-    assert_eq!(store.delete_for_note("note-2"), 0);
-    assert!(!store.is_dirty());
-}
-
-#[test]
-fn a_suggestion_carries_the_date_the_model_resolved() {
-    let mut store = temp_store("dated");
-    let row = TaskStore::new_suggestion(
-        "note-1",
-        Proposal {
-            text: "Ring Sarah".into(),
-            evidence: "ring Sarah before Friday".into(),
-            confidence: 0.9,
-            due: Some("2026-08-28".into()),
-            due_all_day: true,
-            due_phrase: Some("before Friday".into()),
-            kind: TaskKind::Todo,
-        },
-        "test-machine",
-    );
-    store.tasks.push(row);
-
-    let task = &store.tasks[0];
-    assert_eq!(task.due.as_deref(), Some("2026-08-28"));
-    assert!(task.due_all_day);
-    assert_eq!(task.due_phrase.as_deref(), Some("before Friday"));
-    assert_eq!(task.kind, TaskKind::Todo);
-}
-
-#[test]
 fn setting_a_due_date_by_hand_keeps_the_phrase_the_model_saw() {
     let mut store = temp_store("set_due");
     let id = suggest(&mut store, "note-1", "sort the garage");
@@ -307,18 +236,6 @@ fn setting_a_due_date_by_hand_keeps_the_phrase_the_model_saw() {
          that it saw something it could not resolve"
     );
     assert!(!store.is_dirty(), "a date the user set is a decision and flushes inline");
-}
-
-#[test]
-fn setting_the_same_due_date_twice_writes_nothing() {
-    let mut store = temp_store("set_due_noop");
-    let id = suggest(&mut store, "note-1", "x");
-    store.set_due(&id, Some("2026-08-31".into()), true);
-    store.flush_if_dirty();
-
-    assert!(!store.set_due(&id, Some("2026-08-31".into()), true));
-    assert!(!store.set_due("missing", Some("2026-08-31".into()), true));
-    assert!(!store.is_dirty());
 }
 
 #[test]

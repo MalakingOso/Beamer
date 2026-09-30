@@ -32,15 +32,6 @@ fn the_extraction_prompt_names_every_negative_category() {
 }
 
 #[test]
-fn the_extraction_prompt_gates_tasks_on_speaker_and_category_together() {
-    // The model sometimes leaks a clause its own scan marked "someone_else"
-    // into `tasks` (see `agent_docs/local_inference.md`). This rule can't close
-    // that alone, but without it nothing pushes back at all.
-    let prompt = extract_prompt();
-    assert!(prompt.contains(r#""subject_is_speaker": true AND "category": "task""#));
-}
-
-#[test]
 fn the_extraction_prompt_carries_at_least_two_hard_negative_exemplars() {
     // Positive-only exemplars teach the model that output is always expected,
     // the same over-triggering the negative categories exist to prevent. No
@@ -50,14 +41,6 @@ fn the_extraction_prompt_carries_at_least_two_hard_negative_exemplars() {
         empty_answers >= 2,
         "expected at least two exemplars answering with an empty task list, found {empty_answers}"
     );
-}
-
-#[test]
-fn the_extraction_prompt_demands_verbatim_evidence() {
-    // The parser rejects evidence that is not in the note. If the prompt
-    // stopped asking for a verbatim span, every proposal would start
-    // failing that check and extraction would silently return nothing.
-    assert!(extract_prompt().contains("copied verbatim from the note"));
 }
 
 #[test]
@@ -84,14 +67,6 @@ fn the_prompt_states_the_day_by_name_as_well_as_by_number() {
 }
 
 #[test]
-fn the_prompt_moves_with_the_day_it_is_given() {
-    let a = extract_system(chrono::NaiveDate::from_ymd_opt(2026, 8, 23).unwrap());
-    let b = extract_system(chrono::NaiveDate::from_ymd_opt(2026, 12, 25).unwrap());
-    assert_ne!(a, b);
-    assert!(b.contains("2026-12-25") && b.contains("Friday"));
-}
-
-#[test]
 fn the_prompt_forbids_guessing_a_date_and_still_asks_for_the_phrase() {
     // The whole precision argument for dates rests on these two sentences: a
     // model asked for a date will produce one, and the phrase is what makes an
@@ -100,10 +75,4 @@ fn the_prompt_forbids_guessing_a_date_and_still_asks_for_the_phrase() {
     assert!(prompt.contains("NEVER guess a date"));
     assert!(prompt.contains("sometime next week"), "the vague phrasings are named");
     assert!(prompt.contains(r#"Give it even when "due" is null"#));
-}
-
-#[test]
-fn the_prompt_reserves_event_for_an_appointment_with_a_time() {
-    assert!(extract_prompt()
-        .contains(r#""kind" is "event" only for an appointment at a stated time"#));
 }

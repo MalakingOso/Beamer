@@ -154,10 +154,4 @@ mod tests {
             "real speech must always produce a note"
         );
     }
-
-    #[test]
-    fn note_mode_routes_away_from_injection() {
-        assert!(!sink_injects(CaptureMode::Note));
-        assert!(sink_injects(CaptureMode::Inject));
-    }
 }

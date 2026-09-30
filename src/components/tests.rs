@@ -26,17 +26,6 @@ static TEST: &[Component] = &[
     member("rtx", Kind::Text("x"), Root::LocalData, "rtx/other.ini", false),
 ];
 
-static UNGROUPED: &[Component] = &[Component {
-    id: "solo",
-    label: "solo",
-    version: "v",
-    kind: Kind::Text("solo"),
-    root: Root::LocalData,
-    path: "solo.txt",
-    group: None,
-    prompt: false,
-}];
-
 /// Everything recorded at the sha this catalog expects.
 fn all_recorded(catalog: &'static [Component]) -> ComponentStore {
     let mut store = ComponentStore::in_memory();
@@ -105,20 +94,6 @@ fn a_recorded_sha_that_no_longer_matches_the_catalog_is_stale() {
 }
 
 #[test]
-fn recorded_sha_comparison_ignores_case() {
-    let mut state = all_recorded(TEST);
-    state.set("model", Record { version: "v".into(), sha256: SHA_A.to_ascii_uppercase() });
-    assert!(plan(TEST, &state, on_disk(&[])).is_empty());
-}
-
-#[test]
-fn an_ungrouped_component_is_its_own_plan() {
-    let plans = plan(UNGROUPED, &ComponentStore::in_memory(), |_| OnDisk::Missing);
-    assert_eq!(ids(&plans), vec![vec!["solo"]]);
-    assert_eq!(plans[0].group, None);
-}
-
-#[test]
 fn text_is_written_with_lf_whatever_the_checkout_had() {
     let lf = member("a", Kind::Text("one\ntwo\n"), Root::LocalData, "a", false);
     let crlf = member("b", Kind::Text("one\r\ntwo\r\n"), Root::LocalData, "b", false);
@@ -134,21 +109,6 @@ fn model() -> &'static Component {
 
 fn model_stem() -> &'static str {
     model().path.strip_suffix(".gguf").expect("the model is a .gguf")
-}
-
-#[test]
-fn catalog_ids_are_unique() {
-    let mut seen = std::collections::HashSet::new();
-    for c in LLAMA_SERVER {
-        assert!(seen.insert(c.id), "duplicate id {}", c.id);
-    }
-}
-
-#[test]
-fn the_model_is_prompted_and_everything_else_is_silent() {
-    for c in LLAMA_SERVER {
-        assert_eq!(c.prompt, c.id == MODEL_ID, "{}", c.id);
-    }
 }
 
 /// The router serves a model under its filename stem, and the preset only

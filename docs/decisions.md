@@ -92,6 +92,19 @@ to the Linux desktop's llama-server over Tailscale rather than shipping a
 second inference stack. Since verified running on real Windows hardware
 (x86_64 and Windows ARM) — see `agent_docs/running_on_bearcave.md`.
 
+## Vocabulary syncs with the notes (2026-08-29)
+
+`vocabulary.txt` used to be machine-local, so a term added on one machine had
+to be retyped on the other. It now rides the same automerge document as the
+notes, as a newline-joined scalar at `ROOT["vocabulary"]` rather than a
+term-keyed map: list order decides which terms reach the API at all (the first
+100), and a map has no order; and `Vocabulary::rename` edits in place, which a
+term-keyed map would turn into remove-then-add. The cost is that concurrent
+edits don't merge — the document wins and the other side retypes — acceptable
+for a small, rarely-edited list. Gated on `config.sync.url` like everything
+else, and `sync_server` never touches it. See `agent_docs/sync.md` ("The
+vocabulary").
+
 ## Extraction moves off callisto onto bearcave itself (2026-09-04)
 
 The "no GPU capable of running the models" premise above turned out to hold
@@ -140,8 +153,8 @@ downgrading leftover `Failed`/`Pending` cleanup stages to `Skipped`; the
 pipeline only visits notes it is asked about, so without that the old failures
 would sit on disk and re-flash on every window open. Per-stage `base_url`
 support and the whole cleanup path are kept intact — bringing S1-mini back
-needs a local s1-mini preset (or a reachable GPU host), not new code. See
-`todo.md`.
+needs a local s1-mini preset (or a reachable GPU host), not new code. (That
+pass has since been deleted outright — see below.)
 
 ## Desktop-level hotkey on GNOME, so RDP chords work (2026-09-11)
 
@@ -182,7 +195,7 @@ sync document alike).
 The shared client code stays. `chat.rs`, its error classification and the
 footer failure message all serve extraction too, so the `failure_message`
 roadmap bullet (unreachable hosts misreported as reachable) survives on
-that code. It was never cleanup-specific.
+that code. It was never cleanup-specific. (Fixed 2026-09-30.)
 
 ## Realtime backends removed, Scribe Medical added (2026-09-27)
 
@@ -214,3 +227,17 @@ no hosting and no exe/manifest skew: changing the model is one entry and a
 release. The server's parts form one all-or-nothing group, so a new preset
 can never go live before the model it names. Big downloads (the model) prompt
 in Settings, except on a fresh install; the rest applies silently.
+
+## Capture decoupled from transcription (2026-09-30)
+
+The 2026-09-26 stability review's top "won't record" suspect: the recording
+loop owned the hotkey receiver while it awaited the upload inline, so a slow
+or stalled request (bounded only by the 480s overall timeout) left the hotkey
+dead, and a press made meanwhile queued up and started a ghost session once
+the upload finished. The orchestrator now runs capture and transcription as
+two loops in one task, joined by a FIFO job queue. Capture always reads the
+hotkey. The worker handles one job at a time, so transcripts are injected in
+the order they were spoken and never interleave. The mic closes when capture
+ends, not after delivery. Capture also ends only once every `RecordStart` has
+been matched by a stop, so tapping the other hotkey mid-note no longer cuts
+the note short.

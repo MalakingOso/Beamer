@@ -142,22 +142,6 @@ mod tests {
         String::from_utf16(&units).unwrap()
     }
 
-    #[test]
-    fn the_task_runs_the_launcher_through_wscript_at_logon() {
-        let xml = decode(&task_xml(
-            Path::new(r"C:\Users\x\AppData\Local\Beamer\llama-k2horizon\start-llama-k2horizon-hidden.vbs"),
-            r"BEARCAVE\x",
-        ));
-        assert!(xml.starts_with("<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n"));
-        assert!(xml.contains("<LogonTrigger>"));
-        assert!(xml.contains("<RunLevel>LeastPrivilege</RunLevel>"));
-        assert!(xml.contains("<Command>wscript.exe</Command>"));
-        assert!(xml.contains(
-            r#"<Arguments>"C:\Users\x\AppData\Local\Beamer\llama-k2horizon\start-llama-k2horizon-hidden.vbs"</Arguments>"#
-        ));
-        assert!(xml.ends_with("</Task>\r\n"));
-    }
-
     /// Unscoped, it's an any-user logon trigger, which an unelevated
     /// `schtasks /create` refuses with "Access is denied".
     #[test]

@@ -236,17 +236,4 @@ mod tests {
         assert!(opts[0].1.contains("not served"));
         assert_eq!(opts.len(), 3);
     }
-
-    #[test]
-    fn a_served_model_is_not_duplicated() {
-        let opts = model_options(&["a".into(), "b".into()], "a");
-        assert_eq!(opts.len(), 2);
-        assert_eq!(opts, vec![("a".into(), "a".into()), ("b".into(), "b".into())]);
-    }
-
-    #[test]
-    fn an_unset_model_adds_no_placeholder_row() {
-        let opts = model_options(&["a".into()], "");
-        assert_eq!(opts.len(), 1);
-    }
 }

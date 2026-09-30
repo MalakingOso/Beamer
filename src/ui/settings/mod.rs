@@ -198,6 +198,7 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                 debug_logging: config.read().injection.debug_logging,
                 on_debug_toggle: move |v: bool| {
                     save_config(config, |c| c.injection.debug_logging = v);
+                    crate::logging::set_debug(v);
                 },
                 status_log: props.status_log,
             }

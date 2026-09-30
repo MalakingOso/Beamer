@@ -18,7 +18,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 /// How long to wait for TCP + TLS to a backend's API host. A stalled connect
-/// would strand the recording loop, which owns the hotkey receiver.
+/// would hold up every transcript queued behind this one.
 pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Ceiling on one batch request, end to end. Generous: it covers uploading a
@@ -42,15 +42,11 @@ mod batch_tests {
     use super::batch_should_retry;
 
     #[test]
-    fn rate_limits_and_server_errors_retry() {
+    fn only_rate_limits_and_server_errors_retry() {
         assert!(batch_should_retry(reqwest::StatusCode::TOO_MANY_REQUESTS));
         assert!(batch_should_retry(reqwest::StatusCode::BAD_GATEWAY));
         assert!(batch_should_retry(reqwest::StatusCode::SERVICE_UNAVAILABLE));
         assert!(batch_should_retry(reqwest::StatusCode::INTERNAL_SERVER_ERROR));
-    }
-
-    #[test]
-    fn client_errors_do_not_retry() {
         assert!(!batch_should_retry(reqwest::StatusCode::BAD_REQUEST));
         assert!(!batch_should_retry(reqwest::StatusCode::UNAUTHORIZED));
         assert!(!batch_should_retry(reqwest::StatusCode::NOT_FOUND));
