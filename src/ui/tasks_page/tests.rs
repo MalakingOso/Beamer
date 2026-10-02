@@ -21,6 +21,7 @@ fn task(note_id: &str, text: &str, created: &str, status: TaskStatus, done: bool
         confidence: 0.9,
         status,
         done,
+        completed: None,
         created: created.to_string(),
         decided: None,
         due: None,

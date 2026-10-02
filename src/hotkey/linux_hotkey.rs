@@ -342,8 +342,13 @@ pub struct HotkeyHandle {
 }
 
 impl HotkeyHandle {
-    pub fn update_configs(&self, inject: HotkeyConfig, note: Option<HotkeyConfig>) {
-        let bindings = build_bindings(inject, note);
+    pub fn update_configs(
+        &self,
+        inject: HotkeyConfig,
+        note: Option<HotkeyConfig>,
+        done: Option<HotkeyConfig>,
+    ) {
+        let bindings = build_bindings(inject, note, done);
         let accels = gnome_grab::accelerators(&bindings);
         *self.bindings.lock().unwrap_or_else(|p| p.into_inner()) = bindings;
         self.reset_flag.store(true, Ordering::Relaxed);
@@ -356,9 +361,10 @@ impl HotkeyHandle {
 pub fn start_ll_hook(
     inject: HotkeyConfig,
     note: Option<HotkeyConfig>,
+    done: Option<HotkeyConfig>,
     tx: UnboundedSender<HotkeyEvent>,
 ) -> HotkeyHandle {
-    let initial = build_bindings(inject, note);
+    let initial = build_bindings(inject, note, done);
     let accels = gnome_grab::accelerators(&initial);
     let bindings = Arc::new(Mutex::new(initial));
     let reset_flag = Arc::new(AtomicBool::new(false));

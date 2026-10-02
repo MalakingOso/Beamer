@@ -94,6 +94,11 @@ pub struct Task {
     /// Only meaningful when `status == Accepted`; a suggestion is not a task yet.
     #[serde(default)]
     pub done: bool,
+    /// RFC3339, when it was ticked done: what puts it on the Done page's day.
+    /// `None` while undone, and for tasks ticked before this field existed or
+    /// by a peer that does not stamp it; those have no day, so they never show.
+    #[serde(default)]
+    pub completed: Option<String>,
     /// RFC3339, when the model proposed it.
     pub created: String,
     /// RFC3339, when the user accepted or dismissed it. The timestamp (paired
@@ -118,6 +123,16 @@ pub struct Task {
 }
 
 impl Task {
+    /// The local calendar day it was completed, if it is done and was stamped.
+    pub fn completed_day(&self) -> Option<NaiveDate> {
+        if !self.done {
+            return None;
+        }
+        DateTime::parse_from_rfc3339(self.completed.as_deref()?)
+            .ok()
+            .map(|dt| dt.with_timezone(&Local).date_naive())
+    }
+
     pub fn due_parsed(&self) -> Option<Due> {
         parse_due(self.due.as_deref()?, self.due_all_day)
     }

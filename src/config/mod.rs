@@ -49,6 +49,12 @@ pub struct RecordingConfig {
     /// "toggle" (default) or "hold". Notes run long; holding a chord throughout is awkward.
     #[serde(default = "default_note_mode")]
     pub note_mode: String,
+    /// Chord logging a spoken line to the Done list. Empty means off.
+    #[serde(default)]
+    pub done_hotkey: String,
+    /// "hold" (default): an accomplishment is one short sentence.
+    #[serde(default = "default_done_mode")]
+    pub done_mode: String,
 }
 
 impl RecordingConfig {
@@ -59,6 +65,14 @@ impl RecordingConfig {
             return None;
         }
         crate::hotkey::HotkeyConfig::parse(&self.note_hotkey, self.note_mode == "toggle")
+    }
+
+    /// Parsed Done-list binding; same rules as [`Self::note_hotkey_config`].
+    pub fn done_hotkey_config(&self) -> Option<crate::hotkey::HotkeyConfig> {
+        if self.done_hotkey.trim().is_empty() {
+            return None;
+        }
+        crate::hotkey::HotkeyConfig::parse(&self.done_hotkey, self.done_mode == "toggle")
     }
 }
 
@@ -139,6 +153,7 @@ fn default_language() -> String { "en".into() }
 fn default_backends() -> Vec<String> { crate::injection::default_backend_names() }
 fn default_paste_shortcut() -> String { "auto".into() }
 fn default_note_mode() -> String { "toggle".into() }
+fn default_done_mode() -> String { "hold".into() }
 fn default_note_color() -> String { "random".into() }
 fn default_true() -> bool { true }
 
@@ -165,6 +180,8 @@ impl Default for RecordingConfig {
             pause_media: false,
             note_hotkey: String::new(),
             note_mode: default_note_mode(),
+            done_hotkey: String::new(),
+            done_mode: default_done_mode(),
         }
     }
 }

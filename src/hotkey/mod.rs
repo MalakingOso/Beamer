@@ -1,5 +1,5 @@
 //! Global hotkeys: the start of the dictation path (**hotkey** → orchestrator →
-//! audio → transcription → injection). Two bindings, dictate and note, each
+//! audio → transcription → injection). Three bindings, dictate, note and done, each
 //! hold-to-talk or toggle, sent to the orchestrator as `HotkeyEvent`s. This file holds
 //! the chord parsing and matching both platform listeners share: `ll_hook.rs`
 //! (Windows) and `linux_hotkey.rs` + `gnome_grab.rs` (Linux).
@@ -13,6 +13,8 @@ pub enum CaptureMode {
     Inject,
     /// Create a sticky note.
     Note,
+    /// Log a line to the Done list (`NoteKind::Accomplishment`).
+    Done,
 }
 
 /// Sent from the hotkey listener to the orchestrator coroutine.
@@ -134,8 +136,8 @@ pub fn key_name_to_vk(name: &str) -> Option<u32> {
 // ─── Shared binding-matching layer ─────────────────────────────────────────
 // Both platform backends match through here so comparison logic can't drift.
 
-/// Exactly two dictation hotkeys: inject and note.
-pub const MAX_BINDINGS: usize = 2;
+/// At most three hotkeys: inject, note and done.
+pub const MAX_BINDINGS: usize = 3;
 
 /// One configured hotkey and the sink it selects.
 #[derive(Clone)]
@@ -160,10 +162,17 @@ pub struct Modifiers {
     pub shift: bool,
 }
 
-pub fn build_bindings(inject: HotkeyConfig, note: Option<HotkeyConfig>) -> Vec<BindingConfig> {
+pub fn build_bindings(
+    inject: HotkeyConfig,
+    note: Option<HotkeyConfig>,
+    done: Option<HotkeyConfig>,
+) -> Vec<BindingConfig> {
     let mut v = vec![BindingConfig { mode: CaptureMode::Inject, config: inject }];
     if let Some(note) = note {
         v.push(BindingConfig { mode: CaptureMode::Note, config: note });
+    }
+    if let Some(done) = done {
+        v.push(BindingConfig { mode: CaptureMode::Done, config: done });
     }
     v
 }

@@ -22,6 +22,25 @@ pub(super) fn should_create_note(text: &str) -> bool {
     !text.trim().is_empty()
 }
 
+/// Log a finished transcript as a Done-list line. Flushes immediately, like
+/// `do_note_capture`: the audio is already gone. No model pass is requested;
+/// an accomplishment is the user's own words, never extracted from.
+pub(super) fn do_done_capture(
+    text: &str,
+    notes: &mut Signal<NoteStore>,
+    tasks: &mut Signal<TaskStore>,
+    status_log: &mut Signal<StatusLog>,
+) -> Option<String> {
+    if !should_create_note(text) {
+        log_status(status_log, LogLevel::Info, "Nothing captured — nothing logged");
+        return None;
+    }
+    let id = notes.write().log_accomplishment(text)?;
+    crate::notes::flush_stores(&mut notes.write(), &mut tasks.write());
+    log_status(status_log, LogLevel::Info, format!("Logged to Done ({} chars)", text.trim().len()));
+    Some(id)
+}
+
 /// Whether this mode's transcript goes to the injection chain.
 pub(super) fn sink_injects(mode: CaptureMode) -> bool {
     matches!(mode, CaptureMode::Inject)
@@ -83,7 +102,9 @@ pub(super) async fn deliver(
     config: &Signal<Config>,
     note_passes: Coroutine<PipelineRequest>,
 ) {
-    if sink_injects(capture_mode) {
+    if capture_mode == CaptureMode::Done {
+        do_done_capture(text, notes, tasks, status_log);
+    } else if sink_injects(capture_mode) {
         do_injection(text, backends, paste_shortcut, last_injection, history, status_log).await;
     } else if let Some(id) =
         do_note_capture(text, notes, tasks, config, status_log, note_passes).await

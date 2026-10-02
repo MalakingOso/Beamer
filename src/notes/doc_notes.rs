@@ -11,7 +11,7 @@ use automerge::{AutoCommit, ObjId, ReadDoc};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use super::model::{Note, NoteColor, NoteOrigin, StageState};
+use super::model::{Note, NoteColor, NoteKind, NoteOrigin, StageState};
 use super::sync_doc::{
     child_map, get_bool, get_str, get_text, put_bool, put_str, put_text, retain_keys, SyncDoc,
     NOTES_KEY,
@@ -43,6 +43,12 @@ pub fn reconcile(sync: &mut SyncDoc, notes: &[Note], unreadable: &[String]) -> R
         put_text(doc, &obj, "body", &note.body)?; // character-merged, see `sync_doc::put_text`
         merge_stage(doc, &obj, "extract_state", note.extract_state)?;
         put_str(doc, &obj, "origin", &enum_name(&note.origin))?;
+        // Only written when it differs from the default: a note never changes
+        // kind, and writing `"note"` everywhere would push one op per existing
+        // note to every peer on upgrade.
+        if note.kind != NoteKind::Note {
+            put_str(doc, &obj, "kind", &enum_name(&note.kind))?;
+        }
         put_str(doc, &obj, "color", &enum_name(&note.color))?;
         put_bool(doc, &obj, "archived", note.archived)?;
         // Drop keys of removed features (attachments, the cleanup pass) that
@@ -112,6 +118,7 @@ fn read_note(doc: &AutoCommit, obj: &ObjId, key: &str) -> Option<Note> {
         body: get_text(doc, obj, "body")?,
         extract_state: read_enum::<StageState>(doc, obj, "extract_state"),
         origin: read_enum::<NoteOrigin>(doc, obj, "origin"),
+        kind: read_enum::<NoteKind>(doc, obj, "kind"),
         color: read_enum_or(doc, obj, "color", NoteColor::Purple),
         archived: get_bool(doc, obj, "archived").unwrap_or(false),
     })

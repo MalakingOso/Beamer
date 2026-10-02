@@ -245,7 +245,7 @@ pub fn setup_sticky_windows(
             // closed; force-killed windows are pruned by `reopen_note` instead.
             let live = registry.peek();
             for note in store.notes.iter() {
-                let showing = store.is_open(&note.id) && !note.archived;
+                let showing = note.is_note() && store.is_open(&note.id) && !note.archived;
                 let registered = live.contains_key(&note.id);
                 if showing && !registered {
                     to_open.push(note.clone());

@@ -134,7 +134,7 @@ mod desktop_grab {
     /// Inject on Ctrl+Space (hold, or toggle), no note binding.
     fn state(toggle: bool) -> (HookState, Arc<[AtomicBool; MAX_BINDINGS]>, UnboundedReceiver<HotkeyEvent>) {
         let (tx, rx) = unbounded_channel();
-        let bindings = build_bindings(cfg(true, false, 0x20, toggle), None);
+        let bindings = build_bindings(cfg(true, false, 0x20, toggle), None, None);
         let owned: Arc<[AtomicBool; MAX_BINDINGS]> = Default::default();
         let state = HookState::new(
             Arc::new(Mutex::new(bindings)),
@@ -216,7 +216,7 @@ mod desktop_grab {
         let owned: Arc<[AtomicBool; MAX_BINDINGS]> = Default::default();
         owned[0].store(true, Ordering::Relaxed);
         let mut state = HookState::new(
-            Arc::new(Mutex::new(build_bindings(cfg(true, false, 0x20, true), None))),
+            Arc::new(Mutex::new(build_bindings(cfg(true, false, 0x20, true), None, None))),
             reset.clone(),
             owned,
             tx,
@@ -250,4 +250,14 @@ mod desktop_grab {
         release_desktop_bindings(&mut state);
         assert!(drain(&mut rx).is_empty(), "a screen lock mid-note must not end the note");
     }
+}
+
+#[test]
+fn the_done_binding_selects_its_own_sink() {
+    let done = HotkeyConfig::parse("Ctrl+Alt+D", false).expect("parses");
+    let bindings = build_bindings(cfg(true, false, 0x20, false), None, Some(done));
+    assert_eq!(bindings.len(), 2, "an unset note binding must leave no hole");
+    let mods = Modifiers { ctrl: true, alt: true, shift: false };
+    let idx = matching_binding(&bindings, u32::from(b'D'), mods).expect("Ctrl+Alt+D matches");
+    assert_eq!(bindings[idx].mode, CaptureMode::Done);
 }

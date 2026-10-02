@@ -20,6 +20,9 @@ note_hotkey = ""             # Chord that dictates into a sticky note instead of
 note_mode = "toggle"         # "toggle" or "hold". Toggle by default: a note is
                              # usually longer than a dictated phrase, and holding
                              # a chord through it is awkward.
+done_hotkey = ""             # Chord that logs a spoken line to the Done list.
+                             # "" (default) = off; same rules as note_hotkey.
+done_mode = "hold"           # "hold" (default: one short sentence) or "toggle".
 
 [transcription]
 backend = "elevenlabs_batch" # elevenlabs_batch | elevenlabs_medical_batch | voxtral_batch

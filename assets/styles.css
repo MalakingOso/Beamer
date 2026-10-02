@@ -1842,3 +1842,42 @@ body {
   /* Carries the raw WebSocket disconnect reason, unbounded length. */
   word-break: break-word;
 }
+
+/* ── Done page ────────────────────────────────────────────────────────────
+   Reuses the notes board's card and the vocabulary page's add row; only the
+   day bar is new. Entries carry the teal stripe so the log reads as one
+   colour-coded kind of thing, distinct from the board's per-note colours. */
+
+.done-day-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.done-day-label {
+  min-width: 120px;
+  font-family: "DM Mono", "Cascadia Code", monospace;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg);
+  text-align: center;
+}
+
+.done-day-bar .note-action-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+  pointer-events: none;
+}
+
+.done-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+/* Entries are not clickable (the board's cards reopen a window); no pointer. */
+.done-entry,
+.done-entry:hover {
+  cursor: default;
+}

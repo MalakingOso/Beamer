@@ -16,6 +16,10 @@ Linux-only edits have never been compiled:
   exits (unplug mid-hold); poison-tolerant binding locks
 - `injection/ydotool.rs`: `ydotool type` bounded by `run_with_timeout`
 - `notes/sync_doc/mod.rs`: `is_transient_rename_error` is `false` off Windows
+- `hotkey/linux_hotkey.rs`, `hotkey/gnome_grab.rs`: the third (Done) binding
+  slot — `MAX_BINDINGS` is 3 and `update_configs`/`start_ll_hook` take a
+  `done` chord. `SetHotkeys` already takes any number of accelerators, so no
+  extension bump is needed, but the Linux path is uncompiled
 
 ## Low priority
 

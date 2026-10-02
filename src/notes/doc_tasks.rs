@@ -40,6 +40,7 @@ pub fn reconcile(sync: &mut SyncDoc, tasks: &[Task], unreadable: &[String]) -> R
         put_f64(doc, &obj, "confidence", f64::from(task.confidence))?;
         put_str(doc, &obj, "status", &enum_name(&task.status))?;
         put_bool(doc, &obj, "done", task.done)?;
+        put_opt_str(doc, &obj, "completed", task.completed.as_deref())?;
         put_str(doc, &obj, "created", &task.created)?;
         put_opt_str(doc, &obj, "decided", task.decided.as_deref())?;
         put_opt_str(doc, &obj, "due", task.due.as_deref())?;
@@ -89,6 +90,7 @@ fn read_task(doc: &AutoCommit, obj: &ObjId, key: &str) -> Option<Task> {
         confidence: get_f64(doc, obj, "confidence").unwrap_or_default() as f32,
         status: read_enum::<TaskStatus>(doc, obj, "status"),
         done: get_bool(doc, obj, "done").unwrap_or(false),
+        completed: get_str(doc, obj, "completed"),
         created: get_str(doc, obj, "created")?,
         decided: get_str(doc, obj, "decided"),
         due: get_str(doc, obj, "due"),

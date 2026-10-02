@@ -241,3 +241,36 @@ the order they were spoken and never interleave. The mic closes when capture
 ends, not after delivery. Capture also ends only once every `RecordStart` has
 been matched by a stop, so tapping the other hotkey mid-note no longer cuts
 the note short.
+
+## The Done log rides the note corpus (2026-10-01)
+
+A daily list of finished things ("what did I get done today?"). The obvious
+home was a new store with its own root in the synced document, and that is the
+trap: `GENESIS` holds only the `notes` and `tasks` root maps, and a root map
+created lazily on two machines gets two object ids and does not merge. A new
+root would need a new genesis, which every existing document disagrees with.
+So an accomplishment is a `Note` with `kind: Accomplishment`
+(`notes/accomplishments.rs`): it persists, syncs and deletes with notes for
+free. Everything that treats a `Note` as a board card or a window filters on
+`Note::is_note` (`active`/`archived`/`search`, Show-all/Hide-all, the sticky
+reconciler); extraction is kept off by creating it `Skipped`. `kind` is
+omitted from `notes.json` and the document when it is `Note`, so existing
+notes produce no new ops. Entries are typed (or dictated into the box through
+the normal dictation hotkey, which injects into the focused field); a
+dedicated third capture hotkey was left out, since it touches the hotkey
+engine, config migration and the Linux listeners. A day is the local
+calendar date of `created`, which an edit never moves. An older build syncing
+with this one shows entries as ordinary notes.
+
+**Done hotkey and completed tasks (same day).** The dedicated capture hotkey
+followed: `CaptureMode::Done`, a third binding (`MAX_BINDINGS` 3), config
+`done_hotkey`/`done_mode` (off when empty, default mode `hold` because an
+accomplishment is one short sentence). On Windows its pill ring and
+bars are gold (`done` state); Linux keeps the note ring, because the GNOME
+pill reads an unknown state as idle and a new one needs an extension bump and
+a log out (`pill::done_style`). Its sink
+(`orchestrator::sink::do_done_capture`) logs the transcript and requests no
+model pass. Ticking a task done now stamps `Task.completed`, and the Done page
+merges that day's completed tasks into the log read-only (untick on the Tasks
+page). Tasks ticked before the stamp existed, or by a peer that does not write
+it, have no day and do not appear: there is no honest date to give them.

@@ -4,7 +4,7 @@
 //! (whether it fires).
 
 use super::*;
-use crate::notes::{Note, NoteColor, NoteOrigin, StageState};
+use crate::notes::{Note, NoteColor, NoteKind, NoteOrigin, StageState};
 use std::collections::HashSet;
 
 fn note(id: &str, extract: StageState) -> Note {
@@ -16,6 +16,7 @@ fn note(id: &str, extract: StageState) -> Note {
         body: String::new(),
         extract_state: extract,
         origin: NoteOrigin::default(),
+        kind: NoteKind::default(),
         color: NoteColor::Purple,
         archived: false,
     }

@@ -182,6 +182,7 @@ mod tests {
             confidence: 0.9,
             status: TaskStatus::Accepted,
             done: false,
+            completed: None,
             created: "2026-08-23T10:00:00+01:00".into(),
             decided: Some("2026-08-23T10:01:00+01:00".into()),
             due: due.map(str::to_string),

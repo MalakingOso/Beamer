@@ -14,6 +14,10 @@ use crate::ui::settings::layout::SubSection;
 /// (see `hotkey::matching_binding`).
 const DEFAULT_NOTE_HOTKEY: &str = "Ctrl+Alt+Space";
 
+/// Chord proposed when Done capture is switched on. A different trigger key
+/// from both other chords, so only the modifiers could ever confuse them.
+const DEFAULT_DONE_HOTKEY: &str = "Ctrl+Alt+D";
+
 #[derive(Props, Clone, PartialEq)]
 pub struct RecordingCardProps {
     hotkey: String,
@@ -27,11 +31,17 @@ pub struct RecordingCardProps {
     on_pause_media_change: EventHandler<bool>,
     on_note_hotkey_change: EventHandler<String>,
     on_note_mode_change: EventHandler<String>,
+    /// Empty means Done capture is off.
+    done_hotkey: String,
+    done_mode: String,
+    on_done_hotkey_change: EventHandler<String>,
+    on_done_mode_change: EventHandler<String>,
 }
 
 #[component]
 pub fn RecordingCard(props: RecordingCardProps) -> Element {
     let note_enabled = !props.note_hotkey.trim().is_empty();
+    let done_enabled = !props.done_hotkey.trim().is_empty();
 
     rsx! {
         SubSection { label: "Recording".to_string(),
@@ -85,6 +95,33 @@ pub fn RecordingCard(props: RecordingCardProps) -> Element {
                     }
                 }
             }
+
+            div { class: "card-row",
+                span { class: "card-label", "Done capture" }
+                Toggle {
+                    value: done_enabled,
+                    ontoggle: move |on: bool| {
+                        let next = if on { DEFAULT_DONE_HOTKEY } else { "" };
+                        props.on_done_hotkey_change.call(next.to_string());
+                    },
+                }
+            }
+            if done_enabled {
+                div { class: "card-row",
+                    span { class: "card-label", "Done hotkey" }
+                    HotkeyPicker {
+                        hotkey: props.done_hotkey.clone(),
+                        on_change: move |h: String| props.on_done_hotkey_change.call(h),
+                    }
+                }
+                div { class: "card-row",
+                    span { class: "card-label", "Done mode" }
+                    CaptureModeRadio {
+                        mode: props.done_mode.clone(),
+                        on_change: move |m: String| props.on_done_mode_change.call(m),
+                    }
+                }
+            }
         }
     }
 }
@@ -105,5 +142,12 @@ mod tests {
             dictation.trigger_vk, note.trigger_vk,
             "chords sharing a trigger key can only be told apart by modifiers"
         );
+    }
+
+    #[test]
+    fn the_three_proposed_chords_are_distinct_bindings() {
+        let note = HotkeyConfig::parse(DEFAULT_NOTE_HOTKEY, true).expect("parses");
+        let done = HotkeyConfig::parse(DEFAULT_DONE_HOTKEY, false).expect("parses");
+        assert_ne!(note.trigger_vk, done.trigger_vk);
     }
 }

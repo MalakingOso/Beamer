@@ -28,7 +28,8 @@ Windows system-tray dictation app. Captures mic audio, transcribes via cloud API
   types (`model.rs`, `task.rs`), machine-local window state (`machine.rs`),
   stage writes (`lifecycle.rs`), size/delete edits (`edit.rs`), the extraction
   coroutine (`pipeline/`, `pipeline/sweep.rs`), live sync (`sync_client.rs`),
-  legacy seed (`legacy.rs`), calendar export (`ics.rs`)
+  legacy seed (`legacy.rs`), calendar export (`ics.rs`),
+  the Done log (`accomplishments.rs`, `NoteKind::Accomplishment` notes)
 - `src/llm/` — Client for the standalone llama.cpp server (Beamer never spawns
   it — except `src/components/`, which installs and starts the Windows ARM64
   server). Task extraction (`extract.rs`) over `chat.rs`; `prompts.rs` holds the
@@ -51,7 +52,7 @@ Windows system-tray dictation app. Captures mic audio, transcribes via cloud API
 - `src/ui/` — Dioxus desktop. `app.rs` owns the signals and starts the workers
   (`app_setup.rs`, `app_menu.rs`, `app_pill.rs`, `app_splash.rs`); pages
   (`home.rs`, `history_page.rs`, `notes_page.rs`, `tasks_page/`, `vocab_page.rs`,
-  `settings/` — one file per card); sticky windows (`sticky*.rs`,
+  `done_page.rs`, `settings/` — one file per card); sticky windows (`sticky*.rs`,
   `sticky_windows.rs`, `note_layout.rs`, `shell_window.rs`, `work_area.rs`);
   shared bits (`components.rs`, `fonts.rs`, `icons.rs`, `status_log.rs`)
 

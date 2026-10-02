@@ -22,6 +22,7 @@ use sync_doc::{SyncDoc, SyncHandle};
 mod doc_notes;
 mod doc_vocab;
 mod doc_tasks;
+pub mod accomplishments;
 pub mod edit;
 pub mod flush;
 pub mod ics;
@@ -36,7 +37,7 @@ pub mod task;
 pub mod task_store;
 pub use flush::flush_stores;
 pub use machine::MachineStore;
-pub use model::{Note, NoteColor, NoteOrigin, StageState};
+pub use model::{Note, NoteColor, NoteKind, NoteOrigin, StageState};
 
 /// `<config_dir>/sync`, the root of everything that syncs. Takes `config_dir`
 /// explicitly so tests can point it at a temp directory.
@@ -271,6 +272,18 @@ impl NoteStore {
 
     /// `origin` is explicit: a silent default would corrupt corpus provenance.
     pub fn create(&mut self, raw: String, color: NoteColor, origin: NoteOrigin) -> String {
+        self.create_kind(raw, color, origin, NoteKind::Note)
+    }
+
+    /// `kind` is explicit for the same reason as `origin`; the two public
+    /// constructors (`create`, `log_accomplishment`) are the only callers.
+    pub(crate) fn create_kind(
+        &mut self,
+        raw: String,
+        color: NoteColor,
+        origin: NoteOrigin,
+        kind: NoteKind,
+    ) -> String {
         let now = Local::now().to_rfc3339();
         let id = next_note_id(&self.machine.machine_id);
         self.notes.push(Note {
@@ -279,12 +292,18 @@ impl NoteStore {
             modified: now,
             body: raw.clone(),
             raw,
-            extract_state: StageState::Pending,
+            // An accomplishment is never extracted from: `Skipped` keeps the sweep
+            // and the footer retry away from it.
+            extract_state: if kind == NoteKind::Note { StageState::Pending } else { StageState::Skipped },
             origin,
+            kind,
             color,
             archived: false,
         });
-        self.machine.set_open(&id, true);
+        // Only notes get a window; an accomplishment is never "open".
+        if kind == NoteKind::Note {
+            self.machine.set_open(&id, true);
+        }
         self.dirty = true;
         id
     }
@@ -352,7 +371,7 @@ impl NoteStore {
     /// notes are skipped, or a later restore would pop a window unasked.
     pub fn set_all_open(&mut self, open: bool) {
         let ids: Vec<String> =
-            self.notes.iter().filter(|n| !n.archived).map(|n| n.id.clone()).collect();
+            self.notes.iter().filter(|n| n.is_note() && !n.archived).map(|n| n.id.clone()).collect();
         for id in ids {
             self.set_open(&id, open);
         }
@@ -361,7 +380,7 @@ impl NoteStore {
     /// Whether any active note currently has a window. Drives the tray
     /// item's label and toggle direction (any open means "hide").
     pub fn any_active_open(&self) -> bool {
-        self.notes.iter().filter(|n| !n.archived).any(|n| self.is_open(&n.id))
+        self.notes.iter().filter(|n| n.is_note() && !n.archived).any(|n| self.is_open(&n.id))
     }
 
     pub fn archive(&mut self, id: &str) {
@@ -383,11 +402,11 @@ impl NoteStore {
     }
 
     pub fn active(&self) -> Vec<&Note> {
-        Self::newest_first(self.notes.iter().filter(|n| !n.archived).collect())
+        Self::newest_first(self.notes.iter().filter(|n| n.is_note() && !n.archived).collect())
     }
 
     pub fn archived(&self) -> Vec<&Note> {
-        Self::newest_first(self.notes.iter().filter(|n| n.archived).collect())
+        Self::newest_first(self.notes.iter().filter(|n| n.is_note() && n.archived).collect())
     }
 
     /// Active notes matching `query`, newest first. Searches `raw` too (the
@@ -400,7 +419,7 @@ impl NoteStore {
         Self::newest_first(
             self.notes
                 .iter()
-                .filter(|n| !n.archived)
+                .filter(|n| n.is_note() && !n.archived)
                 .filter(|n| {
                     n.body.to_lowercase().contains(&needle)
                         || n.raw.to_lowercase().contains(&needle)

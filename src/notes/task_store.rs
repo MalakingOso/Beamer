@@ -249,7 +249,33 @@ impl TaskStore {
             return;
         }
         task.done = done;
+        // Stamped here, cleared on untick: the Done page dates a task by this.
+        task.completed = done.then(|| Local::now().to_rfc3339());
         self.dirty = true;
+    }
+
+    /// Accepted tasks completed on `day`, in the order they were ticked.
+    pub fn completed_on(&self, day: chrono::NaiveDate) -> Vec<&Task> {
+        let mut rows: Vec<&Task> = self
+            .tasks
+            .iter()
+            .filter(|t| t.status == TaskStatus::Accepted && t.completed_day() == Some(day))
+            .collect();
+        rows.sort_by(|a, b| a.completed.cmp(&b.completed).then_with(|| a.id.cmp(&b.id)));
+        rows
+    }
+
+    /// Every day with a completed task, newest first.
+    pub fn completed_days(&self) -> Vec<chrono::NaiveDate> {
+        let mut days: Vec<chrono::NaiveDate> = self
+            .tasks
+            .iter()
+            .filter(|t| t.status == TaskStatus::Accepted)
+            .filter_map(Task::completed_day)
+            .collect();
+        days.sort_unstable_by(|a, b| b.cmp(a));
+        days.dedup();
+        days
     }
 
     /// Undecided proposals for one note: the chips its window shows.
@@ -310,6 +336,7 @@ impl TaskStore {
             confidence: proposal.confidence,
             status: TaskStatus::Suggested,
             done: false,
+            completed: None,
             created: Local::now().to_rfc3339(),
             decided: None,
             due: proposal.due,

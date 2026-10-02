@@ -38,6 +38,23 @@ writes: none bump `modified` (that is user-facing ordering) and none touch
 since Task 7 it is machine-local and does not touch `modified` at all. See
 "Machine-local state" below.
 
+## Accomplishments are notes too
+
+The Done page's entries are `Note`s with `kind: NoteKind::Accomplishment`
+(`notes/accomplishments.rs`; why in `docs/decisions.md`). They are kept off
+the board, out of windows and away from the model:
+
+- ⚠️ **Anything that lists `NoteStore::notes` for the board or for windows must
+  filter `Note::is_note`.** `active`/`archived`/`search`, `set_all_open`,
+  `any_active_open` and the reconciler in `ui::sticky_windows` already do. A
+  new consumer that iterates `notes` directly will open a sticky per entry.
+- They are created `StageState::Skipped` and never `set_open`. That is the
+  whole guard against extraction: the sweep takes only `Failed` notes, the
+  footer retry needs a window, and nothing flips `Skipped` back to `Pending`.
+  A new path that requests a pass for arbitrary notes must check `is_note`.
+- `kind` is serialized only when it is not `Note` (mirror and document), so
+  existing notes gain no key and no sync ops.
+
 ## The footer: three icons, and a fading failure
 
 `src/ui/sticky_footer.rs`'s `footer()` decides the glyph from two inputs, not

@@ -34,10 +34,11 @@ use crate::ui::sticky_windows;
 use crate::ui::linux_integration;
 use crate::ui::history::TranscriptionHistory;
 use crate::ui::history_page::HistoryPage;
+use crate::ui::done_page::DonePage;
 use crate::ui::home::HomePage;
 use crate::ui::icons::{
-    IconBook, IconClockCounterClockwise, IconGear, IconHouse, IconListChecks, IconMinus,
-    IconNote, IconX,
+    IconBook, IconCheck, IconClockCounterClockwise, IconGear, IconHouse, IconListChecks,
+    IconMinus, IconNote, IconX,
 };
 use crate::ui::notes_page::NotesPage;
 use crate::ui::tasks_page::TasksPage;
@@ -52,6 +53,7 @@ pub(super) enum Page {
     History,
     Notes,
     Tasks,
+    Done,
     Vocab,
     Settings,
 }
@@ -132,9 +134,10 @@ pub fn App() -> Element {
                 HotkeyConfig::default()
             });
         let note_binding = cfg.recording.note_hotkey_config();
+        let done_binding = cfg.recording.done_hotkey_config();
         drop(cfg);
 
-        let handle = Rc::new(start_ll_hook(initial, note_binding, hook_tx));
+        let handle = Rc::new(start_ll_hook(initial, note_binding, done_binding, hook_tx));
 
         spawn(async move {
             while let Some(event) = hook_rx.recv().await {
@@ -149,7 +152,14 @@ pub fn App() -> Element {
     // an unrelated Settings edit must not reach it.
     let hotkey_fields = use_memo(move || {
         let r = &config.read().recording;
-        (r.hotkey.clone(), r.mode.clone(), r.note_hotkey.clone(), r.note_mode.clone())
+        (
+            r.hotkey.clone(),
+            r.mode.clone(),
+            r.note_hotkey.clone(),
+            r.note_mode.clone(),
+            r.done_hotkey.clone(),
+            r.done_mode.clone(),
+        )
     });
     use_effect(move || {
         let _ = hotkey_fields.read();
@@ -164,7 +174,11 @@ pub fn App() -> Element {
                 );
                 HotkeyConfig::default()
             });
-        hotkey_handle.update_configs(new_config, cfg.recording.note_hotkey_config());
+        hotkey_handle.update_configs(
+            new_config,
+            cfg.recording.note_hotkey_config(),
+            cfg.recording.done_hotkey_config(),
+        );
     });
 
     // Keeps open windows matching notes that should be showing (fresh and restored).
@@ -231,6 +245,12 @@ pub fn App() -> Element {
                             IconListChecks {}
                         }
                         button {
+                            class: if page == Page::Done { "sidebar-icon active" } else { "sidebar-icon" },
+                            title: "Done today",
+                            onclick: move |_| current_page.set(Page::Done),
+                            IconCheck {}
+                        }
+                        button {
                             class: if page == Page::Vocab { "sidebar-icon active" } else { "sidebar-icon" },
                             onclick: move |_| current_page.set(Page::Vocab),
                             IconBook {}
@@ -291,6 +311,9 @@ pub fn App() -> Element {
                     },
                     Page::Tasks => rsx! {
                         TasksPage { notes, tasks, registry: sticky_registry }
+                    },
+                    Page::Done => rsx! {
+                        DonePage { notes, tasks }
                     },
                     Page::Vocab => rsx! {
                         VocabPage {}

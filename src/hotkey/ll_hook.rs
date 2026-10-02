@@ -203,9 +203,14 @@ pub struct HotkeyHandle {
 }
 
 impl HotkeyHandle {
-    pub fn update_configs(&self, inject: HotkeyConfig, note: Option<HotkeyConfig>) {
+    pub fn update_configs(
+        &self,
+        inject: HotkeyConfig,
+        note: Option<HotkeyConfig>,
+        done: Option<HotkeyConfig>,
+    ) {
         *self.shared.bindings.lock().unwrap_or_else(|p| p.into_inner()) =
-            build_bindings(inject, note);
+            build_bindings(inject, note, done);
         self.shared.reset_flag.store(true, Ordering::Relaxed);
     }
 }
@@ -227,10 +232,11 @@ impl Drop for HotkeyHandle {
 pub fn start_ll_hook(
     inject: HotkeyConfig,
     note: Option<HotkeyConfig>,
+    done: Option<HotkeyConfig>,
     tx: UnboundedSender<HotkeyEvent>,
 ) -> HotkeyHandle {
     let shared = Arc::new(Shared {
-        bindings: Mutex::new(build_bindings(inject, note)),
+        bindings: Mutex::new(build_bindings(inject, note, done)),
         reset_flag: AtomicBool::new(false),
         thread_id: std::sync::atomic::AtomicU32::new(0),
     });

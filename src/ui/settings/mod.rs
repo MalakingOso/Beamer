@@ -76,6 +76,8 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                 pause_media: config.read().recording.pause_media,
                 note_hotkey: config.read().recording.note_hotkey.clone(),
                 note_mode: config.read().recording.note_mode.clone(),
+                done_hotkey: config.read().recording.done_hotkey.clone(),
+                done_mode: config.read().recording.done_mode.clone(),
                 on_hotkey_change: move |hotkey: String| {
                     save_config(config, |c| c.recording.hotkey = hotkey);
                 },
@@ -90,6 +92,12 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                 },
                 on_note_mode_change: move |mode: String| {
                     save_config(config, |c| c.recording.note_mode = mode);
+                },
+                on_done_hotkey_change: move |hotkey: String| {
+                    save_config(config, |c| c.recording.done_hotkey = hotkey);
+                },
+                on_done_mode_change: move |mode: String| {
+                    save_config(config, |c| c.recording.done_mode = mode);
                 },
             }
 

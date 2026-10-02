@@ -16,9 +16,18 @@ pub(super) fn pill_state(state: RecordingState, mode: CaptureMode) -> Option<&'s
     match (state, mode) {
         (RecordingState::Idle, _) => None,
         (RecordingState::Recording, CaptureMode::Note) => Some("note"),
+        (RecordingState::Recording, CaptureMode::Done) => Some(done_style()),
         (RecordingState::Recording, CaptureMode::Inject) => Some("recording"),
         (RecordingState::Processing, _) => Some("processing"),
     }
+}
+
+/// Gold "done" ring on the Windows/macOS pill. The GNOME pill (`indicator.js`)
+/// has no such state and reads an unknown string as idle, silently hiding the
+/// pill mid-recording, so Linux keeps the note ring until the extension learns
+/// "done" (which needs a version bump and a log out).
+fn done_style() -> &'static str {
+    if cfg!(target_os = "linux") { "note" } else { "done" }
 }
 
 /// Beamer Purple recording pill (bottom-center): 12-bar waveform following mic
@@ -80,6 +89,11 @@ html, body, #main { background:transparent!important; overflow:hidden;
 .pill-note { border:2px solid rgba(137,33,228,0.85);
   box-shadow:2px 4px 0 0 rgba(137,33,228,0.25); }
 
+/* Gold: speech going to the Done list, the colour of completion. */
+.pill-done { border:2px solid rgba(228,164,33,0.9);
+  box-shadow:2px 4px 0 0 rgba(228,164,33,0.28); }
+.pill-done .bar { background:#E4A421; }
+
 .pill-bars { display:flex; align-items:center; gap:3px; height:26px; }
 .bar { width:3px; height:4px; border-radius:2px; }
 .bar-1{background:#4B0082}
@@ -122,7 +136,7 @@ pub(super) const PILL_JS: &str = r#"
     window.__beamerPhase += 0.35;
     var state = window.__beamerState;
     // Recording/note follow mic level; processing idles at a calm sweep.
-    var target = (state === 'recording' || state === 'note')
+    var target = (state === 'recording' || state === 'note' || state === 'done')
       ? Math.max(0.12, window.__beamerLevel)
       : 0.15;
     var rate = target > window.__beamerSmooth ? 0.45 : 0.15;
@@ -147,6 +161,7 @@ pub(super) const PILL_JS: &str = r#"
     window.__beamerState = state === 'idle' ? null : state;
 
     pill.classList.toggle('pill-note', state === 'note');
+    pill.classList.toggle('pill-done', state === 'done');
     label.style.display = state === 'processing' ? '' : 'none';
 
     if (state === 'idle') {
@@ -192,13 +207,23 @@ mod tests {
     }
 
     #[test]
+    fn done_capture_is_gold_off_linux_and_never_an_unknown_state_on_it() {
+        let style = pill_state(RecordingState::Recording, CaptureMode::Done);
+        if cfg!(target_os = "linux") {
+            assert_eq!(style, Some("note"), "indicator.js reads unknown states as idle");
+        } else {
+            assert_eq!(style, Some("done"));
+        }
+    }
+
+    #[test]
     fn every_style_is_one_both_pills_handle() {
         // Unknown strings read as idle on both pills, silently. No error, no log.
         for state in [RecordingState::Idle, RecordingState::Recording, RecordingState::Processing] {
-            for mode in [CaptureMode::Inject, CaptureMode::Note] {
+            for mode in [CaptureMode::Inject, CaptureMode::Note, CaptureMode::Done] {
                 if let Some(style) = pill_state(state, mode) {
                     assert!(
-                        matches!(style, "recording" | "processing" | "note"),
+                        matches!(style, "recording" | "processing" | "note" | "done"),
                         "{style:?} is not a state either pill handles"
                     );
                 }

@@ -11,6 +11,7 @@ mod app_pill;
 mod app_setup;
 mod app_splash;
 pub mod components;
+pub mod done_page;
 pub mod fonts;
 pub mod history;
 pub mod history_page;
