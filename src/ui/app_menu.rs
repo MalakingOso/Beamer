@@ -15,6 +15,14 @@ use crate::tray::TrayMenuItems;
 use crate::update::{self, UpdateStatus};
 use super::app::Page;
 
+/// Show the main window, first restoring its design size if it collapsed
+/// below the floor (see `super::ensure_main_window_size`).
+fn show_main_window(window: &DesktopContext) {
+    super::ensure_main_window_size(window);
+    window.set_visible(true);
+    window.set_focus();
+}
+
 /// Tray menu clicks. `use_muda_event_handler`, not the tray variant: a
 /// dioxus-desktop 0.7.3 bug delivers tray clicks as MudaMenuEvent.
 pub(super) fn setup_menu_handlers(
@@ -47,20 +55,16 @@ pub(super) fn setup_menu_handlers(
                 std::process::exit(0);
             } else if event.id == home_id {
                 current_page.set(Page::Home);
-                window.set_visible(true);
-                window.set_focus();
+                show_main_window(&window);
             } else if event.id == history_id {
                 current_page.set(Page::History);
-                window.set_visible(true);
-                window.set_focus();
+                show_main_window(&window);
             } else if event.id == vocab_id {
                 current_page.set(Page::Vocab);
-                window.set_visible(true);
-                window.set_focus();
+                show_main_window(&window);
             } else if event.id == settings_id {
                 current_page.set(Page::Settings);
-                window.set_visible(true);
-                window.set_focus();
+                show_main_window(&window);
             } else if event.id == hide_show_notes_id {
                 // Same toggle as the board header, from anywhere: any open
                 // window means "hide". The reconciler closes or opens windows.
@@ -97,8 +101,7 @@ pub(super) fn setup_menu_handlers(
                     }
                 });
                 current_page.set(Page::Settings);
-                window.set_visible(true);
-                window.set_focus();
+                show_main_window(&window);
             }
         }
     });
@@ -129,8 +132,7 @@ pub(super) fn setup_tray_click_handler(window: DesktopContext) {
                 if window.is_visible() {
                     window.set_visible(false);
                 } else {
-                    window.set_visible(true);
-                    window.set_focus();
+                    show_main_window(&window);
                 }
             }
         }

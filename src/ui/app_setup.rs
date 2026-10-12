@@ -32,6 +32,7 @@ pub(super) fn setup_window_centering(window: DesktopContext) {
     use_hook({
         let window = window.clone();
         move || {
+            super::ensure_main_window_size(&window);
             if let Some(monitor) = window.primary_monitor() {
                 let monitor_size = monitor.size();
                 let scale = monitor.scale_factor();

@@ -114,6 +114,26 @@ mod open_external_tests {
     }
 }
 
+#[cfg(test)]
+mod main_window_tests {
+    use super::main_window_restored_size;
+
+    #[test]
+    fn a_collapsed_window_restores_to_the_design_size() {
+        // The live failure: 158x26 physical px at 150% scaling is ~105x17
+        // logical px, far below the 500x400 floor.
+        assert_eq!(main_window_restored_size(105.0, 17.0), Some((500.0, 600.0)));
+        // Below the floor in only one dimension still restores.
+        assert_eq!(main_window_restored_size(800.0, 17.0), Some((500.0, 600.0)));
+    }
+
+    #[test]
+    fn a_window_at_or_above_the_floor_is_left_alone() {
+        assert_eq!(main_window_restored_size(500.0, 400.0), None);
+        assert_eq!(main_window_restored_size(800.0, 700.0), None);
+    }
+}
+
 /// WebView user-data dir. `data_local_dir`, not `data_dir`: on Windows the latter
 /// is Roaming `%APPDATA%`, where WebView2's open file handles would collide with
 /// resets/cleanups and roam a browser cache at logon. No-op elsewhere (same dir).
@@ -121,6 +141,47 @@ pub fn webview_data_dir() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("Beamer")
+}
+
+/// Main window's design size and floor (logical px). The floor is also the
+/// builder's `with_min_inner_size`, but that is not reliably enforced for an
+/// undecorated transparent window on Windows: a running Beamer was found with
+/// its main window at 158x26 physical px, showing only the titlebar as a blank
+/// pill. [`ensure_main_window_size`] therefore re-asserts it at runtime.
+pub(super) const MAIN_WINDOW_W: f64 = 500.0;
+pub(super) const MAIN_WINDOW_H: f64 = 600.0;
+pub(super) const MAIN_WINDOW_MIN_W: f64 = 500.0;
+pub(super) const MAIN_WINDOW_MIN_H: f64 = 400.0;
+
+/// The size to restore a below-floor main window to, or `None` to leave it
+/// alone (a window the user enlarged on purpose stays enlarged).
+pub(super) fn main_window_restored_size(logical_w: f64, logical_h: f64) -> Option<(f64, f64)> {
+    if logical_w < MAIN_WINDOW_MIN_W || logical_h < MAIN_WINDOW_MIN_H {
+        Some((MAIN_WINDOW_W, MAIN_WINDOW_H))
+    } else {
+        None
+    }
+}
+
+/// Grow the main window back to its design size if it is below the floor.
+/// Called at startup and on every tray/menu show, the two moments a collapsed
+/// window would otherwise stay collapsed forever (nothing else resizes it).
+pub(super) fn ensure_main_window_size(window: &dioxus::desktop::DesktopContext) {
+    let scale = window.scale_factor();
+    if scale <= 0.0 {
+        return;
+    }
+    let size = window.inner_size();
+    if let Some((w, h)) =
+        main_window_restored_size(size.width as f64 / scale, size.height as f64 / scale)
+    {
+        tracing::warn!(
+            "Main window is {}x{} logical px, below its floor; restoring to {w}x{h}",
+            size.width as f64 / scale,
+            size.height as f64 / scale
+        );
+        window.set_inner_size(dioxus::desktop::LogicalSize::new(w, h));
+    }
 }
 
 /// Launch the Dioxus desktop window. Blocks the main thread; the tray icon keeps
@@ -148,8 +209,8 @@ pub fn launch_app() {
                         .with_decorations(false)
                         .with_transparent(true)
                         .with_window_icon(Some(window_icon))
-                        .with_inner_size(dioxus::desktop::LogicalSize::new(500.0_f64, 600.0_f64))
-                        .with_min_inner_size(dioxus::desktop::LogicalSize::new(500.0_f64, 400.0_f64)),
+                        .with_inner_size(dioxus::desktop::LogicalSize::new(MAIN_WINDOW_W, MAIN_WINDOW_H))
+                        .with_min_inner_size(dioxus::desktop::LogicalSize::new(MAIN_WINDOW_MIN_W, MAIN_WINDOW_MIN_H)),
                 )
                 // Inline, not a manganis `asset!()` link: a hashed asset file
                 // lives beside the exe, so a self-update that swaps only the
