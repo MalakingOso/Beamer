@@ -82,6 +82,20 @@ body { font-family:"Recursive","Segoe UI Variable","Segoe UI",system-ui,sans-ser
   line-height:1.5; color:var(--ink); caret-color:var(--accent); }
 .sticky-blocks > .sticky-body { flex:1 0 auto; }
 
+/* Scrollbars: thin pill thumb, no track, tinted accent so it sits on any note
+   color. The 2px transparent border + `padding-box` clip insets it from the
+   edge. `::-webkit-scrollbar` only: `scrollbar-color`/`scrollbar-width` would
+   switch Chromium to its native bar and drop all of this. */
+.sticky-blocks::-webkit-scrollbar, .sticky-chips::-webkit-scrollbar { width:10px; }
+.sticky-blocks::-webkit-scrollbar-track, .sticky-chips::-webkit-scrollbar-track,
+.sticky-blocks::-webkit-scrollbar-corner, .sticky-chips::-webkit-scrollbar-corner {
+  background:transparent; }
+.sticky-blocks::-webkit-scrollbar-thumb, .sticky-chips::-webkit-scrollbar-thumb {
+  background:rgba(75,0,130,0.30); border:2px solid transparent; background-clip:padding-box;
+  border-radius:8px; }
+.sticky-blocks::-webkit-scrollbar-thumb:hover, .sticky-chips::-webkit-scrollbar-thumb:hover {
+  background:rgba(75,0,130,0.55); background-clip:padding-box; }
+
 .sticky-body::selection { background:rgba(75,0,130,0.18); }
 .sticky-body::placeholder { color:#94a0b8; }
 

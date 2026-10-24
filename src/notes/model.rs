@@ -158,4 +158,12 @@ mod tests {
         );
     }
 
+    #[test]
+    fn random_reaches_every_color_back_to_back() {
+        // The "+" buttons call this in quick succession; a clock-only seed would
+        // repeat one color. 600 draws miss a color with probability ~1e-47.
+        let seen: std::collections::HashSet<_> =
+            (0..600).map(|_| NoteColor::random().css_class()).collect();
+        assert_eq!(seen.len(), NoteColor::ALL.len(), "saw only {seen:?}");
+    }
 }
