@@ -4,7 +4,7 @@
 //!
 //! Every `put_*` is guarded on the stored value, so reconciling an unchanged
 //! vec issues no ops. That guard is also what stops a stale in-memory row from
-//! silently undoing a peer's write (Look's `tasks[id].done`); never make it unconditional.
+//! silently undoing a peer's write (Mira's `tasks[id].done`); never make it unconditional.
 
 use anyhow::Result;
 use automerge::transaction::Transactable;

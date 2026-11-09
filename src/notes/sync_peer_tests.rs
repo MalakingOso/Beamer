@@ -1,7 +1,8 @@
-//! Tests for a third-party peer on the shared document: Look, which reads
-//! `ROOT.tasks`, writes only `ROOT.tasks[id].done` there, and keeps its own
-//! data under `ROOT.look`. Beamer must neither revert that `done` with a
-//! stale in-memory copy nor prune the root key it does not know.
+//! Tests for a third-party peer on the shared document: Mira (formerly Look),
+//! which reads `ROOT.tasks`, writes only `ROOT.tasks[id].done` there, and keeps
+//! its own data under `ROOT.look` (the key keeps its old name: it is wire
+//! format). Beamer must neither revert that `done` with a stale in-memory copy
+//! nor prune the root key it does not know.
 //!
 //! Every test builds its own temp directory; nothing touches `~/.config/Beamer`.
 
@@ -71,7 +72,7 @@ impl Machine {
     }
 }
 
-/// The peer's copy: the machine's document bytes under a fresh actor, as Look
+/// The peer's copy: the machine's document bytes under a fresh actor, as Mira
 /// holds it after its first sync.
 fn peer_from(machine: &Machine) -> AutoCommit {
     let mut doc = AutoCommit::load(&std::fs::read(machine.document()).unwrap()).unwrap();
@@ -79,7 +80,7 @@ fn peer_from(machine: &Machine) -> AutoCommit {
     doc
 }
 
-/// What Look's "tick" does: `ROOT.tasks[id].done = true`, nothing else in `tasks`.
+/// What Mira's "tick" does: `ROOT.tasks[id].done = true`, nothing else in `tasks`.
 fn peer_ticks(peer: &mut AutoCommit, task_id: &str) {
     let (_, tasks) = peer.get(ROOT, "tasks").unwrap().expect("tasks root");
     let (_, row) = peer.get(&tasks, task_id).unwrap().expect("task row");
@@ -116,9 +117,9 @@ fn a_peers_done_survives_a_reconcile_of_the_stale_open_row() {
     let mut a = Machine::open(&temp_dir("done_file"));
     let id = a.with_accepted_task();
 
-    let mut look = peer_from(&a);
-    peer_ticks(&mut look, &id);
-    deliver_file(&mut look, &a);
+    let mut mira = peer_from(&a);
+    peer_ticks(&mut mira, &id);
+    deliver_file(&mut mira, &a);
 
     // The store still says `done=false`; the tick reconciles it before merging.
     assert!(!a.done(&id));
@@ -136,9 +137,9 @@ fn a_local_edit_to_another_field_of_the_same_task_keeps_the_peers_done() {
     let mut a = Machine::open(&temp_dir("done_and_due"));
     let id = a.with_accepted_task();
 
-    let mut look = peer_from(&a);
-    peer_ticks(&mut look, &id);
-    deliver_file(&mut look, &a);
+    let mut mira = peer_from(&a);
+    peer_ticks(&mut mira, &id);
+    deliver_file(&mut mira, &a);
 
     // Beamer sets a due date before its next tick: the row is now dirty in
     // memory and still carries the stale `done=false`.
@@ -155,9 +156,9 @@ fn a_peers_done_survives_the_live_sync_path() {
     let mut a = Machine::open(&temp_dir("done_live"));
     let id = a.with_accepted_task();
 
-    let mut look = peer_from(&a);
-    peer_ticks(&mut look, &id);
-    deliver_live(&mut look, &a);
+    let mut mira = peer_from(&a);
+    peer_ticks(&mut mira, &id);
+    deliver_live(&mut mira, &a);
 
     let handle = a.notes.sync_doc();
     let guard = handle.lock();
@@ -172,12 +173,12 @@ fn beamer_leaves_a_root_key_it_does_not_know_alone() {
     let mut a = Machine::open(&temp_dir("look_root"));
     a.with_accepted_task();
 
-    let mut look = peer_from(&a);
-    let root = look.put_object(ROOT, "look", ObjType::Map).unwrap();
-    let todos = look.put_object(&root, "todos", ObjType::Map).unwrap();
-    look.put(&todos, "t1", "a look to-do").unwrap();
-    look.commit();
-    deliver_file(&mut look, &a);
+    let mut mira = peer_from(&a);
+    let root = mira.put_object(ROOT, "look", ObjType::Map).unwrap();
+    let todos = mira.put_object(&root, "todos", ObjType::Map).unwrap();
+    mira.put(&todos, "t1", "a look to-do").unwrap();
+    mira.commit();
+    deliver_file(&mut mira, &a);
 
     a.flush();
     a.notes.create("a later note".into(), NoteColor::Purple, NoteOrigin::Dictated);

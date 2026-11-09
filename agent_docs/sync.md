@@ -222,21 +222,23 @@ design carried attachment bytes via Syncthing, but file attaching was
 removed along with it, so this section's old "unsolved gap" is gone with
 the feature.
 
-## Look, the third peer
+## Mira, the third peer
 
-A personal copy of the Look launcher (`~/Programming/look`, private) joins
+Mira, the launcher formerly called Look (`github.com/MalakingOso/mira`), joins
 the same document through the same server. It keeps all of its own data
 under `ROOT.look` (built by a second fixed genesis change that depends only
 on Beamer's), which Beamer never reads and never prunes: `retain_keys` only
-runs inside the `notes` and `tasks` maps. Look reads `ROOT.tasks` for its
-Beamer panel and writes exactly one field there, `tasks[id].done`.
+runs inside the `notes` and `tasks` maps. The key keeps its old name on
+purpose: it is part of the wire format and its genesis is hash-checked on both
+sides, so renaming it would fork the shared document. Mira reads `ROOT.tasks`
+for its Beamer panel and writes exactly one field there, `tasks[id].done`.
 
 That write is safe because every `put_*` in `fields.rs` is guarded on the
 stored value: a reconcile of an unchanged in-memory task issues no
-operation, so it cannot re-assert a stale `done=false` over Look's tick.
+operation, so it cannot re-assert a stale `done=false` over Mira's tick.
 `sync_peer_tests.rs` pins this down (file merge, live-sync path, a local
 edit to another field of the same task, and the unknown root key). An
-unconditional put here would silently undo every tick made in Look.
+unconditional put here would silently undo every tick made in Mira.
 
 ## Threading: the socket task never writes anything Dioxus owns
 
