@@ -29,7 +29,8 @@ Windows system-tray dictation app. Captures mic audio, transcribes via cloud API
   stage writes (`lifecycle.rs`), size/delete edits (`edit.rs`), the extraction
   coroutine (`pipeline/`, `pipeline/sweep.rs`), live sync (`sync_client.rs`),
   legacy seed (`legacy.rs`), calendar export (`ics.rs`),
-  the Done log (`accomplishments.rs`, `NoteKind::Accomplishment` notes)
+  the Done log (`accomplishments.rs`, `NoteKind::Accomplishment` notes),
+  the day-end card's logic (`day_end.rs`: when it is due, what it says)
 - `src/llm/` — Client for the standalone llama.cpp server (Beamer never spawns
   it — except `src/components/`, which installs and starts the Windows ARM64
   server). Task extraction (`extract.rs`) over `chat.rs`; `prompts.rs` holds the
@@ -54,7 +55,8 @@ Windows system-tray dictation app. Captures mic audio, transcribes via cloud API
   (`home.rs`, `history_page.rs`, `notes_page.rs`, `tasks_page/`, `vocab_page.rs`,
   `done_page.rs`, `settings/` — one file per card); sticky windows (`sticky*.rs`,
   `sticky_windows.rs`, `note_layout.rs`, `shell_window.rs`, `work_area.rs`);
-  shared bits (`components.rs`, `fonts.rs`, `icons.rs`, `status_log.rs`)
+  the day-end card (`day_end.rs` component + CSS, `app_day_end.rs` timer and
+  window); shared bits (`components.rs`, `fonts.rs`, `icons.rs`, `status_log.rs`)
 
 ## Commands
 

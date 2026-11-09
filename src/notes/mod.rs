@@ -23,6 +23,7 @@ mod doc_notes;
 mod doc_vocab;
 mod doc_tasks;
 pub mod accomplishments;
+pub mod day_end;
 pub mod edit;
 pub mod flush;
 pub mod ics;

@@ -6,6 +6,7 @@
 
 pub mod api_keys_card;
 pub mod appearance_card;
+pub mod day_end_card;
 pub mod debug_card;
 pub mod hotkey_picker;
 pub mod injection_card;
@@ -20,6 +21,7 @@ use dioxus::prelude::*;
 
 use self::api_keys_card::ApiKeysCard;
 use self::appearance_card::AppearanceCard;
+use self::day_end_card::DayEndSettings;
 use self::debug_card::DebugCard;
 use self::injection_card::InjectionCard;
 use self::layout::SettingsGroup;
@@ -47,6 +49,8 @@ pub struct SettingsPageProps {
     /// The component reconcile (`crate::components`): download prompts,
     /// progress and failures for what lives outside the exe.
     pub components: crate::components::Components,
+    /// Bumped to preview the day-end card (watched by `app_day_end`).
+    pub day_end_show_now: Signal<u32>,
 }
 
 /// Apply a mutation to the config signal, then persist it synchronously so a
@@ -66,6 +70,13 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
     let last_injection = props.last_injection;
     let mut elevenlabs_key = use_signal(|| crate::config::load_api_key("elevenlabs_api_key"));
     let mut mistral_key = use_signal(|| crate::config::load_api_key("mistral_api_key"));
+    // With nothing logged today there is no card to preview.
+    let has_entries_today = !crate::notes::accomplishments::log_for_day(
+        &props.notes.read(),
+        &props.tasks.read(),
+        chrono::Local::now().date_naive(),
+    )
+    .is_empty();
 
     rsx! {
         div { class: "content",
@@ -198,6 +209,34 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
                             _ => {}
                         }
                     });
+                },
+            }
+
+            DayEndSettings {
+                enabled: config.read().day_end.enabled,
+                time: config.read().day_end.time.clone(),
+                days: config.read().day_end.days.clone(),
+                fade_on: config.read().day_end.fade_secs > 0,
+                can_preview: has_entries_today,
+                on_enabled_change: move |v: bool| {
+                    save_config(config, |c| c.day_end.enabled = v);
+                },
+                on_time_change: move |t: String| {
+                    // A cleared or half-typed time must not switch the card off or save junk.
+                    if crate::config::day_end::parse_time(&t).is_some() {
+                        save_config(config, |c| c.day_end.time = t);
+                    }
+                },
+                on_days_change: move |days: Vec<u8>| {
+                    save_config(config, |c| c.day_end.days = days);
+                },
+                on_fade_change: move |v: bool| {
+                    let secs = if v { crate::config::day_end::FADE_SECS } else { 0 };
+                    save_config(config, |c| c.day_end.fade_secs = secs);
+                },
+                on_preview: move |_| {
+                    let mut show_now = props.day_end_show_now;
+                    show_now += 1;
                 },
             }
 

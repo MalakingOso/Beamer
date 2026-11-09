@@ -6,11 +6,13 @@
 //! See `agent_docs/dioxus_architecture.md`.
 
 pub mod app;
+mod app_day_end;
 mod app_menu;
 mod app_pill;
 mod app_setup;
 mod app_splash;
 pub mod components;
+pub mod day_end;
 pub mod done_page;
 pub mod fonts;
 pub mod history;

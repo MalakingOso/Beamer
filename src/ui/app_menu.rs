@@ -17,7 +17,7 @@ use super::app::Page;
 
 /// Show the main window, first restoring its design size if it collapsed
 /// below the floor (see `super::ensure_main_window_size`).
-fn show_main_window(window: &DesktopContext) {
+pub(super) fn show_main_window(window: &DesktopContext) {
     super::ensure_main_window_size(window);
     window.set_visible(true);
     window.set_focus();

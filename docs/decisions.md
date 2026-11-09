@@ -274,3 +274,31 @@ model pass. Ticking a task done now stamps `Task.completed`, and the Done page
 merges that day's completed tasks into the log read-only (untick on the Tasks
 page). Tasks ticked before the stamp existed, or by a peer that does not write
 it, have no day and do not appear: there is no honest date to give them.
+
+## The day-end card is a window, and it is the Done pill's gold (2026-11-08)
+
+The Done page is somewhere you have to go; the point of the day-end card is
+that it comes to you, at a set time, and just lists what you finished. It is a
+celebration, not a tracker: no streaks, no counts as headlines, no "still
+open", no red, and a day with nothing logged gets no card at all
+(`notes::day_end::card_view` returns `None`). It reads the Done page's own
+`log_for_day`, so logged lines and ticked tasks arrive with no new store and no
+schema change. The look is the Done pill's gold ring (#E4A421, already "the
+colour of completion") grown into a Beamer Purple card: 2px gold frame, hard
+purple shadow, gold stripes, deep gold #8A5A00 for times because gold itself
+fails contrast as text on white.
+
+It is a small transparent always-on-top window made the way the splash is
+(`app_day_end::open_card`), not a toast: a toast cannot draw seven styled lines.
+It is not focusable, since it arrives while you type elsewhere, but unlike the
+pill it takes clicks: anywhere dismisses it, "Copy list" is the Done page's
+Copy, "Open Done" and "N earlier" open the Done page. The card measures its own
+height once mounted (`get_client_rect`) and sizes the window to fit, because
+lines wrap to two rows and only the webview knows. Config is its own
+`[day_end]` section; the card fires from a chunked timer loop that re-reads the
+config every pass, so a Settings change applies within a minute with no effect
+plumbing. "Shown today" is in memory only: starting after the set time counts
+as shown, which kills the restart-at-17:35 repeat without a new file. Linux
+cannot place its own window under Wayland, so it gets a notification with the
+same text. The colour, format and concept alternatives that were explored
+around this first cut are parked in `roadmap.md`.

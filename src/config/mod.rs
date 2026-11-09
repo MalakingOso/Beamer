@@ -3,10 +3,12 @@
 //! API keys are the exception: they live in the OS keyring, never on disk.
 //! `vocabulary` holds the custom STT terms. Schema: `agent_docs/config_schema.md`.
 
+pub mod day_end;
 mod keys;
 mod migrate;
 pub mod vocabulary;
 
+pub use day_end::DayEndConfig;
 pub use keys::{load_api_key, save_api_key};
 use migrate::{migrate_injection_backends, migrate_transcription_backend};
 
@@ -32,6 +34,8 @@ pub struct Config {
     pub llm: crate::llm::LlmConfig,
     #[serde(default)]
     pub sync: SyncConfig,
+    #[serde(default)]
+    pub day_end: DayEndConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,6 +172,7 @@ impl Default for Config {
             notes: NotesConfig::default(),
             llm: crate::llm::LlmConfig::default(),
             sync: SyncConfig::default(),
+            day_end: DayEndConfig::default(),
         }
     }
 }

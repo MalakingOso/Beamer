@@ -62,6 +62,10 @@ Rules:
   `setup_tray_click_handler`).
 - `app_pill.rs` — the Windows recording-pill window lifecycle.
 - `app_splash.rs` — the splash window lifecycle (`setup_splash`).
+- `app_day_end.rs` — the day-end card: the chunked timer loop, the "Show it
+  now" preview and the card window's lifecycle (`setup_day_end_card`). The card
+  itself is `day_end.rs` (component + CSS); what it says is
+  `notes::day_end`. Linux gets a notification instead of a window.
   Each is a hook called once from `App()`'s render body. See "Hook Order"
   below for why this split is safe.
 - `linux_integration.rs` (`#![cfg(target_os = "linux")]`) — swaps the tray

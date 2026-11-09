@@ -24,7 +24,7 @@ use crate::notes::task_store::TaskStore;
 use crate::notes::NoteStore;
 use crate::orchestrator::{self, RecordingState};
 use crate::update::UpdateStatus;
-use crate::ui::{app_menu, app_setup, app_splash};
+use crate::ui::{app_day_end, app_menu, app_setup, app_splash};
 // Linux swaps the tray icon instead of opening a pill window, so nothing in
 // `app_pill` compiles there (see the gated call site below).
 #[cfg(not(target_os = "linux"))]
@@ -190,6 +190,13 @@ pub fn App() -> Element {
     // immediately in `do_note_capture`; this tick only carries body/colour/geometry.
     app_setup::setup_notes_flush(notes, tasks);
 
+    // The day-end card: a list of what got done, at the time set in Settings.
+    // Settings bumps `day_end_show_now` to preview it.
+    let day_end_show_now = use_signal(|| 0u32);
+    app_day_end::setup_day_end_card(
+        window.clone(), config, notes, tasks, app_ready, current_page, day_end_show_now,
+    );
+
     // Live sync, off unless `config.sync.url` names a server. The handle feeds
     // `SyncCard`'s live state without a second connection. `sync_doc` is its own
     // statement: `use_sync_client` writes `notes`, and an inline `peek()` would
@@ -319,7 +326,7 @@ pub fn App() -> Element {
                         VocabPage {}
                     },
                     Page::Settings => rsx! {
-                        SettingsPage { config, last_injection, status_log, update_status, notes, tasks, sync_client: sync_client_handle, components }
+                        SettingsPage { config, last_injection, status_log, update_status, notes, tasks, sync_client: sync_client_handle, components, day_end_show_now }
                     },
                 }
             }

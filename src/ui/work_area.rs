@@ -102,6 +102,30 @@ pub fn work_area(window: &DesktopContext) -> Rect {
     area
 }
 
+/// The primary monitor's usable rect (taskbar excluded on Windows) in logical
+/// coords, where the day-end card tucks into the corner. Falls back to the first
+/// monitor, then to 1080p, like `work_area`: `primary_monitor()` is `None` on
+/// GNOME/Wayland, though nothing there opens the card window.
+pub fn primary_work_rect(window: &DesktopContext) -> Rect {
+    let Some(monitor) = window.primary_monitor().or_else(|| window.available_monitors().next()) else {
+        return undo_gnome_inset(fallback_work_area());
+    };
+    let scale = monitor.scale_factor();
+
+    #[cfg(target_os = "windows")]
+    let (origin_x, origin_y, phys_w, phys_h) =
+        windows_work_rect(&monitor).unwrap_or_else(|| physical_monitor_rect(&monitor));
+    #[cfg(not(target_os = "windows"))]
+    let (origin_x, origin_y, phys_w, phys_h) = physical_monitor_rect(&monitor);
+
+    Rect {
+        x: (f64::from(origin_x) / scale) as i32,
+        y: (f64::from(origin_y) / scale) as i32,
+        w: (f64::from(phys_w) / scale) as u32,
+        h: (f64::from(phys_h) / scale) as u32,
+    }
+}
+
 /// Cancel the GNOME-panel inset on Windows (`rcWork` already excludes the taskbar).
 #[cfg(target_os = "windows")]
 fn undo_gnome_inset(mut area: Rect) -> Rect {

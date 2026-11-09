@@ -62,6 +62,19 @@ all_workspaces = true        # Mutter only: stick() note windows so they follow
 default_color = "random"     # random | purple | violet | amber | teal | rose | slate
                              # An unrecognised value falls back to "purple"
 
+[day_end]
+enabled = false              # A card that lists what you finished today, at a set
+                             # time. Off by default. A day with nothing logged
+                             # (no Done lines, no tasks ticked) shows no card.
+time = "17:30"               # Local HH:MM. Kept when `enabled` is switched off.
+                             # An unreadable value means the card never fires.
+days = [1, 2, 3, 4, 5, 6, 7] # Weekdays it may appear: 1 = Monday .. 7 = Sunday
+fade_secs = 0                # 0 = stays until clicked; N = leaves by itself after
+                             # N seconds (Settings offers 30). Hovering pauses it.
+                             # Not persisted: whether it already showed today
+                             # lives in memory, so starting Beamer after `time`
+                             # counts as already shown.
+
 [llm]
 enabled = true                       # Master switch for the on-device extraction pass
 base_url = "http://127.0.0.1:8080"   # Beamer never spawns or configures the

@@ -1881,3 +1881,38 @@ body {
 .done-entry:hover {
   cursor: default;
 }
+
+/* ===== Settings: day-end card ===== */
+.input-time {
+  min-width: 0;
+  font-family: "DM Mono", "Cascadia Code", "JetBrains Mono", monospace;
+}
+
+.day-chips {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.day-chip {
+  background: var(--bg-surface);
+  border: 2px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1px 8px;
+  font-family: "DM Mono", "Cascadia Code", "JetBrains Mono", monospace;
+  font-size: 11px;
+  color: var(--fg);
+  cursor: pointer;
+  transition: border-color var(--duration-fast) var(--ease);
+}
+
+.day-chip:hover {
+  border-color: var(--border-strong);
+}
+
+.day-chip.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
