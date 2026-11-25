@@ -146,9 +146,12 @@ fn RecentEntry(props: RecentEntryProps) -> Element {
                     e.stop_propagation();
                     let t = text_for_copy.clone();
                     spawn(async move {
-                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                            let _ = clipboard.set_text(&t);
-                        }
+                        let _ = tokio::task::spawn_blocking(move || {
+                            if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                let _ = clipboard.set_text(&t);
+                            }
+                        })
+                        .await;
                         copied.set(true);
                         tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
                         copied.set(false);

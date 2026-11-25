@@ -75,30 +75,29 @@ impl TranscriptionHistory {
         }
     }
 
-    /// Persist atomically (temp file + rename), so a crash mid-write leaves the
-    /// previous history intact.
+    /// Persist atomically (unique temp file + rename), so a crash mid-write
+    /// leaves the previous history intact.
     pub fn save(&self) -> Result<()> {
-        let dir = Config::config_dir();
-        std::fs::create_dir_all(&dir)?;
         let contents = serde_json::to_string_pretty(self)?;
-
-        let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, contents)?;
-        if let Err(e) = crate::notes::sync_doc::rename_with_retry(&tmp, &self.path) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e.into());
-        }
-        Ok(())
+        crate::notes::sync_doc::write_atomic_bytes(&self.path, "json", contents.as_bytes())
     }
 
-    pub fn append(&mut self, text: String) {
+    /// Update in-memory entries (with cap eviction) and return a clone to save
+    /// off the UI thread via `spawn_blocking`.
+    pub fn append_in_memory(&mut self, text: String) -> Self {
         let timestamp = Local::now().to_rfc3339();
         self.entries.push(HistoryEntry { timestamp, text });
         if self.entries.len() > MAX_ENTRIES {
             let excess = self.entries.len() - MAX_ENTRIES;
             self.entries.drain(..excess);
         }
-        if let Err(e) = self.save() {
+        self.clone()
+    }
+
+    #[cfg(test)]
+    pub fn append(&mut self, text: String) {
+        let snapshot = self.append_in_memory(text);
+        if let Err(e) = snapshot.save() {
             tracing::error!("Failed to save transcription history: {}", e);
         }
     }

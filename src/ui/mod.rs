@@ -36,6 +36,7 @@ pub mod work_area;
 pub mod status_log;
 pub mod tasks_page;
 pub mod vocab_page;
+mod window_queue;
 mod windows_shortcut;
 
 use std::path::PathBuf;

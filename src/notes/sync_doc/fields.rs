@@ -6,9 +6,11 @@
 //! vec issues no ops. That guard is also what stops a stale in-memory row from
 //! silently undoing a peer's write (Mira's `tasks[id].done`); never make it unconditional.
 
+use std::collections::HashSet;
+
 use anyhow::Result;
 use automerge::transaction::Transactable;
-use automerge::{AutoCommit, ObjId, ObjType, ReadDoc};
+use automerge::{AutoCommit, ObjId, ObjType, ReadDoc, Value};
 
 pub fn get_str(doc: &AutoCommit, obj: &ObjId, key: &str) -> Option<String> {
     match doc.get(obj, key) {
@@ -89,7 +91,7 @@ pub fn put_opt_str(
 /// the object) would be last-write-wins and eat one machine's typing.
 pub fn put_text(doc: &mut AutoCommit, obj: &ObjId, key: &str, value: &str) -> Result<()> {
     let existing = match doc.get(obj, key)? {
-        Some((v, id)) if v.is_object() => Some(id),
+        Some((Value::Object(ObjType::Text), id)) => Some(id),
         _ => None,
     };
     let id = match existing {
@@ -106,20 +108,21 @@ pub fn put_text(doc: &mut AutoCommit, obj: &ObjId, key: &str, value: &str) -> Re
 /// Delete every key of `map` not in `keep`. Only ever called on the `notes`
 /// and `tasks` maps, so root keys Beamer doesn't own (`ROOT.look`) survive.
 pub fn retain_keys(doc: &mut AutoCommit, map: &ObjId, keep: &[String]) -> Result<()> {
-    let stale: Vec<String> =
-        doc.keys(map).filter(|k| !keep.iter().any(|kept| kept == k)).collect();
+    let keep_set: HashSet<&str> = keep.iter().map(String::as_str).collect();
+    let stale: Vec<String> = doc
+        .keys(map)
+        .filter(|k| !keep_set.contains(k.as_str()))
+        .collect();
     for key in stale {
         doc.delete(map, key.as_str())?;
     }
     Ok(())
 }
 
-/// The map at `obj[key]`, created there if the key is absent or holds a scalar.
+/// The map at `obj[key]`, created there if the key is absent or holds a non-map value.
 pub fn child_map(doc: &mut AutoCommit, obj: &ObjId, key: &str) -> Result<ObjId> {
-    if let Some((v, id)) = doc.get(obj, key)? {
-        if v.is_object() {
-            return Ok(id);
-        }
+    if let Some((Value::Object(ObjType::Map), id)) = doc.get(obj, key)? {
+        return Ok(id);
     }
     Ok(doc.put_object(obj, key, ObjType::Map)?)
 }

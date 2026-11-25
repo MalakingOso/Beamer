@@ -67,7 +67,7 @@ impl Root {
                 .unwrap_or_else(std::env::temp_dir)
                 .join("Beamer"),
             Root::Models => dirs::home_dir()
-                .unwrap_or_default()
+                .unwrap_or_else(std::env::temp_dir)
                 .join("models")
                 .join("beamer"),
         }

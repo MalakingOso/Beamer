@@ -19,6 +19,8 @@ use std::time::Duration;
 /// [`LlmConfig::connect_timeout`] clamps here — the UI `min` cannot cover a
 /// hand-edited `config.toml`. 100ms is a floor nobody mistakes for "off".
 pub const MIN_CONNECT_TIMEOUT_MS: u64 = 100;
+/// Floor on `request_timeout_ms` so a hand-edited `0` cannot fail every pass instantly.
+pub const MIN_REQUEST_TIMEOUT_MS: u64 = 1_000;
 
 /// Connection settings for the local model server.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -80,6 +82,10 @@ impl LlmConfig {
     /// `0`, so the clamp lives here, where the value becomes a `Duration`.
     pub fn connect_timeout(&self) -> Duration {
         Duration::from_millis(self.connect_timeout_ms.max(MIN_CONNECT_TIMEOUT_MS))
+    }
+
+    pub fn request_timeout(&self) -> Duration {
+        Duration::from_millis(self.request_timeout_ms.max(MIN_REQUEST_TIMEOUT_MS))
     }
 
     /// The server for extraction requests: `extract.base_url` if set and

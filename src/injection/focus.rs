@@ -107,8 +107,10 @@ where
     A: serde::Serialize + zbus::zvariant::DynamicType + Send + 'static,
     R: for<'d> zbus::zvariant::DynamicDeserialize<'d> + Send + 'static,
 {
-    let conn = cached_conn()?;
+    // Both session-bus connect and the method call stay inside `with_timeout`,
+    // so a wedged session bus cannot hang `DISPATCH_LOCK` indefinitely.
     with_timeout(timeout_ms, move || {
+        let conn = cached_conn()?;
         let proxy = zbus::blocking::Proxy::new(
             &conn,
             "org.gnome.Shell",

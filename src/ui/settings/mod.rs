@@ -68,8 +68,25 @@ fn save_config(mut config: Signal<Config>, mutate: impl FnOnce(&mut Config)) {
 pub fn SettingsPage(props: SettingsPageProps) -> Element {
     let config = props.config;
     let last_injection = props.last_injection;
-    let mut elevenlabs_key = use_signal(|| crate::config::load_api_key("elevenlabs_api_key"));
-    let mut mistral_key = use_signal(|| crate::config::load_api_key("mistral_api_key"));
+    let mut elevenlabs_key = use_signal(String::new);
+    let mut mistral_key = use_signal(String::new);
+    // Load OS keyring credentials off the UI thread so a slow/locked keyring
+    // never freezes opening Settings.
+    use_hook(move || {
+        spawn(async move {
+            if let Ok((el, mi)) = tokio::task::spawn_blocking(|| {
+                (
+                    crate::config::load_api_key("elevenlabs_api_key"),
+                    crate::config::load_api_key("mistral_api_key"),
+                )
+            })
+            .await
+            {
+                elevenlabs_key.set(el);
+                mistral_key.set(mi);
+            }
+        });
+    });
     // With nothing logged today there is no card to preview.
     let has_entries_today = !crate::notes::accomplishments::log_for_day(
         &props.notes.read(),
@@ -134,15 +151,24 @@ pub fn SettingsPage(props: SettingsPageProps) -> Element {
             ApiKeysCard {
                 elevenlabs_key: elevenlabs_key.read().clone(),
                 on_elevenlabs_change: move |key: String| {
-                    // Saved immediately like every other field: nothing hints at
-                    // a separate save, so deferring one silently loses keys on close.
-                    crate::config::save_api_key("elevenlabs_api_key", &key);
-                    elevenlabs_key.set(key);
+                    // Saved immediately off the UI thread via spawn_blocking.
+                    elevenlabs_key.set(key.clone());
+                    spawn(async move {
+                        let _ = tokio::task::spawn_blocking(move || {
+                            crate::config::save_api_key("elevenlabs_api_key", &key);
+                        })
+                        .await;
+                    });
                 },
                 mistral_key: mistral_key.read().clone(),
                 on_mistral_change: move |key: String| {
-                    crate::config::save_api_key("mistral_api_key", &key);
-                    mistral_key.set(key);
+                    mistral_key.set(key.clone());
+                    spawn(async move {
+                        let _ = tokio::task::spawn_blocking(move || {
+                            crate::config::save_api_key("mistral_api_key", &key);
+                        })
+                        .await;
+                    });
                 },
             }
 

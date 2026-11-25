@@ -31,6 +31,10 @@ impl Default for WarmupProgress {
     }
 }
 
+/// Ceiling per warmup step so a wedged audio driver or locked keyring can never
+/// strand the splash screen on top of the desktop and block `app_ready`.
+const STEP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Run each warmup step in order, updating `progress` as it goes.
 pub async fn warm_all(mut progress: Signal<WarmupProgress>) {
 
@@ -39,13 +43,18 @@ pub async fn warm_all(mut progress: Signal<WarmupProgress>) {
         pct: 5,
     });
     let t0 = std::time::Instant::now();
-    if let Err(e) = tokio::task::spawn_blocking(|| {
-        let _ = crate::config::load_api_key("elevenlabs_api_key");
-        let _ = crate::config::load_api_key("mistral_api_key");
-    })
+    match tokio::time::timeout(
+        STEP_TIMEOUT,
+        tokio::task::spawn_blocking(|| {
+            let _ = crate::config::load_api_key("elevenlabs_api_key");
+            let _ = crate::config::load_api_key("mistral_api_key");
+        }),
+    )
     .await
     {
-        tracing::warn!("warmup: keyring step panicked: {}", e);
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!("warmup: keyring step panicked: {}", e),
+        Err(_) => tracing::warn!("warmup: keyring step timed out after {:?}", STEP_TIMEOUT),
     }
     tracing::debug!("warmup: keyring took {:?}", t0.elapsed());
 
@@ -56,13 +65,18 @@ pub async fn warm_all(mut progress: Signal<WarmupProgress>) {
     });
 
     let t1 = std::time::Instant::now();
-    if let Err(e) = tokio::task::spawn_blocking(|| match crate::audio::capture::AudioCapture::new() {
-        Ok(_capture) => tracing::debug!("warmup: audio probe ok"),
-        Err(e) => tracing::warn!("warmup: audio probe failed: {}", e),
-    })
+    match tokio::time::timeout(
+        STEP_TIMEOUT,
+        tokio::task::spawn_blocking(|| match crate::audio::capture::AudioCapture::new() {
+            Ok(_capture) => tracing::debug!("warmup: audio probe ok"),
+            Err(e) => tracing::warn!("warmup: audio probe failed: {}", e),
+        }),
+    )
     .await
     {
-        tracing::warn!("warmup: audio step panicked: {}", e);
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!("warmup: audio step panicked: {}", e),
+        Err(_) => tracing::warn!("warmup: audio step timed out after {:?}", STEP_TIMEOUT),
     }
     // Pre-starts the sound-effect thread (WASAPI activation on Windows).
     crate::sounds::warm();
@@ -77,15 +91,20 @@ pub async fn warm_all(mut progress: Signal<WarmupProgress>) {
             pct: after_audio,
         });
         let t2 = std::time::Instant::now();
-        if let Err(e) = tokio::task::spawn_blocking(|| match mpris::PlayerFinder::new() {
-            Ok(finder) => {
-                let _ = finder.find_all();
-            }
-            Err(e) => tracing::warn!("warmup: MPRIS finder failed: {}", e),
-        })
+        match tokio::time::timeout(
+            STEP_TIMEOUT,
+            tokio::task::spawn_blocking(|| match mpris::PlayerFinder::new() {
+                Ok(finder) => {
+                    let _ = finder.find_all();
+                }
+                Err(e) => tracing::warn!("warmup: MPRIS finder failed: {}", e),
+            }),
+        )
         .await
         {
-            tracing::warn!("warmup: mpris step panicked: {}", e);
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!("warmup: mpris step panicked: {}", e),
+            Err(_) => tracing::warn!("warmup: mpris step timed out after {:?}", STEP_TIMEOUT),
         }
         tracing::debug!("warmup: mpris took {:?}", t2.elapsed());
     }
@@ -96,13 +115,24 @@ pub async fn warm_all(mut progress: Signal<WarmupProgress>) {
         pct: pre_network,
     });
 
-    let cfg = crate::config::Config::load().unwrap_or_default();
-    let backend = cfg.transcription.backend.clone();
-    let key_name = match backend.as_str() {
-        "voxtral_batch" => "mistral_api_key",
-        _ => "elevenlabs_api_key",
+    let (backend, api_key) = match tokio::time::timeout(
+        STEP_TIMEOUT,
+        tokio::task::spawn_blocking(|| {
+            let cfg = crate::config::Config::load().unwrap_or_default();
+            let backend = cfg.transcription.backend.clone();
+            let key_name = match backend.as_str() {
+                "voxtral_batch" => "mistral_api_key",
+                _ => "elevenlabs_api_key",
+            };
+            let api_key = crate::config::load_api_key(key_name);
+            (backend, api_key)
+        }),
+    )
+    .await
+    {
+        Ok(Ok(pair)) => pair,
+        _ => (String::new(), String::new()),
     };
-    let api_key = crate::config::load_api_key(key_name);
 
     if api_key.is_empty() {
         tracing::debug!("warmup: skipping network preconnect — no key for backend '{}'", backend);

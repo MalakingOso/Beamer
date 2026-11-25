@@ -21,21 +21,27 @@ impl MediaPause {
         }
         #[cfg(target_os = "linux")]
         {
-            match find_mpris_player_by_bus_name(&self.bus_name) {
-                Some(player) => match player.play() {
-                    Ok(()) => tracing::info!("Resumed MPRIS player: {}", self.bus_name),
-                    Err(e) => tracing::warn!(
-                        "Failed to resume MPRIS player {}: {}",
-                        self.bus_name,
-                        e
-                    ),
-                },
-                // Player quit mid-recording: nothing to resume, and no
-                // fallback to another player (see `MediaPause`).
-                None => tracing::info!(
-                    "MPRIS player {} is gone — nothing to resume",
-                    self.bus_name
-                ),
+            // Off the UI thread: MPRIS D-Bus calls can stall if a player is wedged.
+            let bus_name = std::mem::take(&mut self.bus_name);
+            if !bus_name.is_empty() {
+                let _ = std::thread::Builder::new()
+                    .name("beamer-mpris-resume".into())
+                    .spawn(move || match find_mpris_player_by_bus_name(&bus_name) {
+                        Some(player) => match player.play() {
+                            Ok(()) => tracing::info!("Resumed MPRIS player: {}", bus_name),
+                            Err(e) => tracing::warn!(
+                                "Failed to resume MPRIS player {}: {}",
+                                bus_name,
+                                e
+                            ),
+                        },
+                        // Player quit mid-recording: nothing to resume, and no
+                        // fallback to another player (see `MediaPause`).
+                        None => tracing::info!(
+                            "MPRIS player {} is gone — nothing to resume",
+                            bus_name
+                        ),
+                    });
             }
         }
     }
@@ -61,18 +67,22 @@ pub async fn pause_media_if_playing() -> Option<MediaPause> {
     }
     #[cfg(target_os = "linux")]
     {
-        let player = find_playing_mpris_player()?;
-        let bus_name = player.bus_name().to_string();
-        match player.pause() {
-            Ok(()) => {
-                tracing::info!("Paused MPRIS player: {}", bus_name);
-                Some(MediaPause { bus_name })
+        tokio::task::spawn_blocking(|| {
+            let player = find_playing_mpris_player()?;
+            let bus_name = player.bus_name().to_string();
+            match player.pause() {
+                Ok(()) => {
+                    tracing::info!("Paused MPRIS player: {}", bus_name);
+                    Some(MediaPause { bus_name })
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to pause MPRIS player {}: {}", bus_name, e);
+                    None
+                }
             }
-            Err(e) => {
-                tracing::warn!("Failed to pause MPRIS player {}: {}", bus_name, e);
-                None
-            }
-        }
+        })
+        .await
+        .unwrap_or(None)
     }
 }
 

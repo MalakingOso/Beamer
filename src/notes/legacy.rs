@@ -45,8 +45,16 @@ impl NoteStore {
             }
         };
 
-        if !path.exists() {
-            return empty(path, machine, doc);
+        match path.try_exists() {
+            Ok(true) => {}
+            Ok(false) => return empty(path, machine, doc),
+            Err(e) => {
+                let message = format!("Could not stat notes at {}: {e}", path.display());
+                tracing::error!("{message}");
+                let mut store = empty(path, machine, doc);
+                store.load_error = Some(message);
+                return store;
+            }
         }
         let contents = match std::fs::read_to_string(&path) {
             Ok(c) => c,
@@ -78,7 +86,7 @@ impl NoteStore {
                     backup.display()
                 );
                 tracing::error!("{message}");
-                let _ = std::fs::rename(&path, &backup);
+                let _ = super::sync_doc::rename_with_retry(&path, &backup);
                 let mut store = empty(path, machine, doc);
                 store.load_error = Some(message);
                 store

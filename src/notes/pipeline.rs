@@ -9,9 +9,13 @@
 //! In-flight passes run concurrently in one `FuturesUnordered`; duplicates drop.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::rc::Rc;
 use std::time::Duration;
+
+/// Cap on simultaneous extraction requests so a backlog sweep never floods a
+/// CPU-bound local `llama-server` into cascading 60s timeouts.
+const MAX_CONCURRENT_EXTRACTIONS: usize = 2;
 
 use dioxus::prelude::*;
 use futures_util::stream::FuturesUnordered;
@@ -65,8 +69,13 @@ pub fn use_pipeline(
         let terminal: Rc<RefCell<HashSet<String>>> = Rc::new(RefCell::new(HashSet::new()));
         let mut in_flight_signal = in_flight_signal;
         let mut running = FuturesUnordered::new();
+        let mut queued: VecDeque<PipelineRequest> = VecDeque::new();
 
         loop {
+            while running.len() < MAX_CONCURRENT_EXTRACTIONS {
+                let Some(next_req) = queued.pop_front() else { break };
+                running.push(run_request(next_req, config, notes, tasks, status_log));
+            }
             tokio::select! {
                 incoming = rx.next() => {
                     let Some(request) = incoming else { break };
@@ -78,7 +87,11 @@ pub fn use_pipeline(
                         continue;
                     }
                     in_flight_signal.write().insert(request.note_id.clone());
-                    running.push(run_request(request, config, notes, tasks, status_log));
+                    if running.len() < MAX_CONCURRENT_EXTRACTIONS {
+                        running.push(run_request(request, config, notes, tasks, status_log));
+                    } else {
+                        queued.push_back(request);
+                    }
                 }
                 Some(finished) = running.next(), if !running.is_empty() => {
                     in_flight.borrow_mut().remove(&finished.note_id);
@@ -96,12 +109,16 @@ pub fn use_pipeline(
                     // `in_flight` removal above, so this same note can be swept.
                     if should_sweep(finished.succeeded, finished.swept) {
                         let backlog = sweep_requests(&notes.peek(), &terminal.borrow());
+                        let mut added: Vec<String> = Vec::new();
                         for request in backlog {
                             // `in_flight` still guards here: a mid-retry note is left alone.
                             if in_flight.borrow_mut().insert(request.note_id.clone()) {
-                                in_flight_signal.write().insert(request.note_id.clone());
-                                running.push(run_request(request, config, notes, tasks, status_log));
+                                added.push(request.note_id.clone());
+                                queued.push_back(request);
                             }
+                        }
+                        if !added.is_empty() {
+                            in_flight_signal.write().extend(added);
                         }
                     }
                 }
@@ -138,7 +155,7 @@ async fn run_request(
         (
             cfg.llm.enabled,
             cfg.llm.extract_base_url().to_string(),
-            Duration::from_millis(cfg.llm.request_timeout_ms),
+            cfg.llm.request_timeout(),
             cfg.llm.extract.clone(),
         )
     };
@@ -211,9 +228,13 @@ async fn run_extraction(
     match extract::extract(base_url, cfg, &text, today, timeout).await {
         Ok(proposals) => {
             if !config.peek().llm.extract_wanted() {
-                // Dropping the proposals is the point: rows written now would
-                // appear on the tasks page for a pass the user just retired.
+                // Mark Skipped (never overwrites Done) so the note doesn't stay stuck Pending.
+                notes.write().mark_extract_skipped(id);
                 return abandoned("extraction", id);
+            }
+            // Do not insert orphan tasks if the note was deleted while extraction was in flight.
+            if notes.peek().get(id).is_none() {
+                return RequestOutcome::NotAttempted;
             }
             let count = proposals.len();
             // Machine suffix for the new row ids (they sync keyed by id).
@@ -248,12 +269,13 @@ async fn run_extraction(
             notes.write().mark_analyzed(id);
             // Through `flush_stores` (the only document writer), after the mark,
             // so one write carries both. `flush_if_dirty` would skip the document.
-            crate::notes::flush_stores(&mut notes.write(), &mut tasks.write());
+            crate::notes::flush::flush_stores_async(*notes, *tasks, false).await;
             tracing::info!("extraction proposed {} task(s) for note {}", count, id);
             RequestOutcome::Responded
         }
         Err(e) => {
             if !config.peek().llm.extract_wanted() {
+                notes.write().mark_extract_skipped(id);
                 return abandoned("extraction", id);
             }
             notes.write().mark_extract_failed(id);

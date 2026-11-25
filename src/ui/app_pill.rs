@@ -96,7 +96,7 @@ pub(super) fn setup_recording_pill(
                     .with_exits_when_last_window_closes(false);
 
                 let dom = VirtualDom::new(RecordingPill);
-                let ctx: DesktopContext = window.new_window(dom, cfg).await;
+                let ctx: DesktopContext = super::window_queue::open_window(&window, dom, cfg).await;
 
                 // Realize immediately so click-through applies, then hide: nothing
                 // shows until recording starts. No DWM backdrop (Acrylic falls
@@ -125,17 +125,19 @@ pub(super) fn setup_recording_pill(
                 ctx.set_visible(true);
                 #[cfg(not(target_os = "windows"))]
                 {
-                    if !*pill_click_through_set.read() {
+                    if !*pill_click_through_set.peek() {
                         let _ = ctx.set_ignore_cursor_events(true);
                         pill_click_through_set.set(true);
                     }
                 }
 
                 // Follow the foreground monitor only on hidden->visible (see above).
-                if !*pill_was_shown.read() {
+                // Use `peek`, not `read`: mutating `pill_was_shown` inside its own
+                // subscription would immediately re-run this effect.
+                if !*pill_was_shown.peek() {
                     pill_was_shown.set(true);
                     #[cfg(target_os = "windows")]
-                    reposition_to_foreground_monitor(ctx, *pill_size.read());
+                    reposition_to_foreground_monitor(ctx, *pill_size.peek());
                 }
 
                 let _ = ctx

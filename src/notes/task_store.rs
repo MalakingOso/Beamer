@@ -94,8 +94,16 @@ impl TaskStore {
     /// document exists, `load_beside` reads that instead.
     pub(crate) fn load_from(path: PathBuf) -> Self {
         let empty = |path: PathBuf| Self { tasks: Vec::new(), path, ..Self::detached() };
-        if !path.exists() {
-            return empty(path);
+        match path.try_exists() {
+            Ok(true) => {}
+            Ok(false) => return empty(path),
+            Err(e) => {
+                let message = format!("Could not stat tasks at {}: {e}", path.display());
+                tracing::error!("{message}");
+                let mut store = empty(path);
+                store.load_error = Some(message);
+                return store;
+            }
         }
         let contents = match std::fs::read_to_string(&path) {
             Ok(c) => c,
@@ -122,7 +130,7 @@ impl TaskStore {
                     backup.display()
                 );
                 tracing::error!("{message}");
-                if let Err(e) = std::fs::rename(&path, &backup) {
+                if let Err(e) = super::sync_doc::rename_with_retry(&path, &backup) {
                     tracing::error!("Could not preserve corrupt tasks: {}", e);
                 }
                 let mut store = empty(path);
@@ -132,20 +140,32 @@ impl TaskStore {
         }
     }
 
-    /// Persist the store atomically (temp file plus rename).
+    /// Persist the store atomically (unique temp file plus rename).
     pub fn save(&self) -> Result<()> {
-        if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
         let contents = serde_json::to_string_pretty(self)?;
+        super::sync_doc::write_atomic_bytes(&self.path, "json", contents.as_bytes())
+    }
 
-        let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, contents)?;
-        if let Err(e) = super::sync_doc::rename_with_retry(&tmp, &self.path) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e.into());
+    pub(crate) fn take_mirror_write(&mut self) -> Option<(PathBuf, Vec<u8>)> {
+        if self.doc.lock().is_read_only() {
+            self.dirty = false;
+            self.doc_dirty = false;
+            return None;
         }
-        Ok(())
+        if !self.dirty {
+            return None;
+        }
+        self.doc_dirty = true;
+        match serde_json::to_string_pretty(self) {
+            Ok(json) => {
+                self.dirty = false;
+                Some((self.path.clone(), json.into_bytes()))
+            }
+            Err(e) => {
+                tracing::error!("Failed to serialize tasks: {}", e);
+                None
+            }
+        }
     }
 
     /// Write only if something changed. A run of toggles coalesces into one write.

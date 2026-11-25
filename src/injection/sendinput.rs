@@ -68,31 +68,41 @@ pub fn inject_via_sendinput(text: &str) -> Result<bool> {
     }
 
     let size = std::mem::size_of::<INPUT>() as i32;
-    let sent = unsafe { SendInput(&inputs, size) } as usize;
-    if sent == inputs.len() {
-        return Ok(true);
-    }
-    tracing::warn!("SendInput: sent {} of {} events", sent, inputs.len());
-
-    // Retry the unsent tail once: the accepted prefix is already typed, and the
-    // clipboard fallback would paste the whole text after it (duplication).
-    // A still-short retry fails through; the partial text stays.
-    let tail = &inputs[sent.min(inputs.len())..];
-    if tail.is_empty() {
-        return Ok(false);
-    }
-    let resent = unsafe { SendInput(tail, size) } as usize;
-    if resent != tail.len() {
+    let mut offset = 0usize;
+    let mut retries = 0u32;
+    while offset < inputs.len() {
+        let slice = &inputs[offset..];
+        let sent = unsafe { SendInput(slice, size) } as usize;
+        offset = (offset + sent).min(inputs.len());
+        if offset == inputs.len() {
+            return Ok(true);
+        }
+        // UIPI blocks all events (`sent == 0` on the very first call): fall
+        // through immediately rather than sleeping on an elevated window.
+        if offset == 0 {
+            tracing::warn!("SendInput: blocked (sent 0 of {} events)", inputs.len());
+            return Ok(false);
+        }
+        retries += 1;
+        if retries > 5 {
+            tracing::warn!(
+                "SendInput: gave up after {} retries ({} of {} events sent)",
+                retries - 1,
+                offset,
+                inputs.len()
+            );
+            return Ok(false);
+        }
         tracing::warn!(
-            "SendInput: tail retry sent {} of {} events",
-            resent,
-            tail.len()
+            "SendInput: sent {} of {} events so far; backing off before tail retry {}",
+            offset,
+            inputs.len(),
+            retries
         );
+        // Brief pause lets the target drain its input queue before retrying the tail.
+        std::thread::sleep(std::time::Duration::from_millis(25));
     }
-
-    // Require full queue insertion so a partial send still falls through
-    // to the next backend. (Can't catch targets that accept events but drop them.)
-    Ok(resent == tail.len())
+    Ok(true)
 }
 
 fn make_unicode_input(char_code: u16, key_up: bool) -> INPUT {

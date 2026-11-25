@@ -58,7 +58,7 @@ pub(super) fn setup_splash(window: DesktopContext, mut app_ready: Signal<bool>) 
                     .with_exits_when_last_window_closes(false);
 
                 let dom = VirtualDom::new(SplashWindow);
-                let ctx: DesktopContext = window.new_window(dom, cfg).await;
+                let ctx: DesktopContext = super::window_queue::open_window(&window, dom, cfg).await;
                 splash_ctx.set(Some(ctx));
 
                 let started = std::time::Instant::now();

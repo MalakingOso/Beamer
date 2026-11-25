@@ -125,7 +125,15 @@ async fn correct_with_vocab(api_key: &str, text: &str, vocab: &[String]) -> Stri
                         .as_str()
                         .unwrap_or(text)
                         .to_string();
-                    let sim = similarity(text, &corrected);
+                    let sim = if text.len() > 500 || corrected.len() > 500 {
+                        let a = text.to_string();
+                        let b = corrected.clone();
+                        tokio::task::spawn_blocking(move || similarity(&a, &b))
+                            .await
+                            .unwrap_or(1.0)
+                    } else {
+                        similarity(text, &corrected)
+                    };
                     tracing::debug!(
                         "Vocab correction: {:?} -> {:?} (similarity: {:.2})",
                         text, corrected, sim
@@ -208,9 +216,9 @@ async fn transcribe_batch_inner(api_key: &str, audio_pcm: Vec<u8>, vocab: &[Stri
             .await
         {
             Ok(resp) => resp,
-            // Timeouts and refused connections are transient; anything else
-            // (bad request shape, TLS config) fails identically on retry.
-            Err(e) if (e.is_timeout() || e.is_connect()) && attempt < 3 => {
+            // Timeouts, connect failures, and stale pooled-socket resets/EOFs
+            // (after sleep/wake) are transient; builder/config errors are not.
+            Err(e) if super::is_transient_transport_error(&e) && attempt < 3 => {
                 tracing::warn!(
                     "Voxtral batch transport error ({}), retrying in {}s (attempt {})",
                     e,

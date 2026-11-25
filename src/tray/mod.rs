@@ -37,7 +37,7 @@ pub fn build_tray_menu() -> (Menu, TrayMenuItems) {
     let check_updates = MenuItem::new("Check for Updates", true, None);
     let quit = MenuItem::new("Quit", true, None);
 
-    menu.append_items(&[
+    if let Err(e) = menu.append_items(&[
         &home,
         &history,
         &vocab,
@@ -48,8 +48,9 @@ pub fn build_tray_menu() -> (Menu, TrayMenuItems) {
         &check_updates,
         &PredefinedMenuItem::separator(),
         &quit,
-    ])
-    .expect("Failed to build tray menu");
+    ]) {
+        tracing::error!("Failed to populate tray menu: {}", e);
+    }
 
     let items = TrayMenuItems {
         home,

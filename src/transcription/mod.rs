@@ -54,14 +54,30 @@ mod batch_tests {
     }
 }
 
+/// Whether a batch transport error is transient and worth retrying: timeouts,
+/// connect errors, and stale pooled-socket resets/EOFs (common after sleep/wake
+/// or NAT idle drops) are; builder/URL/redirect errors are not.
+pub(crate) fn is_transient_transport_error(e: &reqwest::Error) -> bool {
+    !e.is_builder()
+        && !e.is_redirect()
+        && (e.is_timeout() || e.is_connect() || e.is_request() || e.is_body())
+}
+
 /// Shared HTTP client for all transcription backends.
 pub(crate) fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
+            .pool_idle_timeout(Duration::from_secs(30))
+            .tcp_keepalive(Duration::from_secs(30))
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new())
+            .unwrap_or_else(|e| {
+                tracing::error!("Failed to build configured transcription HTTP client: {e}");
+                reqwest::Client::builder()
+                    .build()
+                    .unwrap_or_else(|_| reqwest::Client::new())
+            })
     })
 }
 

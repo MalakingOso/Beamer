@@ -91,8 +91,14 @@ impl MachineStore {
         let contents = match std::fs::read_to_string(&path) {
             Ok(c) => c,
             Err(e) => {
-                tracing::error!("Could not read machine state at {:?}: {}", path, e);
-                return Self { dirty: true, ..Self::new(path) };
+                // The file exists (`try_exists == Ok(true)`) but could not be read
+                // (e.g., transient lock/permissions): latch read-only so we never
+                // overwrite the real `machine.json` with a fresh empty store.
+                tracing::error!(
+                    "Could not read machine state at {:?} ({}); leaving it read-only this session",
+                    path, e
+                );
+                return Self { dirty: false, read_only: true, ..Self::new(path) };
             }
         };
         match serde_json::from_str::<MachineStore>(&contents) {
@@ -107,24 +113,48 @@ impl MachineStore {
                     "Machine state at {:?} is not valid JSON ({}); preserving as {:?}",
                     path, e, backup
                 );
-                let _ = std::fs::rename(&path, &backup);
-                Self { dirty: true, ..Self::new(path) }
+                if let Err(re) = super::sync_doc::rename_with_retry(&path, &backup) {
+                    tracing::error!(
+                        "Could not preserve corrupt machine state ({}); leaving it read-only",
+                        re
+                    );
+                    Self { dirty: false, read_only: true, ..Self::new(path) }
+                } else {
+                    Self { dirty: true, ..Self::new(path) }
+                }
             }
         }
     }
 
     pub fn save(&self) -> Result<()> {
-        if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
         let contents = serde_json::to_string_pretty(self)?;
-        let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, contents)?;
-        if let Err(e) = super::sync_doc::rename_with_retry(&tmp, &self.path) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e.into());
+        super::sync_doc::write_atomic_bytes(&self.path, "json", contents.as_bytes())
+    }
+
+    pub(crate) fn take_write(&mut self) -> Option<(PathBuf, Vec<u8>)> {
+        if self.read_only {
+            self.dirty = false;
+            return None;
         }
-        Ok(())
+        if !self.dirty {
+            return None;
+        }
+        match serde_json::to_string_pretty(self) {
+            Ok(json) => {
+                self.dirty = false;
+                Some((self.path.clone(), json.into_bytes()))
+            }
+            Err(e) => {
+                tracing::error!("Failed to serialize machine state: {}", e);
+                None
+            }
+        }
+    }
+
+    pub(crate) fn mark_dirty(&mut self) {
+        if !self.read_only {
+            self.dirty = true;
+        }
     }
 
     pub fn flush_if_dirty(&mut self) -> bool {

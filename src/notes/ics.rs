@@ -131,7 +131,7 @@ pub fn calendar(task: &Task, now: DateTime<Utc>) -> String {
 /// filesystem-safe characters. The id suffix keeps two tasks that start with
 /// the same words from overwriting each other in the temp dir.
 pub fn file_name(task: &Task) -> String {
-    let slug: String = task
+    let mut slug: String = task
         .text
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
@@ -141,6 +141,13 @@ pub fn file_name(task: &Task) -> String {
         .take(6)
         .collect::<Vec<_>>()
         .join("-");
+    // Cap length so long URLs/words never exceed Windows MAX_PATH / NAME_MAX.
+    if slug.len() > 48 {
+        slug.truncate(48);
+        while slug.ends_with('-') {
+            slug.pop();
+        }
+    }
     // Task ids are hex/timestamp shapes already, but sanitize defensively:
     // the name must stay filesystem-safe whatever mints the id.
     let id_suffix: String = task
@@ -157,11 +164,23 @@ pub fn file_name(task: &Task) -> String {
     }
 }
 
-/// Write the task's `.ics` to the temp dir and return the path.
+/// Write the task's `.ics` to the temp dir and return the path. Falls back to
+/// a timestamped filename if the calendar app still holds the deterministic
+/// path open (Windows sharing violation).
 pub fn write_temp(task: &Task) -> Result<PathBuf> {
-    let path = std::env::temp_dir().join(file_name(task));
-    std::fs::write(&path, calendar(task, Utc::now()))?;
-    Ok(path)
+    let body = calendar(task, Utc::now());
+    let name = file_name(task);
+    let path = std::env::temp_dir().join(&name);
+    match std::fs::write(&path, &body) {
+        Ok(()) => Ok(path),
+        Err(first_err) => {
+            let stamp = Utc::now().timestamp_millis();
+            let stem = name.strip_suffix(".ics").unwrap_or(&name);
+            let fallback = std::env::temp_dir().join(format!("{stem}-{stamp}.ics"));
+            std::fs::write(&fallback, &body).map_err(|_| first_err)?;
+            Ok(fallback)
+        }
+    }
 }
 
 #[cfg(test)]

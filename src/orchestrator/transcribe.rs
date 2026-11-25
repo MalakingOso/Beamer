@@ -85,7 +85,10 @@ async fn transcribe_and_deliver(
     );
 
     let start = tokio::time::Instant::now();
-    let vocab = crate::config::vocabulary::Vocabulary::load()?.list().to_vec();
+    let vocab = tokio::task::spawn_blocking(|| {
+        crate::config::vocabulary::Vocabulary::load().map(|v| v.list().to_vec())
+    })
+    .await??;
     // Exhaustive on purpose (see `backend_key`): a new backend must land
     // here, never silently fall back to another model.
     let result = match backend {

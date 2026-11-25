@@ -207,7 +207,7 @@ async fn open_card(
         DayEndCard,
         DayEndCardProps { view, anchor, fade_secs, open_done },
     );
-    let ctx: DesktopContext = window.new_window(dom, cfg).await;
+    let ctx: DesktopContext = super::window_queue::open_window(window, dom, cfg).await;
 
     // Swap after the await, not before: two showings that overlap (a double-click
     // on "Show it now", or the timer firing mid-preview) both reach this point,

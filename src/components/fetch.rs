@@ -4,9 +4,13 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
+
+/// Maximum stall per HTTP response header or body chunk before aborting.
+const CHUNK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// `<dest>.part`. The uninstaller deletes the model's by this exact name.
 pub fn part_path(dest: &Path) -> PathBuf {
@@ -16,36 +20,72 @@ pub fn part_path(dest: &Path) -> PathBuf {
 }
 
 /// Stream `url` into `to` (created or truncated), reporting
-/// `(received, total)` as it goes. Checks nothing about the content; the
-/// caller verifies before trusting it.
+/// `(received, total)` as it goes. File creation, writes and flush run on a
+/// `spawn_blocking` thread so writing 1.15 GB never stalls the UI thread.
 pub async fn download(
     url: &str,
     expected_size: u64,
     to: &Path,
     mut progress: impl FnMut(u64, u64),
 ) -> anyhow::Result<()> {
-    if let Some(dir) = to.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
     // Shared pool with `llm::chat`. It sets only a connect timeout, never an
-    // overall one, so a 1.1 GB body is not cut off mid-stream.
+    // overall one; per-chunk timeouts below catch stalled transfers instead.
     let client = crate::llm::client::http_client();
-    let response = client.get(url).send().await?.error_for_status()?;
+    let response = tokio::time::timeout(CHUNK_TIMEOUT, client.get(url).send())
+        .await
+        .map_err(|_| anyhow::anyhow!("download request timed out after {}s", CHUNK_TIMEOUT.as_secs()))??
+        .error_for_status()?;
     let total = response.content_length().unwrap_or(expected_size);
 
-    let mut file = std::fs::File::create(to)?;
+    let dest = to.to_path_buf();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(16);
+    let writer = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        if let Some(dir) = dest.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let mut file = std::fs::File::create(&dest)?;
+        while let Some(chunk) = rx.blocking_recv() {
+            file.write_all(&chunk)?;
+        }
+        file.flush()?;
+        Ok(())
+    });
+
     let mut received: u64 = 0;
     progress(0, total);
 
     let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        file.write_all(&chunk)?;
-        received += chunk.len() as u64;
-        progress(received, total);
+    let mut stream_err: Option<anyhow::Error> = None;
+    loop {
+        match tokio::time::timeout(CHUNK_TIMEOUT, stream.next()).await {
+            Ok(Some(Ok(chunk))) => {
+                let n = chunk.len() as u64;
+                if tx.send(chunk).await.is_err() {
+                    break;
+                }
+                received += n;
+                progress(received, total);
+            }
+            Ok(Some(Err(e))) => {
+                stream_err = Some(e.into());
+                break;
+            }
+            Ok(None) => break,
+            Err(_) => {
+                stream_err = Some(anyhow::anyhow!(
+                    "download stalled for {}s",
+                    CHUNK_TIMEOUT.as_secs()
+                ));
+                break;
+            }
+        }
     }
-    file.flush()?;
-    Ok(())
+    drop(tx);
+    let write_res = writer.await?;
+    if let Some(err) = stream_err {
+        return Err(err);
+    }
+    write_res
 }
 
 /// Whether `path` has the expected size and sha256. The size check runs first

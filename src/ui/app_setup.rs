@@ -49,24 +49,27 @@ pub(super) fn setup_window_centering(window: DesktopContext) {
 /// Coalesce per-keystroke edits into at most one write per tick.
 const NOTES_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// Debounced flush of both stores. Checks via `peek()` and takes `write()` only
-/// when something is pending: an unconditional write would notify every open
-/// window twice a second. Task done-ticks ride here; accept/dismiss flush inline.
-pub(super) fn setup_notes_flush(mut notes: Signal<NoteStore>, mut tasks: Signal<TaskStore>) {
+/// Debounced flush of both stores. Checks via `peek()` and offloads disk I/O
+/// + Windows rename retries to `spawn_blocking` via `flush_stores_async` so
+/// periodic saves never freeze the UI thread.
+pub(super) fn setup_notes_flush(notes: Signal<NoteStore>, tasks: Signal<TaskStore>) {
     use_hook(move || {
         spawn(async move {
+            let mut ticks: u32 = 0;
             loop {
                 tokio::time::sleep(NOTES_FLUSH_INTERVAL).await;
-                // `needs_flush`, not `is_dirty`: an inline flush clears `dirty`
-                // when the JSON mirror lands while the document still owes a
-                // write. Third arm is the mtime stat catching a synced-in document.
-                let pending = notes.peek().needs_flush()
-                    || tasks.peek().needs_flush()
-                    || notes.peek().doc_file_moved();
+                ticks = ticks.wrapping_add(1);
+                // Check disk mtime off the UI thread every ~2s (4 ticks) so
+                // external sync-file updates are picked up without blocking UI.
+                let file_moved = if ticks % 4 == 0 {
+                    let doc = notes.peek().sync_doc();
+                    crate::notes::flush::doc_file_moved_async(doc).await
+                } else {
+                    false
+                };
+                let pending = notes.peek().needs_flush() || tasks.peek().needs_flush() || file_moved;
                 if pending {
-                    let mut notes = notes.write();
-                    let mut tasks = tasks.write();
-                    crate::notes::flush_stores(&mut notes, &mut tasks);
+                    crate::notes::flush::flush_stores_async(notes, tasks, file_moved).await;
                 }
             }
         });

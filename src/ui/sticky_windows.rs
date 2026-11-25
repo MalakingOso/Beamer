@@ -104,7 +104,25 @@ async fn open_note_window(
         StickyNoteProps { id: note.id.clone(), notes, tasks, passes, passes_in_flight },
     );
 
-    let ctx: DesktopContext = window.new_window(dom, cfg).await;
+    let ctx: DesktopContext = super::window_queue::open_window(&window, dom, cfg).await;
+
+    // A close, archive, or delete may have landed while `open_window` was
+    // awaiting; close the newly created window immediately instead of leaving
+    // an orphan on screen.
+    let still_showing = {
+        let store = notes.peek();
+        store
+            .get(&note.id)
+            .is_some_and(|n| n.is_note() && !n.archived && store.is_open(&note.id))
+    };
+    let still_reserved = registry.peek().contains_key(&note.id);
+    if !still_showing || !still_reserved {
+        tracing::info!("Note {} closed while opening; closing new window immediately", note.id);
+        registry.write().remove(&note.id);
+        ctx.close();
+        return;
+    }
+
     tracing::info!("Opened sticky window for note {} at {:?}", note.id, pos);
     registry.write().insert(
         note.id.clone(),
@@ -244,13 +262,21 @@ pub fn setup_sticky_windows(
             // window the user just closed. `StickyNote`'s close handler marks it
             // closed; force-killed windows are pruned by `reopen_note` instead.
             let live = registry.peek();
+            let mut present_ids: HashSet<&str> = HashSet::with_capacity(store.notes.len());
             for note in store.notes.iter() {
+                present_ids.insert(note.id.as_str());
                 let showing = note.is_note() && store.is_open(&note.id) && !note.archived;
                 let registered = live.contains_key(&note.id);
                 if showing && !registered {
                     to_open.push(note.clone());
                 } else if !showing && registered {
                     to_close.push(note.id.clone());
+                }
+            }
+            // Close windows for notes deleted locally or via sync.
+            for id in live.keys() {
+                if !present_ids.contains(id.as_str()) {
+                    to_close.push(id.clone());
                 }
             }
         }

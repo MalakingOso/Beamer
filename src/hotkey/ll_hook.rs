@@ -15,9 +15,9 @@ use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, GetMessageW, PostThreadMessageW, SetWindowsHookExW, UnhookWindowsHookEx,
-    HHOOK, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN,
-    WM_SYSKEYUP,
+    CallNextHookEx, GetMessageW, KillTimer, PostThreadMessageW, SetTimer, SetWindowsHookExW,
+    UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP,
+    WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
 };
 
 use crate::hotkey::{
@@ -43,10 +43,27 @@ fn modifier_physically_held(left_vk: i32, right_vk: i32) -> bool {
     is_key_physically_held(left_vk) || is_key_physically_held(right_vk)
 }
 
+/// Periodic idle hook refresh (ms): Windows can silently remove `WH_KEYBOARD_LL`
+/// if CPU contention trips `LowLevelHooksTimeout`; reinstalling while idle
+/// brings hotkeys back without restarting Beamer.
+const HOOK_REFRESH_MS: u32 = 60_000;
+
+fn trigger_physically_held(trigger_vk: u32) -> bool {
+    if trigger_vk == VK_LWIN {
+        is_key_physically_held(VK_LWIN as i32) || is_key_physically_held(VK_RWIN as i32)
+    } else {
+        is_key_physically_held(trigger_vk as i32)
+    }
+}
+
 // No tracked modifier fields (unlike linux_hotkey.rs): matching always reads
 // `GetAsyncKeyState` fresh, since Windows can drop modifier key-ups.
 struct HookState {
     shared: Arc<Shared>,
+    /// Thread-local mirror of `shared.bindings`, refreshed only when
+    /// `reset_flag` fires — keeps `hook_proc` completely lock-free on the hot
+    /// path so contention can never stall Windows key delivery.
+    bindings: Vec<BindingConfig>,
     tx: UnboundedSender<HotkeyEvent>,
     binding_state: [BindingState; MAX_BINDINGS],
     win_consumed: bool,
@@ -54,6 +71,29 @@ struct HookState {
 
 thread_local! {
     static HOOK_STATE: RefCell<Option<HookState>> = const { RefCell::new(None) };
+}
+
+/// Self-heal any held binding whose physical key is already released (dropped
+/// key-up from UAC, Win+L lock screen, Ctrl+Alt+Del, or an elevated window).
+fn reconcile_stale_holds(state: &mut HookState) {
+    let mut any_win_held = false;
+    for (i, b) in state.bindings.iter().enumerate() {
+        let bs = &mut state.binding_state[i];
+        if bs.trigger_held {
+            if !trigger_physically_held(b.config.trigger_vk) {
+                bs.trigger_held = false;
+                if bs.armed {
+                    bs.armed = false;
+                    let _ = state.tx.send(HotkeyEvent::RecordStop);
+                }
+            } else if b.config.trigger_vk == VK_LWIN {
+                any_win_held = true;
+            }
+        }
+    }
+    if state.win_consumed && !any_win_held && !trigger_physically_held(VK_LWIN) {
+        state.win_consumed = false;
+    }
 }
 
 unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -78,10 +118,8 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
             None => return false,
         };
 
-        // A config edit resets both bindings. Any in-flight recording ends
-        // first: without this a toggle latched on before the edit desyncs,
-        // and the next toggle press sends RecordStart while already recording.
-        if state.shared.reset_flag.swap(false, Ordering::Relaxed) {
+        // A config edit resets all bindings and refreshes the thread-local copy.
+        if state.shared.reset_flag.swap(false, Ordering::Acquire) {
             for bs in state.binding_state.iter_mut() {
                 if bs.armed || bs.toggled_on {
                     let _ = state.tx.send(HotkeyEvent::RecordStop);
@@ -89,43 +127,44 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
             }
             state.binding_state = [BindingState::default(); MAX_BINDINGS];
             state.win_consumed = false;
+            if let Ok(guard) = state.shared.bindings.try_lock() {
+                state.bindings = guard.clone();
+            } else {
+                // Re-arm flag so the next key event picks up the update without blocking here.
+                state.shared.reset_flag.store(true, Ordering::Release);
+            }
         }
 
         // Either Win key triggers a VK_LWIN binding (mirrors linux_hotkey.rs).
         let is_win_key_event = vk == VK_LWIN || vk == VK_RWIN;
         let norm_vk = if is_win_key_event { VK_LWIN } else { vk };
 
-        let bindings = state.shared.bindings.lock().unwrap_or_else(|p| p.into_inner());
-
-        // Non-trigger keys (incl. bare modifiers) are only queried live via GetAsyncKeyState.
-        if !bindings.iter().any(|b| b.config.trigger_vk == norm_vk) {
+        // Non-trigger keys (incl. bare modifiers): self-heal any dropped key-up, then pass through.
+        if !state.bindings.iter().any(|b| b.config.trigger_vk == norm_vk) {
+            reconcile_stale_holds(state);
             return false;
         }
 
         if is_press {
             // KBDLLHOOKSTRUCT has no repeat bit, so held-state detects repeats.
             // Check it *before* matching so a modifier brushed mid-hold can't
-            // reroute a repeat to another binding sharing this trigger. A dropped
-            // key-up costs one swallowed press; the next release self-heals.
-            let already_held = bindings
+            // reroute a repeat to another binding sharing this trigger.
+            let already_held = state
+                .bindings
                 .iter()
                 .enumerate()
                 .any(|(i, b)| b.config.trigger_vk == norm_vk && state.binding_state[i].trigger_held);
 
-            // A consumed press must not reach the focused app: Ctrl+Space would
-            // type a space (or clear Word's formatting). Repeats of a held
-            // trigger count as consumed.
             let mut consumed = already_held;
 
             if !already_held {
-                // First press: read live modifier state (tracked state goes stale).
                 let ctrl_down = modifier_physically_held(VK_LCONTROL as i32, VK_RCONTROL as i32);
                 let alt_down = modifier_physically_held(VK_LMENU as i32, VK_RMENU as i32);
                 let shift_down = modifier_physically_held(VK_LSHIFT as i32, VK_RSHIFT as i32);
                 let mods = Modifiers { ctrl: ctrl_down, alt: alt_down, shift: shift_down };
 
-                if let Some(idx) = matching_binding(&bindings, norm_vk, mods) {
-                    let binding = &bindings[idx];
+                if let Some(idx) = matching_binding(&state.bindings, norm_vk, mods) {
+                    let binding = &state.bindings[idx];
                     let mode = binding.mode;
                     let is_toggle = binding.config.is_toggle;
                     let is_win_trigger = binding.config.trigger_vk == VK_LWIN;
@@ -156,10 +195,9 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
         } else {
             // On release match the held binding: modifiers may already be up,
             // so re-matching the chord would find nothing and strand `armed`.
-            // A release ending a consumed hold is suppressed with its press.
             let mut consumed = false;
-            let idx = (0..bindings.len())
-                .find(|&i| bindings[i].config.trigger_vk == norm_vk && state.binding_state[i].trigger_held);
+            let idx = (0..state.bindings.len())
+                .find(|&i| state.bindings[i].config.trigger_vk == norm_vk && state.binding_state[i].trigger_held);
             if let Some(idx) = idx {
                 let bs = &mut state.binding_state[idx];
                 bs.trigger_held = false;
@@ -211,17 +249,20 @@ impl HotkeyHandle {
     ) {
         *self.shared.bindings.lock().unwrap_or_else(|p| p.into_inner()) =
             build_bindings(inject, note, done);
-        self.shared.reset_flag.store(true, Ordering::Relaxed);
+        self.shared.reset_flag.store(true, Ordering::Release);
     }
 }
 
 impl Drop for HotkeyHandle {
     fn drop(&mut self) {
         // `self` still counts: 1 means this is the last owner.
+        // Never pass thread_id == 0: PostThreadMessageW(0, ...) targets the calling thread.
         if Arc::strong_count(&self.shared) == 1 {
-            let thread_id = self.shared.thread_id.load(Ordering::Relaxed);
-            unsafe {
-                let _ = PostThreadMessageW(thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
+            let thread_id = self.shared.thread_id.load(Ordering::Acquire);
+            if thread_id != 0 {
+                unsafe {
+                    let _ = PostThreadMessageW(thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
+                }
             }
         }
     }
@@ -235,8 +276,9 @@ pub fn start_ll_hook(
     done: Option<HotkeyConfig>,
     tx: UnboundedSender<HotkeyEvent>,
 ) -> HotkeyHandle {
+    let initial_bindings = build_bindings(inject, note, done);
     let shared = Arc::new(Shared {
-        bindings: Mutex::new(build_bindings(inject, note, done)),
+        bindings: Mutex::new(initial_bindings.clone()),
         reset_flag: AtomicBool::new(false),
         thread_id: std::sync::atomic::AtomicU32::new(0),
     });
@@ -250,6 +292,7 @@ pub fn start_ll_hook(
             HOOK_STATE.with(|cell| {
                 *cell.borrow_mut() = Some(HookState {
                     shared: thread_shared.clone(),
+                    bindings: initial_bindings,
                     tx,
                     binding_state: [BindingState::default(); MAX_BINDINGS],
                     win_consumed: false,
@@ -257,9 +300,7 @@ pub fn start_ll_hook(
             });
 
             unsafe {
-                // On failure the thread just ends: dropping `tid_tx` tells the
-                // caller, which keeps running with hotkeys dead.
-                let hook = match SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0) {
+                let mut hook = match SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0) {
                     Ok(hook) => hook,
                     Err(e) => {
                         tracing::error!("Failed to install the keyboard hook: {e}");
@@ -267,12 +308,42 @@ pub fn start_ll_hook(
                     }
                 };
 
-                thread_shared.thread_id.store(GetCurrentThreadId(), Ordering::Relaxed);
+                let timer_id = SetTimer(None, 0, HOOK_REFRESH_MS, None);
+                thread_shared.thread_id.store(GetCurrentThreadId(), Ordering::Release);
                 tid_tx.send(GetCurrentThreadId()).ok();
 
                 let mut msg = MSG::default();
-                while GetMessageW(&mut msg, None, 0, 0).as_bool() {}
+                loop {
+                    let ret = GetMessageW(&mut msg, None, 0, 0).0;
+                    if ret <= 0 {
+                        if ret < 0 {
+                            tracing::error!("GetMessageW in keyboard hook returned -1; exiting loop");
+                        }
+                        break;
+                    }
+                    if msg.message == WM_TIMER {
+                        let idle = HOOK_STATE.with(|cell| {
+                            let mut borrow = cell.borrow_mut();
+                            let Some(state) = borrow.as_mut() else { return false };
+                            reconcile_stale_holds(state);
+                            !state.win_consumed
+                                && state
+                                    .binding_state
+                                    .iter()
+                                    .all(|bs| !bs.trigger_held && !bs.armed && !bs.toggled_on)
+                        });
+                        if idle {
+                            if let Ok(new_hook) = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0) {
+                                let _ = UnhookWindowsHookEx(hook);
+                                hook = new_hook;
+                            }
+                        }
+                    }
+                }
 
+                if timer_id != 0 {
+                    let _ = KillTimer(None, timer_id);
+                }
                 let _ = UnhookWindowsHookEx(hook);
             }
 
@@ -281,8 +352,6 @@ pub fn start_ll_hook(
             });
         });
 
-    // Either failure leaves an inert handle (`Drop` posts to thread 0, a
-    // no-op) rather than taking the whole app down with it.
     let started = match spawned {
         Ok(_) => tid_rx.recv().ok(),
         Err(e) => {
@@ -291,7 +360,7 @@ pub fn start_ll_hook(
         }
     };
     match started {
-        Some(thread_id) => shared.thread_id.store(thread_id, Ordering::Relaxed),
+        Some(thread_id) => shared.thread_id.store(thread_id, Ordering::Release),
         None => crate::orchestrator::notify::show_notification(
             "Beamer",
             "Hotkeys are unavailable: the keyboard hook could not start. Restart Beamer.",

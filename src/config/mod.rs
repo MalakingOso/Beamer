@@ -304,20 +304,12 @@ impl Config {
         Ok(config)
     }
 
-    /// Persist atomically (temp file + rename) so a mid-write crash can't
-    /// leave a truncated `config.toml`.
+    /// Persist atomically (unique temp file + rename) so concurrent saves or
+    /// a mid-write crash can't leave a truncated `config.toml`.
     pub fn save(&self) -> Result<()> {
-        let dir = Self::config_dir();
-        std::fs::create_dir_all(&dir)?;
         let contents = toml::to_string_pretty(self)?;
         let path = Self::config_path();
-        let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, contents)?;
-        if let Err(e) = crate::notes::sync_doc::rename_with_retry(&tmp, &path) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e.into());
-        }
-        Ok(())
+        crate::notes::sync_doc::write_atomic_bytes(&path, "toml", contents.as_bytes())
     }
 }
 

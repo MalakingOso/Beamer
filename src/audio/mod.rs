@@ -11,9 +11,38 @@ pub mod capture;
 use anyhow::{Context, Result};
 use cpal::Stream;
 use std::sync::OnceLock;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use self::capture::AudioCapture;
+
+/// How long to wait for the OS audio device to open before reporting failure.
+const AUDIO_OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Handle to an active microphone capture whose `cpal::Stream` lives on a
+/// dedicated OS thread. Dropping or calling `stop()` signals that thread
+/// without blocking the caller (in particular the Dioxus main UI thread):
+/// `cpal::Stream::drop` on Windows WASAPI synchronously joins its capture
+/// thread and can stall for seconds on sleep/wake or device disconnects.
+pub struct AudioSession {
+    stop_tx: Option<std::sync::mpsc::SyncSender<()>>,
+}
+
+impl AudioSession {
+    /// Stop the audio device asynchronously off the calling thread.
+    pub fn stop(mut self) {
+        if let Some(tx) = self.stop_tx.take() {
+            let _ = tx.try_send(());
+        }
+    }
+}
+
+impl Drop for AudioSession {
+    fn drop(&mut self) {
+        if let Some(tx) = self.stop_tx.take() {
+            let _ = tx.try_send(());
+        }
+    }
+}
 
 // Both audio channels are bounded and sized for >=60s of buffering; a stalled
 // consumer drops audio rather than growing memory.
@@ -261,6 +290,50 @@ impl AudioPipeline {
         Ok(Self {
             capture: AudioCapture::new()?,
         })
+    }
+
+    /// Open the default microphone and start capturing on a dedicated OS thread
+    /// so neither WASAPI/COM device open nor `cpal::Stream::drop` can ever
+    /// block or panic the Dioxus main UI thread.
+    pub async fn start_detached() -> Result<(AudioSession, mpsc::Receiver<Vec<u8>>)> {
+        let (ready_tx, ready_rx) = oneshot::channel::<Result<mpsc::Receiver<Vec<u8>>>>();
+        let (stop_tx, stop_rx) = std::sync::mpsc::sync_channel::<()>(1);
+
+        std::thread::Builder::new()
+            .name("beamer-audio-device".into())
+            .spawn(move || {
+                let started = AudioPipeline::new().and_then(|pipeline| pipeline.start());
+                match started {
+                    Ok((stream, audio_rx)) => {
+                        if ready_tx.send(Ok(audio_rx)).is_err() {
+                            // Caller timed out or cancelled before we finished opening.
+                            drop(stream);
+                            return;
+                        }
+                        // Keep `stream` alive on this thread until the caller stops or drops `AudioSession`.
+                        let _ = stop_rx.recv();
+                        drop(stream);
+                    }
+                    Err(e) => {
+                        let _ = ready_tx.send(Err(e));
+                    }
+                }
+            })
+            .context("failed to spawn audio device thread")?;
+
+        match tokio::time::timeout(AUDIO_OPEN_TIMEOUT, ready_rx).await {
+            Ok(Ok(Ok(audio_rx))) => Ok((AudioSession { stop_tx: Some(stop_tx) }, audio_rx)),
+            Ok(Ok(Err(e))) => Err(e),
+            Ok(Err(_)) => anyhow::bail!("audio device thread terminated unexpectedly"),
+            Err(_) => {
+                // Signal the wedged open thread to tear down if it eventually unblocks.
+                let _ = stop_tx.try_send(());
+                anyhow::bail!(
+                    "timed out after {}s opening microphone",
+                    AUDIO_OPEN_TIMEOUT.as_secs()
+                )
+            }
+        }
     }
 
     /// Start capturing. Returns the cpal `Stream` (keep it alive; dropping it

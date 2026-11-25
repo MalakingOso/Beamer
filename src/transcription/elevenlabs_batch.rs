@@ -103,9 +103,9 @@ async fn transcribe_batch_inner(
             .await
         {
             Ok(resp) => resp,
-            // Timeouts and refused connections are transient; anything else
-            // (bad request shape, TLS config) fails identically on retry.
-            Err(e) if (e.is_timeout() || e.is_connect()) && attempt < 3 => {
+            // Timeouts, connect failures, and stale pooled-socket resets/EOFs
+            // (after sleep/wake) are transient; builder/config errors are not.
+            Err(e) if super::is_transient_transport_error(&e) && attempt < 3 => {
                 tracing::warn!(
                     "ElevenLabs batch transport error ({}), retrying in {}s (attempt {})",
                     e,

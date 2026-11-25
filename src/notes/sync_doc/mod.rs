@@ -151,7 +151,7 @@ impl SyncDoc {
                                 backup.display()
                             );
                             tracing::error!("{message}");
-                            if let Err(e) = std::fs::rename(&path, &backup) {
+                            if let Err(e) = rename_with_retry(&path, &backup) {
                                 tracing::error!("Could not preserve the corrupt document: {e}");
                                 read_only = true; // bytes still at `path`; writing is off
                             } else {
@@ -233,7 +233,7 @@ impl SyncDoc {
             .map(|d| d.as_millis())
             .unwrap_or_default();
         let backup = self.path.with_extension(format!("automerge.unreadable-{stamp}"));
-        match std::fs::rename(&self.path, &backup) {
+        match rename_with_retry(&self.path, &backup) {
             Ok(()) => {
                 tracing::error!(
                     "An incoming sync document at {} could not be parsed; preserved as {}",
@@ -298,27 +298,44 @@ impl SyncDoc {
         }
     }
 
-    /// Read the file and merge it in. An unparseable file is left alone: it may
-    /// be a half-written copy, and the next tick will find it whole.
-    pub fn merge_incoming(&mut self) -> Result<bool> {
-        let bytes = std::fs::read(&self.path)?;
-        let mut incoming = AutoCommit::load(&bytes)?;
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn last_write(&self) -> Option<SystemTime> {
+        self.last_write
+    }
+
+    pub fn set_last_write(&mut self, t: Option<SystemTime>) {
+        self.last_write = t;
+    }
+
+    pub fn set_save_failed(&mut self, failed: bool) {
+        self.save_failed = failed;
+    }
+
+    /// Merge already-read bytes from disk into this document (off-thread read).
+    pub fn merge_bytes(&mut self, bytes: &[u8]) -> Result<bool> {
+        let mut incoming = load_or_salvage(bytes)?;
         let added = self.doc.merge(&mut incoming)?;
         Ok(!added.is_empty())
     }
 
+    /// Read the file and merge it in. An unparseable file is left alone: it may
+    /// be a half-written copy, and the next tick will find it whole.
+    pub fn merge_incoming(&mut self) -> Result<bool> {
+        let bytes = std::fs::read(&self.path)?;
+        self.merge_bytes(&bytes)
+    }
+
     /// Record the file on disk as seen, without merging it. Used after a merge
     /// that brought nothing new, or `file_moved` would stay true forever.
-    /// Racy: a rewrite between `merge_incoming`'s read and this stat records a
-    /// newer mtime against older content (a one-flush-interval window).
     pub fn mark_seen(&mut self) {
         self.last_write = mtime(&self.path);
     }
 
     /// Write the document out atomically (temp file plus rename). A no-op on a
     /// read-only document: the unreadable bytes at `path` are the only copy.
-    /// The temp name carries the pid because `sync_server` may share this file
-    /// on the same machine. Sets/clears `save_failed` itself.
     pub fn save(&mut self) -> Result<()> {
         if self.path.as_os_str().is_empty() || self.read_only {
             return Ok(());
@@ -329,17 +346,8 @@ impl SyncDoc {
     }
 
     fn write_and_rename(&mut self) -> Result<()> {
-        if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
         let bytes = self.doc.save();
-        let tmp = self.path.with_extension(format!("automerge.tmp.{}", std::process::id()));
-        std::fs::write(&tmp, bytes)?;
-        if let Err(e) = rename_with_retry(&tmp, &self.path) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e.into());
-        }
-        // The mtime that matters is the one the file ended up with.
+        write_atomic_bytes(&self.path, "automerge", &bytes)?;
         self.last_write = mtime(&self.path);
         Ok(())
     }
@@ -383,13 +391,33 @@ fn load_or_salvage(bytes: &[u8]) -> Result<AutoCommit, automerge::AutomergeError
     }
 }
 
-fn mtime(path: &Path) -> Option<SystemTime> {
+pub(crate) fn mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).ok()?.modified().ok()
 }
 
-/// Rename `from` to `to`, retrying transient failures 3x ~50ms apart.
-/// Shared by every store's atomic `save`, which runs on the UI thread — so a
-/// permanent failure returns immediately instead of sleeping there.
+/// Unique sibling temp path (`<stem>.<ext>.tmp.<pid>.<seq>`) so concurrent
+/// saves from threads or co-located processes never collide on one temp file.
+pub(crate) fn atomic_temp_path(path: &Path, ext: &str) -> PathBuf {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    path.with_extension(format!("{ext}.tmp.{}.{n}", std::process::id()))
+}
+
+/// Write `bytes` to a unique sibling temp file and rename it into `dest`.
+pub(crate) fn write_atomic_bytes(dest: &Path, ext: &str, bytes: &[u8]) -> Result<()> {
+    if let Some(dir) = dest.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = atomic_temp_path(dest, ext);
+    std::fs::write(&tmp, bytes)?;
+    if let Err(e) = rename_with_retry(&tmp, dest) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+    Ok(())
+}
+
+/// Rename `from` to `to`, retrying transient Windows lock/AV errors 3x ~50ms apart.
 pub(crate) fn rename_with_retry(from: &Path, to: &Path) -> std::io::Result<()> {
     const ATTEMPTS: u32 = 3;
     const DELAY: std::time::Duration = std::time::Duration::from_millis(50);
@@ -407,19 +435,16 @@ pub(crate) fn rename_with_retry(from: &Path, to: &Path) -> std::io::Result<()> {
     Err(last_err.expect("the loop above always runs at least once"))
 }
 
-/// Only a Windows sharing violation (`ERROR_SHARING_VIOLATION`, 32) is worth
-/// waiting out: antivirus or an indexer holding the destination open without
-/// `FILE_SHARE_DELETE`. Anything else — missing source, read-only
-/// destination, cross-device move — fails identically on retry.
+/// Windows transient rename errors: `ERROR_ACCESS_DENIED` (5),
+/// `ERROR_SHARING_VIOLATION` (32), and `ERROR_LOCK_VIOLATION` (33), all of
+/// which Windows Defender / Search Indexer / OneDrive trigger briefly.
 fn is_transient_rename_error(e: &std::io::Error) -> bool {
     #[cfg(target_os = "windows")]
     {
-        e.raw_os_error() == Some(32)
+        matches!(e.raw_os_error(), Some(5 | 32 | 33))
     }
     #[cfg(not(target_os = "windows"))]
     {
-        // `rename(2)` has no sharing violations: a failure is permanent, and
-        // retrying would only sleep on the UI thread.
         let _ = e;
         false
     }

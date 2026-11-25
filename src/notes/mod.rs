@@ -145,12 +145,18 @@ impl NoteStore {
         self.doc.clone()
     }
 
-    /// Whether anything is waiting on the JSON mirror or the document.
+    /// Whether anything is waiting on the JSON mirror or the document
+    /// (including live-sync vocab changes or a previously failed doc save).
     pub fn needs_flush(&self) -> bool {
-        self.is_dirty() || self.doc_dirty
+        if self.is_dirty() || self.doc_dirty {
+            return true;
+        }
+        let doc = self.doc.lock();
+        doc.has_pending_save() || doc.has_save_failed()
     }
 
     /// Whether the document file changed since our last write (how a synced-in copy is noticed).
+    #[cfg(test)]
     pub fn doc_file_moved(&self) -> bool {
         self.doc.lock().file_moved()
     }
@@ -214,21 +220,40 @@ impl NoteStore {
         store
     }
 
-    /// Persist atomically via a sibling temp file + rename, so a crash mid-write
-    /// leaves the previous file intact rather than a half-written one.
+    /// Persist atomically via a unique sibling temp file + rename.
     pub fn save(&self) -> Result<()> {
-        if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
         let contents = serde_json::to_string_pretty(self)?;
+        sync_doc::write_atomic_bytes(&self.path, "json", contents.as_bytes())
+    }
 
-        let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, contents)?;
-        if let Err(e) = sync_doc::rename_with_retry(&tmp, &self.path) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e.into());
+    /// Snapshot serialized mirror + machine payloads so the 500ms flush tick can
+    /// write them off the UI thread.
+    pub(crate) fn take_mirror_writes(&mut self) -> (Option<(PathBuf, Vec<u8>)>, Option<(PathBuf, Vec<u8>)>) {
+        if self.document_read_only() {
+            self.dirty = false;
+            self.doc_dirty = false;
+            return (None, self.machine.take_write());
         }
-        Ok(())
+        let notes_write = if self.dirty {
+            self.doc_dirty = true;
+            match serde_json::to_string_pretty(self) {
+                Ok(json) => {
+                    self.dirty = false;
+                    Some((self.path.clone(), json.into_bytes()))
+                }
+                Err(e) => {
+                    tracing::error!("Failed to serialize notes: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        (notes_write, self.machine.take_write())
+    }
+
+    pub(crate) fn restore_machine_dirty(&mut self) {
+        self.machine.mark_dirty();
     }
 
     /// Write only if something changed (driven by a ~500ms tick so keystrokes

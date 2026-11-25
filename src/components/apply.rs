@@ -85,18 +85,12 @@ fn apply_member(c: &Component, prepared: Option<&Prepared>, swapped: &mut Vec<Pa
 }
 
 fn write_atomic(dest: &Path, bytes: &[u8]) -> Result<()> {
-    if let Some(dir) = dest.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let mut tmp = dest.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = PathBuf::from(tmp);
-    std::fs::write(&tmp, bytes)?;
-    if let Err(e) = crate::notes::sync_doc::rename_with_retry(&tmp, dest) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e).with_context(|| format!("writing {:?}", dest));
-    }
-    Ok(())
+    let ext = dest
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("bin");
+    crate::notes::sync_doc::write_atomic_bytes(dest, ext, bytes)
+        .with_context(|| format!("writing {:?}", dest))
 }
 
 fn stop(group: Option<Group>) {

@@ -5,6 +5,9 @@
 //! the cursor, so dictating into a non-empty field silently wipes it.
 //! Callers run it on a `spawn_blocking` thread; each entry point initializes COM itself.
 
+use std::sync::mpsc;
+use std::time::Duration;
+
 use super::{InjectionBackend, InjectionResult};
 use anyhow::Result;
 use windows::Win32::System::Com::{
@@ -14,6 +17,10 @@ use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationValuePattern, UIA_ValuePatternId,
 };
 use windows::core::Interface;
+
+/// Ceiling on cross-process UIA COM calls so a hung foreground app cannot hold
+/// `DISPATCH_LOCK` and stall every subsequent dictation indefinitely.
+const UIA_CALL_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub struct UiaBackend;
 
@@ -27,20 +34,14 @@ impl InjectionBackend for UiaBackend {
     }
 
     fn available(&self) -> Result<(), String> {
-        // Probe the real thing: on SKUs without UIA (Server Core, locked-down
-        // images) `CoCreateInstance` fails, and without this the dispatch can
-        // never skip UIA up front.
-        unsafe {
-            let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
+        // Probe on a fresh MTA thread with a timeout: guarantees COM apartment
+        // purity and drops `IUIAutomation` strictly *before* `CoUninitialize`.
+        run_mta_with_timeout(|| unsafe {
             let created: windows::core::Result<IUIAutomation> =
                 CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER);
-            if hr.is_ok() {
-                CoUninitialize();
-            }
-            created
-                .map(|_| ())
-                .map_err(|e| format!("UIA unavailable: {e}"))
-        }
+            created.map(|_| ()).map_err(|e| anyhow::anyhow!("UIA unavailable: {e}"))
+        })
+        .map_err(|e| e.to_string())
     }
 
     fn inject(&self, text: &str) -> Result<InjectionResult> {
@@ -62,26 +63,47 @@ pub struct UiaResult {
     pub target_info: String,
 }
 
-/// Inject via UIA `IValueProvider::SetValue`. COM is set up per call
-/// because `spawn_blocking` threads may be recycled by the tokio pool.
-pub fn try_inject_set_value(text: &str) -> Result<UiaResult> {
-    // Only balance `CoUninitialize` against references this call took:
-    // `S_OK`/`S_FALSE` increment, `RPC_E_CHANGED_MODE` does not.
-    let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-    let we_initialized = hr.is_ok();
-    if !we_initialized {
-        tracing::debug!("UIA: COM already initialized in another apartment ({:?})", hr);
-    }
-
-    let result = unsafe { try_set_value_inner(text) };
-
-    if we_initialized {
-        unsafe {
-            CoUninitialize();
+/// Run a UIA COM closure on a dedicated MTA thread with a hard timeout.
+/// Every COM object created inside `f` is dropped before `CoUninitialize()`,
+/// avoiding both use-after-`CoUninitialize` UB and pumpless-STA deadlocks on
+/// recycled tokio blocking threads (`RPC_E_CHANGED_MODE`).
+fn run_mta_with_timeout<T, F>(f: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("beamer-uia".into())
+        .spawn(move || {
+            let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+            let we_initialized = hr.is_ok();
+            let result = if we_initialized {
+                f()
+            } else {
+                Err(anyhow::anyhow!("UIA: CoInitializeEx(MTA) failed: {hr:?}"))
+            };
+            // `f()` has returned and dropped all COM pointers before teardown.
+            if we_initialized {
+                unsafe { CoUninitialize() };
+            }
+            let _ = tx.send(result);
+        })?;
+    match rx.recv_timeout(UIA_CALL_TIMEOUT) {
+        Ok(res) => res,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            anyhow::bail!("UIA call timed out after {}s", UIA_CALL_TIMEOUT.as_secs())
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            anyhow::bail!("UIA worker thread terminated unexpectedly")
         }
     }
+}
 
-    result
+/// Inject via UIA `IValueProvider::SetValue` on a bounded MTA worker thread.
+pub fn try_inject_set_value(text: &str) -> Result<UiaResult> {
+    let text = text.to_string();
+    run_mta_with_timeout(move || unsafe { try_set_value_inner(&text) })
 }
 
 unsafe fn try_set_value_inner(text: &str) -> Result<UiaResult> {

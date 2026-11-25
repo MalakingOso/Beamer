@@ -34,6 +34,8 @@ pub fn check_for_update_blocking() -> Result<Option<UpdateInfo>> {
         .repo_name(GITHUB_REPO)
         .bin_name(BINARY_NAME)
         .current_version(CURRENT_VERSION)
+        .show_output(false)
+        .show_download_progress(false)
         .build()?;
 
     let latest = updater.get_latest_release()?;
@@ -55,6 +57,8 @@ pub fn apply_update_blocking() -> Result<()> {
         .repo_name(GITHUB_REPO)
         .bin_name(BINARY_NAME)
         .current_version(CURRENT_VERSION)
+        .show_output(false)
+        .show_download_progress(false)
         .no_confirm(true)
         .build()?
         .update()?;
@@ -67,17 +71,22 @@ pub fn apply_update_blocking() -> Result<()> {
 /// so the child doesn't see this process as a rival instance and quit.
 ///
 /// Like the tray Quit handler this `process::exit`s, skipping destructors and
-/// the flush tick — callers must flush the note stores first.
-pub fn restart_app() -> ! {
+/// the flush tick — callers must flush the note stores first. If spawning the
+/// new binary fails, returns instead of silently terminating the running app.
+pub fn restart_app() {
     // Not `current_exe()`: on Linux the update just unlinked this process's
     // file, so a fresh query returns `<path> (deleted)`. Use the launch path.
     let exe = crate::launch_exe_path();
     crate::release_single_instance();
     match std::process::Command::new(exe).spawn() {
-        Ok(child) => tracing::info!("Relaunched Beamer as pid {}", child.id()),
-        Err(e) => tracing::error!("Failed to relaunch {:?}: {}", exe, e),
+        Ok(child) => {
+            tracing::info!("Relaunched Beamer as pid {}", child.id());
+            std::process::exit(0);
+        }
+        Err(e) => {
+            tracing::error!("Failed to relaunch {:?}: {}", exe, e);
+        }
     }
-    std::process::exit(0);
 }
 
 pub fn current_version() -> &'static str {

@@ -100,6 +100,28 @@ pub fn failure_message(timed_out: bool, connect_failed: bool, status: Option<u16
     "Could not reach the server".to_string()
 }
 
+/// Maximum response body size read from the local LLM server (2 MiB).
+pub(crate) const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+
+/// Read an HTTP response body up to `MAX_RESPONSE_BYTES` so a misbehaving
+/// server cannot exhaust process memory.
+pub(crate) async fn read_bounded_text(
+    mut response: reqwest::Response,
+) -> std::result::Result<String, String> {
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| failure_message(e.is_timeout(), false, None))?
+    {
+        if buf.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+            return Err("Response exceeded maximum size limit".to_string());
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    String::from_utf8(buf).map_err(|_| "Server returned non-UTF-8 response".to_string())
+}
+
 /// Ask the server what it is serving. Button press and settings-page open
 /// only, never on a timer: a status read resets the per-model idle clock and
 /// silently pins the extraction model in VRAM.
@@ -116,10 +138,7 @@ pub async fn probe(base_url: &str, timeout: Duration) -> Result<Vec<ModelInfo>, 
         return Err(failure_message(false, false, Some(response.status().as_u16())));
     }
 
-    let body = response
-        .text()
-        .await
-        .map_err(|e| failure_message(e.is_timeout(), false, None))?;
+    let body = read_bounded_text(response).await?;
 
     parse_models(&body).map_err(|e| e.to_string())
 }

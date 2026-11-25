@@ -71,7 +71,7 @@ pub(super) async fn do_note_capture(
     let id = notes
         .write()
         .create(text.to_string(), color, NoteOrigin::Dictated);
-    crate::notes::flush_stores(&mut notes.write(), &mut tasks.write());
+    crate::notes::flush::flush_stores_async(*notes, *tasks, false).await;
 
     log_status(
         status_log,
@@ -158,7 +158,13 @@ async fn do_injection(
         }
     }
 
-    history.write().append(text.to_string());
+    let snapshot = history.write().append_in_memory(text.to_string());
+    let _ = tokio::task::spawn_blocking(move || {
+        if let Err(e) = snapshot.save() {
+            tracing::error!("Failed to save transcription history: {}", e);
+        }
+    })
+    .await;
 }
 
 #[cfg(test)]

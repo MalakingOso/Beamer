@@ -21,6 +21,9 @@ const FORBIDDEN: [char; 7] = ['<', '>', '{', '}', '[', ']', '\\'];
 /// Trim, drop the terms the API would reject, de-duplicate, and cap the count.
 /// Order is preserved, so the list's own ordering decides what survives the cap.
 pub fn sanitize(terms: &[String], max_terms: usize, max_chars: usize) -> Vec<String> {
+    if max_terms == 0 {
+        return Vec::new();
+    }
     let mut out: Vec<String> = Vec::new();
     for term in terms {
         let term = term.trim();

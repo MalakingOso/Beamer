@@ -4,31 +4,53 @@
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
+struct KeyCache {
+    entries: HashMap<String, String>,
+    /// Monotonic counter bumped on every write/delete so a concurrent slow
+    /// `load_api_key` cannot overwrite a newer `save_api_key` result.
+    generation: u64,
+}
+
 /// Keys confirmed by the keyring, by credential name. Misses/errors are never
 /// cached, so a transiently locked keyring at startup can't permanently mask a
 /// key that's actually present.
-static KEY_CACHE: LazyLock<Mutex<HashMap<String, String>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static KEY_CACHE: LazyLock<Mutex<KeyCache>> = LazyLock::new(|| {
+    Mutex::new(KeyCache {
+        entries: HashMap::new(),
+        generation: 0,
+    })
+});
 
 /// Poison-tolerant: a panic elsewhere while holding the lock must not turn
 /// every later key lookup into a panic too.
-fn cache() -> MutexGuard<'static, HashMap<String, String>> {
+fn cache() -> MutexGuard<'static, KeyCache> {
     KEY_CACHE.lock().unwrap_or_else(|p| p.into_inner())
 }
 
 /// Read an API key, cached after the first successful read. Misses/errors
 /// retry the keyring on the next call.
 pub fn load_api_key(name: &str) -> String {
-    if let Some(cached) = cache().get(name) {
-        return cached.clone();
-    }
+    let gen_before = {
+        let guard = cache();
+        if let Some(cached) = guard.entries.get(name) {
+            return cached.clone();
+        }
+        guard.generation
+    };
 
     match keyring::Entry::new("beamer", name).and_then(|e| e.get_password()) {
         Ok(password) => {
-            cache().insert(name.to_string(), password.clone());
+            let mut guard = cache();
+            if guard.generation == gen_before {
+                guard.entries.insert(name.to_string(), password.clone());
+            }
             password
         }
-        Err(_) => String::new(),
+        Err(keyring::Error::NoEntry) => String::new(),
+        Err(e) => {
+            tracing::warn!("Could not read '{}' from OS keyring: {}", name, e);
+            String::new()
+        }
     }
 }
 
@@ -41,14 +63,24 @@ pub fn save_api_key(name: &str, value: &str) {
         match result {
             // Deleted or already absent — either way, drop the cached value.
             Ok(()) | Err(keyring::Error::NoEntry) => {
-                cache().remove(name);
+                let mut guard = cache();
+                guard.generation = guard.generation.wrapping_add(1);
+                guard.entries.remove(name);
             }
-            Err(_) => {}
+            Err(e) => {
+                tracing::error!("Failed to delete '{}' from OS keyring: {}", name, e);
+            }
         }
-    } else if keyring::Entry::new("beamer", name)
-        .and_then(|e| e.set_password(value))
-        .is_ok()
-    {
-        cache().insert(name.to_string(), value.to_string());
+    } else {
+        match keyring::Entry::new("beamer", name).and_then(|e| e.set_password(value)) {
+            Ok(()) => {
+                let mut guard = cache();
+                guard.generation = guard.generation.wrapping_add(1);
+                guard.entries.insert(name.to_string(), value.to_string());
+            }
+            Err(e) => {
+                tracing::error!("Failed to save '{}' to OS keyring: {}", name, e);
+            }
+        }
     }
 }

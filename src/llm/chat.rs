@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use super::client::{failure_message, http_client};
+use super::client::{failure_message, http_client, read_bounded_text};
 
 pub fn chat_url(base_url: &str) -> String {
     format!("{}/v1/chat/completions", base_url.trim_end_matches('/'))
@@ -158,16 +158,22 @@ pub async fn complete(
         .timeout(timeout)
         .send()
         .await
-        .map_err(|e| ChatError::Unreachable(failure_message(e.is_timeout(), e.is_connect(), None)))?;
+        .map_err(|e| {
+            // Builder/URL errors are permanent config mistakes, not retryable outages.
+            if e.is_builder() {
+                ChatError::Malformed(format!("Invalid server URL: {e}"))
+            } else {
+                ChatError::Unreachable(failure_message(e.is_timeout(), e.is_connect(), None))
+            }
+        })?;
 
     if !response.status().is_success() {
         return Err(ChatError::Http(response.status().as_u16()));
     }
 
-    let body = response
-        .text()
+    let body = read_bounded_text(response)
         .await
-        .map_err(|e| ChatError::Unreachable(failure_message(e.is_timeout(), false, None)))?;
+        .map_err(ChatError::Unreachable)?;
 
     parse_completion(&body)
 }

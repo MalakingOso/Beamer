@@ -183,9 +183,12 @@ pub fn DonePage(props: DonePageProps) -> Element {
                         onclick: move |_| {
                             let text = summary_text.clone();
                             spawn(async move {
-                                if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                    let _ = clipboard.set_text(&text);
-                                }
+                                let _ = tokio::task::spawn_blocking(move || {
+                                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                        let _ = clipboard.set_text(&text);
+                                    }
+                                })
+                                .await;
                                 copied.set(true);
                                 tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
                                 copied.set(false);

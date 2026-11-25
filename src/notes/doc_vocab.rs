@@ -41,16 +41,7 @@ pub fn reconcile(sync: &mut SyncDoc) -> Result<()> {
             sync.set_last_vocab(content);
         }
         VocabAction::WriteToFile(content) => {
-            if let Some(dir) = path.parent() {
-                std::fs::create_dir_all(dir)?;
-            }
-            // Atomic, like `Vocabulary::save`: a crash mid-write must not truncate it.
-            let tmp = path.with_extension("txt.tmp");
-            std::fs::write(&tmp, &content)?;
-            if let Err(e) = super::sync_doc::rename_with_retry(&tmp, &path) {
-                let _ = std::fs::remove_file(&tmp);
-                return Err(e.into());
-            }
+            super::sync_doc::write_atomic_bytes(&path, "txt", content.as_bytes())?;
             sync.set_last_vocab(content);
         }
     }

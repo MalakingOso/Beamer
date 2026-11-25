@@ -32,32 +32,39 @@ pub(super) async fn clipboard_only_fallback(text: &str) -> anyhow::Result<()> {
     .await?
 }
 
-/// Show a desktop notification. Always logs it too, so a failed toast still
-/// leaves a trace.
+/// Show a desktop notification without blocking the caller's thread (WinRT
+/// toast COM on Windows and D-Bus on Linux can stall if run inline on the UI
+/// thread). Always logs immediately so a failed toast still leaves a trace.
 pub(crate) fn show_notification(title: &str, message: &str) {
     tracing::info!("Notification: {} - {}", title, message);
-    #[cfg(target_os = "windows")]
-    {
-        // Requires the Start Menu shortcut registered by
-        // `ui::windows_shortcut::ensure_shortcut`. No fallback: an unregistered
-        // AUMID makes `show()` return `Ok` while Windows silently drops the toast.
-        if let Err(e) = tauri_winrt_notification::Toast::new(crate::WINDOWS_APP_USER_MODEL_ID)
-            .title(title)
-            .text1(message)
-            .show()
-        {
-            tracing::warn!("Failed to show notification: {}", e);
-        }
-    }
-    #[cfg(target_os = "linux")]
-    {
-        if let Err(e) = notify_rust::Notification::new()
-            .appname("Beamer")
-            .summary(title)
-            .body(message)
-            .show()
-        {
-            tracing::warn!("Failed to show notification: {}", e);
-        }
-    }
+    let title = title.to_string();
+    let message = message.to_string();
+    let _ = std::thread::Builder::new()
+        .name("beamer-notify".into())
+        .spawn(move || {
+            #[cfg(target_os = "windows")]
+            {
+                // Requires the Start Menu shortcut registered by
+                // `ui::windows_shortcut::ensure_shortcut`. No fallback: an unregistered
+                // AUMID makes `show()` return `Ok` while Windows silently drops the toast.
+                if let Err(e) = tauri_winrt_notification::Toast::new(crate::WINDOWS_APP_USER_MODEL_ID)
+                    .title(&title)
+                    .text1(&message)
+                    .show()
+                {
+                    tracing::warn!("Failed to show notification: {}", e);
+                }
+            }
+            #[cfg(target_os = "linux")]
+            {
+                if let Err(e) = notify_rust::Notification::new()
+                    .appname("Beamer")
+                    .summary(&title)
+                    .body(&message)
+                    .show()
+                {
+                    tracing::warn!("Failed to show notification: {}", e);
+                }
+            }
+        });
 }

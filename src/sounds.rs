@@ -50,66 +50,117 @@ fn channel() -> &'static Sender<&'static [u8]> {
 /// open stream caused audible hiss on some PipeWire/ALSA setups.
 fn spawn_audio_thread() -> Sender<&'static [u8]> {
     let (tx, rx) = mpsc::channel::<&'static [u8]>();
-    std::thread::spawn(move || {
-        // WASAPI needs COM; this thread uses its own MTA apartment.
-        #[cfg(target_os = "windows")]
-        unsafe {
-            let _ = windows::Win32::System::Com::CoInitializeEx(
-                None,
-                windows::Win32::System::Com::COINIT_MULTITHREADED,
-            );
-        }
+    let _ = std::thread::Builder::new()
+        .name("beamer-sounds".into())
+        .spawn(move || {
+            // WASAPI needs COM; this thread uses its own MTA apartment.
+            #[cfg(target_os = "windows")]
+            let com_initialized = unsafe {
+                windows::Win32::System::Com::CoInitializeEx(
+                    None,
+                    windows::Win32::System::Com::COINIT_MULTITHREADED,
+                )
+                .is_ok()
+            };
 
-        // `_stream` must outlive playback: dropping it tears down all sinks.
-        #[cfg(target_os = "windows")]
-        let (_stream, persistent_handle) = match rodio::OutputStream::try_default() {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!("Failed to open audio output device: {}", e);
-                return;
+            // On Windows keep a persistent stream for fast activation, but allow
+            // re-opening it if startup failed or a device/sleep change invalidates it.
+            #[cfg(target_os = "windows")]
+            let mut persistent: Option<(rodio::OutputStream, rodio::OutputStreamHandle)> =
+                match rodio::OutputStream::try_default() {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        tracing::warn!("Failed to open audio output device on startup: {}", e);
+                        None
+                    }
+                };
+
+            for data in rx {
+                #[cfg(not(target_os = "windows"))]
+                let stream = match rodio::OutputStream::try_default() {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!("Failed to open audio output device: {}", e);
+                        continue;
+                    }
+                };
+                #[cfg(not(target_os = "windows"))]
+                let (_stream, handle) = &stream;
+
+                #[cfg(target_os = "windows")]
+                let sink = {
+                    if persistent.is_none() {
+                        match rodio::OutputStream::try_default() {
+                            Ok(v) => persistent = Some(v),
+                            Err(e) => {
+                                tracing::warn!("Failed to open audio output device: {}", e);
+                                continue;
+                            }
+                        }
+                    }
+                    let first = persistent
+                        .as_ref()
+                        .map(|(_, h)| rodio::Sink::try_new(h));
+                    match first {
+                        Some(Ok(v)) => v,
+                        Some(Err(e)) => {
+                            // Device switch / sleep-wake invalidated the stream; reopen once.
+                            tracing::warn!("Audio sink failed ({}); reopening output device", e);
+                            persistent = None;
+                            match rodio::OutputStream::try_default() {
+                                Ok(v) => {
+                                    persistent = Some(v);
+                                    match persistent.as_ref().map(|(_, h)| rodio::Sink::try_new(h)) {
+                                        Some(Ok(s)) => s,
+                                        Some(Err(e2)) => {
+                                            tracing::warn!("Failed to create audio sink after reopen: {}", e2);
+                                            persistent = None;
+                                            continue;
+                                        }
+                                        None => continue,
+                                    }
+                                }
+                                Err(e2) => {
+                                    tracing::warn!("Failed to reopen audio output device: {}", e2);
+                                    continue;
+                                }
+                            }
+                        }
+                        None => continue,
+                    }
+                };
+
+                #[cfg(not(target_os = "windows"))]
+                let sink = match rodio::Sink::try_new(handle) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!("Failed to create audio sink: {}", e);
+                        continue;
+                    }
+                };
+
+                let source = match rodio::Decoder::new(Cursor::new(data)) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!("Failed to decode sound effect: {}", e);
+                        continue;
+                    }
+                };
+                sink.append(source);
+                #[cfg(target_os = "windows")]
+                sink.detach();
+                #[cfg(not(target_os = "windows"))]
+                sink.sleep_until_end();
+                tracing::debug!("Sound queued for playback ({} bytes)", data.len());
             }
-        };
 
-        for data in rx {
-            #[cfg(not(target_os = "windows"))]
-            let stream = match rodio::OutputStream::try_default() {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!("Failed to open audio output device: {}", e);
-                    continue;
-                }
-            };
-            #[cfg(not(target_os = "windows"))]
-            let (_stream, handle) = &stream;
             #[cfg(target_os = "windows")]
-            let handle = &persistent_handle;
-
-            let sink = match rodio::Sink::try_new(handle) {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!("Failed to create audio sink: {}", e);
-                    continue;
+            {
+                drop(persistent);
+                if com_initialized {
+                    unsafe { windows::Win32::System::Com::CoUninitialize() };
                 }
-            };
-            let source = match rodio::Decoder::new(Cursor::new(data)) {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!("Failed to decode sound effect: {}", e);
-                    continue;
-                }
-            };
-            sink.append(source);
-            // Windows: detach so playback completes without blocking this
-            // loop — the persistent stream keeps flowing regardless.
-            #[cfg(target_os = "windows")]
-            sink.detach();
-            // Elsewhere: block until the beep finishes, so the freshly
-            // opened `stream` above stays alive for its whole duration and
-            // then closes the device again before the next message.
-            #[cfg(not(target_os = "windows"))]
-            sink.sleep_until_end();
-            tracing::debug!("Sound queued for playback ({} bytes)", data.len());
-        }
-    });
+            }
+        });
     tx
 }

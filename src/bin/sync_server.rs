@@ -46,9 +46,10 @@ fn notes_document_path(config_dir: &Path) -> PathBuf {
 /// `BeamerSyncServer`, deliberately not the app's own `Beamer` dir: a flagless
 /// run on a machine that also runs Beamer would otherwise silently share its
 /// `notes.automerge`. Opt into sharing explicitly with `--config-dir`.
-fn default_config_dir() -> PathBuf {
-    let base = dirs::config_dir().expect("Could not determine config directory");
-    base.join("BeamerSyncServer")
+fn default_config_dir() -> Result<PathBuf> {
+    let base = dirs::config_dir()
+        .context("Could not determine config directory (pass --config-dir explicitly)")?;
+    Ok(base.join("BeamerSyncServer"))
 }
 
 /// Refuse anything but loopback: `tailscaled` is the only auth, and it only
@@ -70,7 +71,7 @@ struct Args {
 
 fn parse_args<I: Iterator<Item = String>>(mut args: I) -> Result<Args> {
     let mut bind: SocketAddr = DEFAULT_BIND.parse().expect("DEFAULT_BIND is a valid address");
-    let mut config_dir = default_config_dir();
+    let mut config_dir: Option<PathBuf> = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--bind" => {
@@ -79,11 +80,15 @@ fn parse_args<I: Iterator<Item = String>>(mut args: I) -> Result<Args> {
             }
             "--config-dir" => {
                 let v = args.next().context("--config-dir needs a value")?;
-                config_dir = PathBuf::from(v);
+                config_dir = Some(PathBuf::from(v));
             }
             other => anyhow::bail!("unknown argument: {other}"),
         }
     }
+    let config_dir = match config_dir {
+        Some(dir) => dir,
+        None => default_config_dir()?,
+    };
     Ok(Args { bind, config_dir })
 }
 
@@ -102,8 +107,13 @@ async fn main() -> Result<()> {
     let doc_path = notes_document_path(&args.config_dir);
     let (doc, load_error) = SyncDoc::open(doc_path.clone());
     if let Some(e) = load_error {
-        // Not fatal: already quarantined, restarted from genesis like a client.
         tracing::error!("{e}");
+    }
+    if doc.is_read_only() {
+        anyhow::bail!(
+            "refusing to start with a read-only document at {} — fix permissions/corruption first",
+            doc_path.display()
+        );
     }
     tracing::info!("serving {} from {}", doc_path.display(), args.bind);
     let handle = SyncHandle::new(doc);
@@ -116,7 +126,14 @@ async fn main() -> Result<()> {
     let (changed_tx, _) = watch::channel(());
 
     loop {
-        let (stream, peer_addr) = listener.accept().await?;
+        let (stream, peer_addr) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(e) => {
+                tracing::warn!("accept error (retrying): {e}");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
+            }
+        };
         let handle = handle.clone();
         let changed_tx = changed_tx.clone();
         tokio::spawn(async move {
@@ -128,16 +145,19 @@ async fn main() -> Result<()> {
     }
 }
 
-/// Ping cadence and the silence (not even a pong) after which a connection is
-/// presumed half-open and closed. Without this, an unclean disconnect parks
-/// the task until the OS TCP timeout.
+/// Ping cadence, idle ceiling, and handshake/write timeouts so stalled or
+/// half-open peers cannot leak tasks or hang indefinitely.
 const PING_INTERVAL: Duration = Duration::from_secs(30);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+const WRITE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// One connection, one `sync::State`. Losing it only costs a fuller first
 /// message on reconnect; the protocol re-converges.
 async fn serve_peer(stream: TcpStream, handle: SyncHandle, changed_tx: watch::Sender<()>) -> Result<()> {
-    let ws = tokio_tungstenite::accept_async(stream).await?;
+    let ws = tokio::time::timeout(HANDSHAKE_TIMEOUT, tokio_tungstenite::accept_async(stream))
+        .await
+        .context("WebSocket handshake timed out")??;
     let (mut ws_write, mut ws_read) = ws.split();
     let mut changed_rx = changed_tx.subscribe();
     let mut state = SyncState::new();
@@ -155,9 +175,17 @@ async fn serve_peer(stream: TcpStream, handle: SyncHandle, changed_tx: watch::Se
                     Some(Ok(WsMessage::Binary(bytes))) => {
                         let msg = SyncMessage::decode(&bytes)
                             .context("could not decode an incoming sync message")?;
-                        // Save + broadcast only when the document moved: most
-                        // messages are change-free handshakes/acks.
-                        if apply_and_save(&handle, &mut state, msg)? {
+                        // Offload Automerge merge + disk save to `spawn_blocking`
+                        // so `SyncHandle::lock()` + `rename_with_retry` never block tokio workers.
+                        let h = handle.clone();
+                        let (next_state, changed) = tokio::task::spawn_blocking(move || {
+                            let res = apply_and_save(&h, &mut state, msg);
+                            (state, res)
+                        })
+                        .await
+                        .context("apply_and_save task panicked")?;
+                        state = next_state;
+                        if changed? {
                             let _ = changed_tx.send(());
                         }
                     }
@@ -176,14 +204,14 @@ async fn serve_peer(stream: TcpStream, handle: SyncHandle, changed_tx: watch::Se
                          presuming the connection half-open and closing it"
                     );
                 }
-                ws_write.send(WsMessage::Ping(Vec::new().into())).await?;
+                send_ws(&mut ws_write, WsMessage::Ping(Vec::new().into())).await?;
             }
         }
         send_pending(&handle, &mut state, &mut ws_write).await?;
     }
 }
 
-/// Apply one message; save and return `true` only if heads moved.
+/// Apply one message; save and return `true` only if heads moved or a prior save failed.
 fn apply_and_save(handle: &SyncHandle, state: &mut SyncState, msg: SyncMessage) -> Result<bool> {
     let mut doc = handle.lock();
     if doc.is_read_only() {
@@ -192,27 +220,36 @@ fn apply_and_save(handle: &SyncHandle, state: &mut SyncState, msg: SyncMessage) 
     }
     let before = doc.heads();
     doc.doc_mut().sync().receive_sync_message(state, msg)?;
-    if doc.heads() == before {
+    let moved = doc.heads() != before;
+    if !moved && !doc.has_save_failed() {
         return Ok(false);
     }
     doc.save().context("could not save the sync document")?;
-    Ok(true)
+    Ok(moved)
 }
 
 type WsSink = futures_util::stream::SplitSink<WebSocketStream<TcpStream>, WsMessage>;
 
-/// Lock + generate in a sync fn, never inline in async code: holding a
-/// `std::sync::MutexGuard` across `.await` makes the future `!Send`, which
-/// `tokio::spawn` refuses. Here the guard provably drops on return.
-fn generate_pending(handle: &SyncHandle, state: &mut SyncState) -> Option<SyncMessage> {
-    let mut doc = handle.lock();
-    let msg = doc.doc_mut().sync().generate_sync_message(state);
-    msg
+async fn send_ws(ws_write: &mut WsSink, msg: WsMessage) -> Result<()> {
+    tokio::time::timeout(WRITE_TIMEOUT, ws_write.send(msg))
+        .await
+        .context("WebSocket write timed out")??;
+    Ok(())
 }
 
 async fn send_pending(handle: &SyncHandle, state: &mut SyncState, ws_write: &mut WsSink) -> Result<()> {
-    if let Some(msg) = generate_pending(handle, state) {
-        ws_write.send(WsMessage::Binary(msg.encode().into())).await?;
+    let h = handle.clone();
+    let mut s = std::mem::replace(state, SyncState::new());
+    let (next_state, msg) = tokio::task::spawn_blocking(move || {
+        let mut doc = h.lock();
+        let msg = doc.doc_mut().sync().generate_sync_message(&mut s);
+        (s, msg)
+    })
+    .await
+    .context("generate_pending task panicked")?;
+    *state = next_state;
+    if let Some(msg) = msg {
+        send_ws(ws_write, WsMessage::Binary(msg.encode().into())).await?;
     }
     Ok(())
 }

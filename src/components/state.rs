@@ -54,8 +54,11 @@ impl ComponentStore {
         let contents = match std::fs::read_to_string(&path) {
             Ok(c) => c,
             Err(e) => {
-                tracing::error!("Could not read {:?}: {}", path, e);
-                return empty(path, false);
+                tracing::error!(
+                    "Could not read {:?} ({}); leaving it read-only this session",
+                    path, e
+                );
+                return empty(path, true);
             }
         };
         match serde_json::from_str::<ComponentStore>(&contents) {
@@ -66,8 +69,8 @@ impl ComponentStore {
             Err(e) => {
                 let backup = path.with_extension("json.corrupt");
                 tracing::error!("{:?} is not valid JSON ({}); preserving as {:?}", path, e, backup);
-                let _ = std::fs::rename(&path, &backup);
-                empty(path, false)
+                let read_only = crate::notes::sync_doc::rename_with_retry(&path, &backup).is_err();
+                empty(path, read_only)
             }
         }
     }
@@ -82,18 +85,10 @@ impl ComponentStore {
 
     pub fn save(&self) -> Result<()> {
         if self.read_only {
-            anyhow::bail!("{:?} could not be stat-ed at load; not overwriting it", self.path);
+            anyhow::bail!("{:?} could not be read at load; not overwriting it", self.path);
         }
-        if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
-        if let Err(e) = crate::notes::sync_doc::rename_with_retry(&tmp, &self.path) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e.into());
-        }
-        Ok(())
+        let json = serde_json::to_string_pretty(self)?;
+        crate::notes::sync_doc::write_atomic_bytes(&self.path, "json", json.as_bytes())
     }
 
     #[cfg(test)]

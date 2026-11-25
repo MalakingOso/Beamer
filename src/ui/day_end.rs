@@ -160,9 +160,12 @@ pub fn DayEndCard(props: DayEndCardProps) -> Element {
                         e.stop_propagation();
                         let text = copy_text.clone();
                         spawn(async move {
-                            if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                let _ = clipboard.set_text(&text);
-                            }
+                            let _ = tokio::task::spawn_blocking(move || {
+                                if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                    let _ = clipboard.set_text(&text);
+                                }
+                            })
+                            .await;
                             copied.set(true);
                             tokio::time::sleep(Duration::from_millis(1500)).await;
                             copied.set(false);

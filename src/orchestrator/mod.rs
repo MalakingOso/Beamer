@@ -128,6 +128,10 @@ fn backend_key(backend: &str) -> Option<(&'static str, &'static str)> {
     }
 }
 
+/// Hard ceiling on a single recording so a dropped key-up (e.g. UAC prompt or
+/// lock screen) can never buffer PCM into RAM indefinitely.
+const MAX_RECORDING_DURATION: std::time::Duration = std::time::Duration::from_secs(600);
+
 /// Validate the backend and key, then capture one recording. `None` when
 /// nothing was recorded; every such problem has already been reported.
 async fn record(
@@ -152,7 +156,9 @@ async fn record(
         );
         return None;
     };
-    let api_key = crate::config::load_api_key(key_name);
+    let api_key = tokio::task::spawn_blocking(move || crate::config::load_api_key(key_name))
+        .await
+        .unwrap_or_default();
     if api_key.is_empty() {
         tracing::error!("No {} API key found in keyring (looked up '{}'). Open Settings to add one.", display_name, key_name);
         log_status(status_log, LogLevel::Error, format!("No {} API key configured — open Settings", display_name));
@@ -160,8 +166,9 @@ async fn record(
         return None;
     }
 
-    let started = AudioPipeline::new().and_then(|pipeline| pipeline.start());
-    let (stream, mut audio_rx) = match started {
+    // Open the mic off the UI thread with a timeout so WASAPI open/drop never
+    // stalls the UI thread.
+    let (stream, mut audio_rx) = match AudioPipeline::start_detached().await {
         Ok(started) => started,
         Err(e) => {
             tracing::error!("Microphone not available: {e:#}");
@@ -187,6 +194,7 @@ async fn record(
     // The other hotkey pressed mid-capture: its stop must not end this one,
     // so capture ends once every start has been matched by a stop.
     let mut nested_starts = 0u32;
+    let max_deadline = tokio::time::Instant::now() + MAX_RECORDING_DURATION;
     loop {
         tokio::select! {
             hotkey_event = hotkey_rx.next() => match hotkey_event {
@@ -210,6 +218,21 @@ async fn record(
                     break;
                 }
             },
+            _ = tokio::time::sleep_until(max_deadline) => {
+                tracing::warn!(
+                    "Recording reached the {}s maximum duration; stopping automatically",
+                    MAX_RECORDING_DURATION.as_secs()
+                );
+                log_status(
+                    status_log,
+                    LogLevel::Warn,
+                    format!(
+                        "Recording stopped automatically after {} minutes",
+                        MAX_RECORDING_DURATION.as_secs() / 60
+                    ),
+                );
+                break;
+            }
         }
     }
 
@@ -223,8 +246,8 @@ async fn record(
     if stop_reason == StopReason::UserStop {
         buffer_tail_audio(&mut audio_rx, &mut pcm).await;
     }
-    // Close the mic now, not after the upload.
-    drop(stream);
+    // Close the mic now (non-blocking signal to the audio-device thread).
+    stream.stop();
     log_status(status_log, LogLevel::Info, "Recording stopped");
 
     if pcm.is_empty() {

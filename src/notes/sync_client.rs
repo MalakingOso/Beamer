@@ -25,6 +25,15 @@ use super::{doc_notes, doc_tasks, NoteStore};
 /// Reconnect backoff: 1s start, 30s ceiling.
 const BACKOFF_START: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
+/// Minimum healthy connection duration before resetting backoff (prevents 1s
+/// reconnect storms when a peer drops immediately after WebSocket upgrade).
+const HEALTHY_CONNECTION: Duration = Duration::from_secs(10);
+/// Handshake, heartbeat, idle and write timeouts so half-open TCP connections
+/// across sleep/wake or Tailscale drops never hang `SyncStatus::Connected`.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const PING_INTERVAL: Duration = Duration::from_secs(30);
+const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+const WRITE_TIMEOUT: Duration = Duration::from_secs(15);
 
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -68,8 +77,8 @@ pub fn use_sync_client(config: Signal<Config>, doc: SyncHandle, notes: Signal<No
     SyncClientHandle { status, started_url }
 }
 
-/// Reconnect forever. Backoff resets once a connection is established,
-/// however it later ends: an hours-long connection that drops earns a fast retry.
+/// Reconnect forever. Backoff resets only once a connection has stayed healthy
+/// for `HEALTHY_CONNECTION`, preventing 1s storms on immediate post-handshake drops.
 async fn run_client(
     url: String,
     doc: SyncHandle,
@@ -80,9 +89,11 @@ async fn run_client(
     let mut backoff = BACKOFF_START;
     loop {
         status.set(SyncStatus::Connecting);
-        match tokio_tungstenite::connect_async(&url).await {
-            Ok((ws, _)) => {
-                backoff = BACKOFF_START;
+        let connect_result =
+            tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(&url)).await;
+        match connect_result {
+            Ok(Ok((ws, _))) => {
+                let connected_at = tokio::time::Instant::now();
                 status.set(SyncStatus::Connected);
                 match run_connection(ws, &doc, &mut notes, &mut tasks).await {
                     Ok(()) => {
@@ -94,10 +105,18 @@ async fn run_client(
                         status.set(SyncStatus::Disconnected { detail: e.to_string() });
                     }
                 }
+                if connected_at.elapsed() >= HEALTHY_CONNECTION {
+                    backoff = BACKOFF_START;
+                }
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::info!("could not connect to {url}: {e}");
                 status.set(SyncStatus::Disconnected { detail: e.to_string() });
+            }
+            Err(_) => {
+                let msg = format!("connection timed out after {}s", CONNECT_TIMEOUT.as_secs());
+                tracing::info!("could not connect to {url}: {msg}");
+                status.set(SyncStatus::Disconnected { detail: msg });
             }
         }
         tokio::time::sleep(backoff).await;
@@ -153,17 +172,24 @@ async fn run_connection(
 }
 
 /// The dumb pipe. Holds no `Signal`, so plain `tokio::spawn` is safe.
-/// `Ok(())` only for a clean end; a decode failure is skipped, not fatal;
-/// a socket read/write error is `Err`.
+/// Sends periodic WebSocket Pings and enforces idle + write timeouts so
+/// half-open connections (sleep/wake, Tailscale drops) disconnect and reconnect.
 async fn socket_task(
     mut ws_write: futures_util::stream::SplitSink<WsStream, WsMessage>,
     mut ws_read: futures_util::stream::SplitStream<WsStream>,
     in_tx: tokio::sync::mpsc::UnboundedSender<SyncMessage>,
     mut out_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
 ) -> anyhow::Result<()> {
+    let mut last_activity = tokio::time::Instant::now();
+    let mut ping_tick = tokio::time::interval(PING_INTERVAL);
+    ping_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // First tick fires immediately; advance past it.
+    ping_tick.tick().await;
+
     loop {
         tokio::select! {
             incoming = ws_read.next() => {
+                last_activity = tokio::time::Instant::now();
                 match incoming {
                     Some(Ok(WsMessage::Binary(bytes))) => {
                         match SyncMessage::decode(&bytes) {
@@ -176,18 +202,49 @@ async fn socket_task(
                         }
                     }
                     Some(Ok(WsMessage::Close(_))) | None => return Ok(()),
-                    Some(Ok(_)) => {} // ping/pong/text never occur on this protocol
+                    Some(Ok(_)) => {} // ping/pong/text: activity timestamp updated above
                     Some(Err(e)) => return Err(e.into()),
                 }
             }
             outgoing = out_rx.recv() => {
                 match outgoing {
                     Some(bytes) => {
-                        if let Err(e) = ws_write.send(WsMessage::Binary(bytes.into())).await {
-                            return Err(e.into());
+                        match tokio::time::timeout(
+                            WRITE_TIMEOUT,
+                            ws_write.send(WsMessage::Binary(bytes.into())),
+                        )
+                        .await
+                        {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => return Err(e.into()),
+                            Err(_) => anyhow::bail!(
+                                "sync write timed out after {}s",
+                                WRITE_TIMEOUT.as_secs()
+                            ),
                         }
                     }
                     None => return Ok(()),
+                }
+            }
+            _ = ping_tick.tick() => {
+                if last_activity.elapsed() > IDLE_TIMEOUT {
+                    anyhow::bail!(
+                        "sync server silent for over {}s; reconnecting",
+                        IDLE_TIMEOUT.as_secs()
+                    );
+                }
+                match tokio::time::timeout(
+                    WRITE_TIMEOUT,
+                    ws_write.send(WsMessage::Ping(Vec::new().into())),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => return Err(e.into()),
+                    Err(_) => anyhow::bail!(
+                        "sync ping timed out after {}s",
+                        WRITE_TIMEOUT.as_secs()
+                    ),
                 }
             }
         }
@@ -221,14 +278,19 @@ pub(crate) fn reconcile_receive_and_hydrate(
         return None;
     }
 
-    let before = guard.heads();
-
+    let mut reconcile_ok = true;
     if let Err(e) = doc_notes::reconcile(&mut guard, &notes.notes, &notes.unreadable_notes) {
         tracing::error!("Could not write notes into the sync document before merging: {e}");
+        reconcile_ok = false;
     }
     if let Err(e) = doc_tasks::reconcile(&mut guard, &tasks.tasks, &tasks.unreadable_tasks) {
         tracing::error!("Could not write tasks into the sync document before merging: {e}");
+        reconcile_ok = false;
     }
+
+    // Capture heads *after* local reconcile so a remote ACK carrying zero new
+    // changes during local typing doesn't trigger a full hydrate/re-render.
+    let before = guard.heads();
 
     if let Err(e) = guard.doc_mut().sync().receive_sync_message(state, msg) {
         tracing::warn!("could not apply an incoming sync message: {e}");
@@ -241,6 +303,10 @@ pub(crate) fn reconcile_receive_and_hydrate(
         return None;
     }
     guard.mark_pending_save();
+    if !reconcile_ok {
+        // Skip hydrating over local edits that failed to reconcile.
+        return None;
+    }
     Some((doc_notes::hydrate(&guard), doc_tasks::hydrate(&guard)))
 }
 
@@ -261,21 +327,26 @@ fn apply_incoming(
         return;
     };
 
-    // Assign (and dirty) only what actually changed: a vocabulary-only
-    // delivery moves the shared heads without touching notes or tasks, and
-    // an unconditional write would rewrite both mirrors and re-render every
-    // subscriber for nothing.
-    let mut notes_mut = notes.write();
-    if notes_mut.notes != n.notes || notes_mut.unreadable_notes != n.unreadable {
+    // Peek *before* taking `Signal::write()`: in Dioxus 0.7, dropping a write
+    // guard notifies every subscriber even when nothing was mutated.
+    let notes_changed = {
+        let cur = notes.peek();
+        cur.notes != n.notes || cur.unreadable_notes != n.unreadable
+    };
+    if notes_changed {
+        let mut notes_mut = notes.write();
         notes_mut.notes = n.notes;
         notes_mut.unreadable_notes = n.unreadable;
         notes_mut.dirty = true;
         notes_mut.doc_dirty = true;
     }
-    drop(notes_mut);
 
-    let mut tasks_mut = tasks.write();
-    if tasks_mut.tasks != t.tasks || tasks_mut.unreadable_tasks != t.unreadable {
+    let tasks_changed = {
+        let cur = tasks.peek();
+        cur.tasks != t.tasks || cur.unreadable_tasks != t.unreadable
+    };
+    if tasks_changed {
+        let mut tasks_mut = tasks.write();
         tasks_mut.tasks = t.tasks;
         tasks_mut.unreadable_tasks = t.unreadable;
         tasks_mut.dirty = true;

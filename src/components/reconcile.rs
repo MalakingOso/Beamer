@@ -9,12 +9,22 @@
 //! never go live naming a model that isn't on disk.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 
 use dioxus::core::{spawn_forever, Task};
 use dioxus::prelude::*;
 
 use super::apply::{self, Prepared};
 use super::{archive, catalog, fetch, Component, ComponentStore, GroupPlan, Kind, OnDisk};
+
+/// Serializes blocking filesystem steps (`sweep`, `extract`, `apply_group`,
+/// `verify_against`, and `cancel` cleanup) so cancelling and restarting a
+/// reconcile can never race an already-running `spawn_blocking` thread.
+static FS_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+fn fs_lock() -> &'static tokio::sync::Mutex<()> {
+    FS_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Status {
@@ -98,20 +108,32 @@ impl Components {
 
     /// Stop an in-flight download. Cancelling the task stops the stream (a
     /// flag alone would not: the next chunk would flip the row straight
-    /// back to Downloading). Partial files are deleted: restart, never resume.
+    /// back to Downloading). Partial files are deleted off the UI thread once
+    /// any in-flight blocking step releases `FS_LOCK`.
     pub fn cancel(mut self) {
         if let Some(task) = self.task.write().take() {
             task.cancel();
         }
-        for c in catalog() {
-            let dest = c.dest();
-            let part = match c.kind {
-                Kind::File { .. } => fetch::part_path(&dest),
-                Kind::Archive { .. } => archive::zip_part_path(&dest),
-                _ => continue,
-            };
-            let _ = std::fs::remove_file(part);
-        }
+        let parts: Vec<std::path::PathBuf> = catalog()
+            .iter()
+            .filter_map(|c| {
+                let dest = c.dest();
+                match c.kind {
+                    Kind::File { .. } => Some(fetch::part_path(&dest)),
+                    Kind::Archive { .. } => Some(archive::zip_part_path(&dest)),
+                    _ => None,
+                }
+            })
+            .collect();
+        spawn_forever(async move {
+            let _guard = fs_lock().lock().await;
+            let _ = tokio::task::spawn_blocking(move || {
+                for part in parts {
+                    let _ = std::fs::remove_file(part);
+                }
+            })
+            .await;
+        });
         let mut accepted = self.accepted.write();
         for (id, s) in self.status.write().iter_mut() {
             if !matches!(s, Status::Downloading { .. } | Status::Verifying) {
@@ -142,14 +164,17 @@ async fn reconcile(mut c: Components) {
         return;
     }
     c.status.write().clear();
-    let planned = tokio::task::spawn_blocking(move || {
-        for comp in catalog.iter().filter(|x| matches!(x.kind, Kind::Archive { .. })) {
-            archive::sweep(&comp.dest());
-        }
-        let state = ComponentStore::load_from(ComponentStore::default_path());
-        super::plan(catalog, &state, probe)
-    })
-    .await;
+    let planned = {
+        let _guard = fs_lock().lock().await;
+        tokio::task::spawn_blocking(move || {
+            for comp in catalog.iter().filter(|x| matches!(x.kind, Kind::Archive { .. })) {
+                archive::sweep(&comp.dest());
+            }
+            let state = ComponentStore::load_from(ComponentStore::default_path());
+            super::plan(catalog, &state, probe)
+        })
+        .await
+    };
     let plans = match planned {
         Ok(plans) => plans,
         Err(e) => {
@@ -227,7 +252,10 @@ async fn run_group(c: &mut Components, plan: GroupPlan) {
     }
     let members = plan.members.clone();
     let group_key = plan.group.map(|g| g.id());
-    let outcome = tokio::task::spawn_blocking(move || apply::apply_group(&plan, &prepared)).await;
+    let outcome = {
+        let _guard = fs_lock().lock().await;
+        tokio::task::spawn_blocking(move || apply::apply_group(&plan, &prepared)).await
+    };
     let failure = match outcome {
         Ok(Ok(())) => None,
         Ok(Err(e)) => Some(format!("{e:#}")),
@@ -256,7 +284,10 @@ async fn in_place(c: &mut Components, m: &'static Component) -> anyhow::Result<b
         return Ok(false);
     }
     c.set(m.id, Status::Verifying);
-    let ok = tokio::task::spawn_blocking(move || fetch::verify_against(&dest, size, sha256)).await??;
+    let ok = {
+        let _guard = fs_lock().lock().await;
+        tokio::task::spawn_blocking(move || fetch::verify_against(&dest, size, sha256)).await??
+    };
     c.clear(m.id);
     if !ok {
         tracing::warn!("{} is on disk but fails verification; it will be replaced", m.id);
@@ -277,6 +308,7 @@ async fn stage(c: &mut Components, m: &'static Component) -> anyhow::Result<Prep
             let zip = archive::zip_part_path(&dest);
             download_verified(c, m, url, sha256, size, &zip).await?;
             let staging = archive::staging_path(&dest);
+            let _guard = fs_lock().lock().await;
             tokio::task::spawn_blocking(move || {
                 if staging.exists() {
                     std::fs::remove_dir_all(&staging)?;
@@ -311,7 +343,10 @@ async fn download_verified(
     fetch::download(url, size, to, &mut progress).await?;
     c.set(m.id, Status::Verifying);
     let path = to.to_path_buf();
-    let ok = tokio::task::spawn_blocking(move || fetch::verify_against(&path, size, sha256)).await??;
+    let ok = {
+        let _guard = fs_lock().lock().await;
+        tokio::task::spawn_blocking(move || fetch::verify_against(&path, size, sha256)).await??
+    };
     if !ok {
         let _ = std::fs::remove_file(to);
         anyhow::bail!("download failed sha256 verification");

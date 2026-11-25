@@ -105,16 +105,20 @@ fn inject_via_clipboard(text: &str) -> Result<bool> {
     let saved = save_clipboard(&mut clipboard);
 
     tracing::info!("Clipboard: setting {} bytes of text", text.len());
-    if clipboard.set_text(text).is_err() {
-        anyhow::bail!("Failed to set clipboard text");
-    }
+    clipboard
+        .set_text(text)
+        .map_err(|e| anyhow::anyhow!("Failed to set clipboard text: {e}"))?;
 
     std::thread::sleep(std::time::Duration::from_millis(80));
     tracing::info!("Clipboard: sending Ctrl+V");
-    // `?` matters: a failed Ctrl+V must fall through to UIA, not report success.
-    send_ctrl_v()?;
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    // Always restore on Ctrl+V failure (e.g., UIPI-blocked elevated window) so
+    // the user's prior clipboard isn't destroyed before falling through to UIA.
+    let paste_res = send_ctrl_v();
+    if paste_res.is_ok() {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
     restore_clipboard(&mut clipboard, text, saved);
+    paste_res?;
     Ok(true)
 }
 
@@ -191,31 +195,25 @@ fn set_clipboard_linux(text: &str, clipboard: &mut Clipboard) -> Result<()> {
     Ok(())
 }
 
-/// Run a command with a hard timeout: wl-paste can hang forever on some GNOME
-/// compositor states, and wtype/ydotool share the wedged-helper hazard.
+/// Run a command with a hard timeout, draining stdout/stderr concurrently so
+/// children emitting >64 KiB (e.g. `wl-paste`) cannot deadlock on a full pipe.
 #[cfg(target_os = "linux")]
 pub(crate) fn run_with_timeout(
     cmd: &mut std::process::Command,
     timeout: std::time::Duration,
 ) -> std::io::Result<Option<std::process::Output>> {
     use std::io::Read;
-
-    let mut child = cmd
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
+    fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> Option<std::thread::JoinHandle<Vec<u8>>> {
+        pipe.map(|mut p| std::thread::spawn(move || { let mut b = Vec::new(); let _ = p.read_to_end(&mut b); b }))
+    }
+    let mut child = cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn()?;
+    let (out_r, err_r) = (drain(child.stdout.take()), drain(child.stderr.take()));
     let deadline = std::time::Instant::now() + timeout;
     loop {
         match child.try_wait()? {
             Some(status) => {
-                let mut stdout = Vec::new();
-                let mut stderr = Vec::new();
-                if let Some(mut out) = child.stdout.take() {
-                    let _ = out.read_to_end(&mut stdout);
-                }
-                if let Some(mut err) = child.stderr.take() {
-                    let _ = err.read_to_end(&mut stderr);
-                }
+                let stdout = out_r.and_then(|h| h.join().ok()).unwrap_or_default();
+                let stderr = err_r.and_then(|h| h.join().ok()).unwrap_or_default();
                 return Ok(Some(std::process::Output { status, stdout, stderr }));
             }
             None if std::time::Instant::now() >= deadline => {
@@ -264,8 +262,8 @@ fn verify_clipboard_contains(expected: &str) -> bool {
     }
 }
 
-/// Reap a forking `wl-copy` child (never waiting leaks a zombie). Polls for
-/// 500 ms instead of `wait()` so a foregrounded wl-copy can't block injection.
+/// Reap a forking `wl-copy` child (never waiting leaks a zombie). Polls briefly,
+/// then hands any still-running child to a background reaper thread.
 #[cfg(target_os = "linux")]
 pub(crate) fn reap_daemonized(mut child: std::process::Child, what: &str) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
@@ -273,14 +271,12 @@ pub(crate) fn reap_daemonized(mut child: std::process::Child, what: &str) {
         match child.try_wait() {
             Ok(Some(_)) => return,
             Ok(None) if std::time::Instant::now() >= deadline => {
-                tracing::debug!("{} did not exit within 500ms — leaving it running", what);
+                tracing::debug!("{} still running after 500ms — reaping in background", what);
+                let _ = std::thread::spawn(move || { let _ = child.wait(); });
                 return;
             }
             Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
-            Err(e) => {
-                tracing::debug!("Could not wait on {}: {}", what, e);
-                return;
-            }
+            Err(e) => { tracing::debug!("Could not wait on {}: {}", what, e); return; }
         }
     }
 }

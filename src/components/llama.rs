@@ -124,12 +124,53 @@ fn schtasks(args: &[&str]) -> Result<()> {
 
 #[cfg(target_os = "windows")]
 fn run_hidden(program: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
+    use std::io::Read;
     use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    std::process::Command::new(program)
+    const SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(15);
+
+    let mut child = std::process::Command::new(program)
         .args(args)
         .creation_flags(CREATE_NO_WINDOW)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let out_reader = child.stdout.take().map(|mut p| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = p.read_to_end(&mut buf);
+            buf
+        })
+    });
+    let err_reader = child.stderr.take().map(|mut p| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = p.read_to_end(&mut buf);
+            buf
+        })
+    });
+    let deadline = Instant::now() + SUBPROCESS_TIMEOUT;
+    loop {
+        match child.try_wait()? {
+            Some(status) => {
+                let stdout = out_reader.and_then(|h| h.join().ok()).unwrap_or_default();
+                let stderr = err_reader.and_then(|h| h.join().ok()).unwrap_or_default();
+                return Ok(std::process::Output { status, stdout, stderr });
+            }
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("{program} timed out after {}s", SUBPROCESS_TIMEOUT.as_secs()),
+                ));
+            }
+            None => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
 }
 
 #[cfg(test)]
