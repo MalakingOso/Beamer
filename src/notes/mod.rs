@@ -409,6 +409,11 @@ impl NoteStore {
         self.notes.iter().filter(|n| n.is_note() && !n.archived).any(|n| self.is_open(&n.id))
     }
 
+    /// How many active notes currently have a window (the tray item's count).
+    pub fn active_open_count(&self) -> usize {
+        self.notes.iter().filter(|n| n.is_note() && !n.archived).filter(|n| self.is_open(&n.id)).count()
+    }
+
     pub fn archive(&mut self, id: &str) {
         let Some(note) = self.touch(id) else { return };
         note.archived = true;

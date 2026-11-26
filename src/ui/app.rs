@@ -215,6 +215,7 @@ pub fn App() -> Element {
 
     app_menu::setup_menu_handlers(&items, window.clone(), current_page, last_injection, config, update_status, notes, tasks);
     app_menu::setup_notes_tray_label(&items, notes);
+    app_menu::setup_tray_status(&items, rec_state, config, update_status, last_injection);
     app_menu::setup_tray_click_handler(window.clone());
 
     let page = *current_page.read();

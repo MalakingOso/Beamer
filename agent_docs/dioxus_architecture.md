@@ -133,6 +133,20 @@ rather than `TrayMenuEvent` (see the comment in `app_menu.rs` above
 `use_tray_icon_event_handler` separately (`setup_tray_click_handler`). Both
 handlers live in `app_menu.rs`, not `app_setup.rs`.
 
+The menu is still a native muda menu, kept modern with data rather than
+custom drawing: two disabled header lines (recording state, hotkey hint),
+`IconMenuItem` glyphs, and live labels. `src/tray/labels.rs` holds the wording
+as pure, tested functions; `app_menu::setup_tray_status` and
+`setup_notes_tray_label` apply them from effects (update item text/icon/enabled,
+Paste Last disabled until a transcript exists, notes toggle eye/eye-slash).
+Glyphs are Phosphor icons pre-rendered to 32px violet PNGs in `assets/tray/`
+(`src/tray/glyphs.rs`), downscaled to 16px at startup (muda draws every
+Windows menu icon into a fixed 16x16 bitmap). `set_icon` leaks a bitmap
+inside muda, so icon swaps sit behind memos and run only when the glyph
+actually changes. Violet, not the #4B0082 accent: native menus
+follow the OS light/dark theme and the glyph must read on both. No `&` in a
+label (muda treats it as a mnemonic).
+
 ## Splash Window
 
 `app_splash::setup_splash` opens a small centered `VirtualDom`/window on

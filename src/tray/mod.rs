@@ -2,7 +2,11 @@
 //! registers the tray, `ui::app_menu` handles clicks, and on Linux
 //! `ui::linux_integration` swaps in the recording icon while recording.
 
-use muda::{Menu, MenuItem, PredefinedMenuItem};
+pub mod glyphs;
+pub mod labels;
+
+use glyphs::{icon as glyph_icon, Glyph};
+use muda::{IconMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use std::sync::OnceLock;
 use tray_icon::Icon;
 
@@ -12,32 +16,46 @@ static IDLE_ICON_RGBA: OnceLock<(Vec<u8>, u32, u32)> = OnceLock::new();
 #[cfg(target_os = "linux")]
 static RECORDING_ICON_RGBA: OnceLock<(Vec<u8>, u32, u32)> = OnceLock::new();
 
-/// Menu item handles for matching tray menu events.
+/// Menu item handles for matching tray menu events and updating live labels.
 #[derive(Clone)]
 pub struct TrayMenuItems {
-    pub home: MenuItem,
-    pub history: MenuItem,
-    pub vocab: MenuItem,
-    pub settings: MenuItem,
-    pub hide_show_notes: MenuItem,
-    pub paste_last: MenuItem,
-    pub check_updates: MenuItem,
-    pub quit: MenuItem,
+    /// Disabled header lines: recording state, and how to start dictating.
+    pub status: MenuItem,
+    pub hint: MenuItem,
+    pub home: IconMenuItem,
+    pub history: IconMenuItem,
+    pub vocab: IconMenuItem,
+    pub settings: IconMenuItem,
+    pub hide_show_notes: IconMenuItem,
+    pub paste_last: IconMenuItem,
+    pub check_updates: IconMenuItem,
+    pub quit: IconMenuItem,
+}
+
+fn entry(text: &str, enabled: bool, glyph: Glyph) -> IconMenuItem {
+    IconMenuItem::new(text, enabled, glyph_icon(glyph), None)
 }
 
 pub fn build_tray_menu() -> (Menu, TrayMenuItems) {
     let menu = Menu::new();
 
-    let home = MenuItem::new("Home", true, None);
-    let history = MenuItem::new("History", true, None);
-    let vocab = MenuItem::new("Vocab", true, None);
-    let settings = MenuItem::new("Settings", true, None);
-    let hide_show_notes = MenuItem::new("Hide All Notes", true, None);
-    let paste_last = MenuItem::new("Paste Last Transcript", true, None);
-    let check_updates = MenuItem::new("Check for Updates", true, None);
-    let quit = MenuItem::new("Quit", true, None);
+    let status = MenuItem::new(labels::status_text(Default::default()), false, None);
+    let hint = MenuItem::new("Dictation hotkey", false, None);
+    let home = entry("Home", true, Glyph::Home);
+    let history = entry("History", true, Glyph::History);
+    let vocab = entry("Vocab", true, Glyph::Vocab);
+    let settings = entry("Settings", true, Glyph::Settings);
+    let (notes_text, notes_glyph) = labels::notes_item(0);
+    let hide_show_notes = entry(&notes_text, true, notes_glyph);
+    // Disabled until the first transcript exists (see `ui::app_menu`).
+    let paste_last = entry("Paste Last Transcript", false, Glyph::Paste);
+    let check_updates = entry("Check for Updates", true, Glyph::Update);
+    let quit = entry("Quit", true, Glyph::Quit);
 
     if let Err(e) = menu.append_items(&[
+        &status,
+        &hint,
+        &PredefinedMenuItem::separator(),
         &home,
         &history,
         &vocab,
@@ -53,6 +71,8 @@ pub fn build_tray_menu() -> (Menu, TrayMenuItems) {
     }
 
     let items = TrayMenuItems {
+        status,
+        hint,
         home,
         history,
         vocab,

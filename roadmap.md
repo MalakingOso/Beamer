@@ -23,6 +23,8 @@ Linux-only edits have never been compiled:
 - `ui/app_day_end.rs`: the Linux branch of `show_card` (a plain
   `show_notification` with the summary text) and the `cfg` gating around the
   card window have never been compiled on Linux
+- `tray/mod.rs`, `tray/glyphs.rs`: the tray menu's `IconMenuItem`s and header
+  lines (GTK/appindicator side of muda); only the Windows build has run them
 
 ## Day-end card: come back to this
 

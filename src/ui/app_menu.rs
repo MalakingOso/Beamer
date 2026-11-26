@@ -1,7 +1,9 @@
-//! What the tray does: menu-item actions, the "Hide/Show All Notes" label, and
+//! What the tray does: menu-item actions, the live labels (status header,
+//! hotkey hint, notes toggle, update item, paste-last enablement), and
 //! left-click to toggle the main window. The menu itself is built by
-//! `tray::build_tray_menu` (via `app_setup::setup_tray_menu`). Each function is
-//! a hook called once from `App()`'s render body, in a fixed order.
+//! `tray::build_tray_menu` (via `app_setup::setup_tray_menu`); wording lives in
+//! `tray::labels`. Each function is a hook called once from `App()`'s render
+//! body, in a fixed order.
 
 use dioxus::desktop::trayicon::{MouseButton, MouseButtonState, TrayIconEvent};
 use dioxus::desktop::{use_muda_event_handler, use_tray_icon_event_handler};
@@ -11,7 +13,9 @@ use dioxus::prelude::*;
 use crate::config::Config;
 use crate::notes::task_store::TaskStore;
 use crate::notes::NoteStore;
-use crate::tray::TrayMenuItems;
+use crate::orchestrator::RecordingState;
+use crate::tray::glyphs::icon as glyph_icon;
+use crate::tray::{labels, TrayMenuItems};
 use crate::update::{self, UpdateStatus};
 use super::app::Page;
 
@@ -72,7 +76,7 @@ pub(super) fn setup_menu_handlers(
                 notes.write().set_all_open(!hide);
             } else if event.id == paste_last_id {
                 let text = last_injection.read().clone();
-                if text != "No injection yet" && !text.is_empty() {
+                if labels::has_last_injection(&text) {
                     let backends = config.read().injection.backends.clone();
                     let paste_shortcut = config.read().injection.paste_shortcut.clone();
                     spawn(async move {
@@ -82,24 +86,28 @@ pub(super) fn setup_menu_handlers(
                     });
                 }
             } else if event.id == check_updates_id {
-                spawn(async move {
-                    update_status.set(UpdateStatus::Checking);
-                    let result = tokio::task::spawn_blocking(update::check_for_update_blocking).await;
-                    match result {
-                        Ok(Ok(Some(info))) => {
-                            update_status.set(UpdateStatus::Available { version: info.version });
+                // A found (or downloaded) update is installed from Settings;
+                // re-checking would only flip the status back to Checking.
+                if !labels::update_click_opens_only(&update_status.peek()) {
+                    spawn(async move {
+                        update_status.set(UpdateStatus::Checking);
+                        let result = tokio::task::spawn_blocking(update::check_for_update_blocking).await;
+                        match result {
+                            Ok(Ok(Some(info))) => {
+                                update_status.set(UpdateStatus::Available { version: info.version });
+                            }
+                            Ok(Ok(None)) => {
+                                update_status.set(UpdateStatus::Idle);
+                            }
+                            Ok(Err(e)) => {
+                                update_status.set(UpdateStatus::Error(e.to_string()));
+                            }
+                            Err(e) => {
+                                update_status.set(UpdateStatus::Error(format!("Task panicked: {e}")));
+                            }
                         }
-                        Ok(Ok(None)) => {
-                            update_status.set(UpdateStatus::Idle);
-                        }
-                        Ok(Err(e)) => {
-                            update_status.set(UpdateStatus::Error(e.to_string()));
-                        }
-                        Err(e) => {
-                            update_status.set(UpdateStatus::Error(format!("Task panicked: {e}")));
-                        }
-                    }
-                });
+                    });
+                }
                 current_page.set(Page::Settings);
                 show_main_window(&window);
             }
@@ -110,12 +118,55 @@ pub(super) fn setup_menu_handlers(
 /// Keep the tray item's label ahead of its action: "Hide All Notes" while any
 /// window is open, "Show All Notes" once all are closed. Reads `notes`, so it
 /// follows closes from anywhere (board toggle, per-window close, tray itself).
+///
+/// The effect reads a memo of the open count, not `notes`, so it runs only when
+/// the count changes: `set_icon` makes a fresh bitmap that muda never frees,
+/// and `notes` is written on every edit.
 pub(super) fn setup_notes_tray_label(items: &TrayMenuItems, notes: Signal<NoteStore>) {
     let item = items.hide_show_notes.clone();
+    let open_count = use_memo(move || notes.read().active_open_count());
     use_effect(move || {
-        let any_open = notes.read().any_active_open();
-        item.set_text(if any_open { "Hide All Notes" } else { "Show All Notes" });
+        let (text, glyph) = labels::notes_item(*open_count.read());
+        item.set_text(text);
+        item.set_icon(glyph_icon(glyph));
     });
+}
+
+/// Keep the header, hotkey hint, update item and paste-last enablement in step
+/// with app state. One effect each, so a signal change touches only its own item.
+pub(super) fn setup_tray_status(
+    items: &TrayMenuItems,
+    rec_state: Signal<RecordingState>,
+    config: Signal<Config>,
+    update_status: Signal<UpdateStatus>,
+    last_injection: Signal<String>,
+) {
+    let status = items.status.clone();
+    use_effect(move || status.set_text(labels::status_text(*rec_state.read())));
+
+    let hint = items.hint.clone();
+    use_effect(move || {
+        let config = config.read();
+        let recording = &config.recording;
+        hint.set_text(labels::hotkey_hint(&recording.hotkey, &recording.mode));
+    });
+
+    let check_updates = items.check_updates.clone();
+    use_effect({
+        let check_updates = check_updates.clone();
+        move || {
+            let (text, _, enabled) = labels::update_item(&update_status.read());
+            check_updates.set_text(text);
+            check_updates.set_enabled(enabled);
+        }
+    });
+    // Its own memo: the glyph changes far less often than the status, and each
+    // `set_icon` leaks a bitmap inside muda.
+    let update_glyph = use_memo(move || labels::update_item(&update_status.read()).1);
+    use_effect(move || check_updates.set_icon(glyph_icon(*update_glyph.read())));
+
+    let paste_last = items.paste_last.clone();
+    use_effect(move || paste_last.set_enabled(labels::has_last_injection(&last_injection.read())));
 }
 
 /// Left-click the tray icon toggles the main window.
